@@ -4,6 +4,8 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -18,16 +20,24 @@ const SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.
 const STOREFRONT_TOKEN = process.env.SHOPIFY_STOREFRONT_TOKEN || '8af29dd8b68e0bcfe5f9f99a86ebf1a3';
 const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const API_VERSION = '2023-04';
-const CLIENT_ID = 'b5878c27-621a-40d5-b6b6-43ce36dfa4bf'; // From the URL you provided
 
-// Shopify API URLs
-const STOREFRONT_API_URL = `https://${SHOP_DOMAIN}/api/${API_VERSION}/graphql.json`;
-const ADMIN_API_URL = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`;
-const CUSTOMER_ACCOUNT_API_URL = 'https://account.metallbude.com';
+// Email configuration
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_PASS = process.env.EMAIL_PASS;
+const EMAIL_SERVICE = process.env.EMAIL_SERVICE || 'gmail';
+
+// Create email transporter
+const transporter = nodemailer.createTransport({
+  service: EMAIL_SERVICE,
+  auth: {
+    user: EMAIL_USER,
+    pass: EMAIL_PASS
+  }
+});
 
 // Store for verification codes and sessions
-const verificationCodes = {};
 const pendingSessions = {};
+const verifiedCustomers = {};
 
 // Request one-time code endpoint
 app.post('/auth/request-code', async (req, res) => {
@@ -38,13 +48,27 @@ app.post('/auth/request-code', async (req, res) => {
   }
 
   try {
-    // Step 1: Check if the customer exists
-    let customerExists = false;
-    let customerId = null;
+    // Generate a session ID for this verification attempt
+    const sessionId = uuidv4();
+    
+    // Generate a verification code
+    const verificationCode = generateVerificationCode();
+    
+    // Store session data
+    pendingSessions[sessionId] = {
+      email,
+      expires: Date.now() + 15 * 60 * 1000, // 15 minutes expiration
+      verificationCode: verificationCode
+    };
+    
+    console.log(`Generated verification code for ${email}: ${verificationCode}`);
+    
+    // Check if customer exists in Shopify
+    let isNewCustomer = true;
     
     if (ADMIN_API_TOKEN) {
       try {
-        const customerResponse = await fetch(ADMIN_API_URL, {
+        const customerResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -70,136 +94,38 @@ app.post('/auth/request-code', async (req, res) => {
         });
 
         const customerData = await customerResponse.json();
-        console.log('Customer lookup response:', JSON.stringify(customerData, null, 2));
         
         if (!customerData.errors) {
           const customers = customerData.data?.customers?.edges || [];
           if (customers.length > 0) {
-            customerExists = true;
-            customerId = customers[0].node.id;
-            console.log(`Customer exists with ID: ${customerId}`);
-          } else {
-            console.log(`No customer found with email: ${email}`);
+            isNewCustomer = false;
           }
-        } else {
-          console.error('Error looking up customer:', customerData.errors);
         }
       } catch (error) {
-        console.error('Exception during customer lookup:', error);
+        console.error('Error checking customer:', error);
       }
     }
     
-    // Step 2: If customer doesn't exist, create one
-    if (!customerExists && ADMIN_API_TOKEN) {
-      console.log(`Creating new customer with email: ${email}`);
-      
-      try {
-        const createCustomerResponse = await fetch(ADMIN_API_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': ADMIN_API_TOKEN,
-          },
-          body: JSON.stringify({
-            query: `
-              mutation customerCreate($input: CustomerInput!) {
-                customerCreate(input: $input) {
-                  customer {
-                    id
-                    email
-                  }
-                  userErrors {
-                    field
-                    message
-                  }
-                }
-              }
-            `,
-            variables: {
-              input: {
-                email: email,
-                acceptsMarketing: true,
-              },
-            },
-          }),
-        });
-
-        const createData = await createCustomerResponse.json();
-        console.log('Customer creation response:', JSON.stringify(createData, null, 2));
-        
-        if (createData.errors) {
-          console.error('GraphQL errors during customer creation:', createData.errors);
-        } else {
-          const userErrors = createData.data?.customerCreate?.userErrors || [];
-          if (userErrors.length > 0) {
-            console.error('User errors during customer creation:', userErrors);
-            const alreadyExistsError = userErrors.some(err => 
-              err.message?.includes('already exists') || 
-              err.message?.includes('bereits existiert')
-            );
-            
-            if (alreadyExistsError) {
-              console.log('Customer already exists, continuing with the flow');
-              customerExists = true;
-            }
-          } else {
-            customerId = createData.data?.customerCreate?.customer?.id;
-            if (customerId) {
-              customerExists = true;
-              console.log(`New customer created with ID: ${customerId}`);
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Exception during customer creation:', error);
-      }
-    }
-
-    // Step 3: Send the recovery email
+    // Send verification email
     try {
-      const response = await fetch('https://customer-account.shopify.com/account/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Storefront-Access-Token': STOREFRONT_TOKEN,
-        },
-        body: JSON.stringify({
-          email,
-          shop: SHOP_DOMAIN,
-        }),
-      });
-
-      const data = await response.json();
-      console.log('Login email trigger response:', JSON.stringify(data, null, 2));
-
-      if (!response.ok || data.errors) {
-        return res.status(400).json({ 
-          success: false, 
-          error: 'Fehler beim Anfordern des Login-Codes',
-          detail: data,
-        });
-      }
-
-      const sessionId = crypto.randomUUID();
-      pendingSessions[sessionId] = {
-        email,
-        expires: Date.now() + 15 * 60 * 1000,
-      };
-
-      res.json({
-        success: true,
-        isNewCustomer: !customerExists,
-        sessionId,
-      });
-    } catch (error) {
-      console.error('Exception during recovery:', error);
+      await sendVerificationEmail(email, verificationCode, isNewCustomer);
+      console.log(`Verification email sent to ${email}`);
+    } catch (emailError) {
+      console.error('Error sending email:', emailError);
       return res.status(500).json({ 
         success: false, 
-        error: `Fehler beim Senden des Codes: ${error.message}` 
+        error: `Fehler beim Senden der E-Mail: ${emailError.message}` 
       });
     }
+    
+    // Return success with session ID
+    res.json({ 
+      success: true,
+      isNewCustomer: isNewCustomer,
+      sessionId: sessionId
+    });
   } catch (error) {
-    console.error('General error in request-code endpoint:', error);
+    console.error('Error in request-code endpoint:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -208,46 +134,40 @@ app.post('/auth/request-code', async (req, res) => {
 app.post('/auth/verify-code', async (req, res) => {
   const { email, code, sessionId } = req.body;
 
-  if (!email || !code) {
-    return res.status(400).json({ success: false, error: 'Email und Code sind erforderlich' });
+  if (!email || !code || !sessionId) {
+    return res.status(400).json({ success: false, error: 'Email, Code und Session-ID sind erforderlich' });
   }
 
   try {
-    // Check if we have a pending session
-    if (sessionId && pendingSessions[sessionId]) {
-      if (pendingSessions[sessionId].email !== email) {
-        return res.status(400).json({ 
-          success: false, 
-          error: 'Ungültige Sitzung' 
-        });
-      }
-      
-      if (Date.now() > pendingSessions[sessionId].expires) {
-        delete pendingSessions[sessionId];
-        return res.status(400).json({ 
-          success: false, 
-          error: 'Sitzung abgelaufen. Bitte fordere einen neuen Code an' 
-        });
-      }
+    // Check if session exists
+    const session = pendingSessions[sessionId];
+    if (!session) {
+      return res.status(400).json({ success: false, error: 'Ungültige oder abgelaufene Sitzung' });
     }
     
-    // In a real implementation, we would verify the code against Shopify's system
-    // For now, we'll simulate a successful verification
+    // Check if session is expired
+    if (Date.now() > session.expires) {
+      delete pendingSessions[sessionId];
+      return res.status(400).json({ success: false, error: 'Sitzung abgelaufen' });
+    }
     
-    // Get customer data from Shopify
-    let customer = {
-      id: `gid://shopify/Customer/${Date.now()}`,
-      firstName: '',
-      lastName: '',
-      email: email,
-      phone: null,
-      defaultAddress: null,
-      addresses: { edges: [] }
-    };
+    // Check if email matches
+    if (session.email !== email) {
+      return res.status(400).json({ success: false, error: 'E-Mail stimmt nicht mit der Sitzung überein' });
+    }
+    
+    // Check if code matches
+    if (session.verificationCode !== code) {
+      return res.status(400).json({ success: false, error: 'Ungültiger Code' });
+    }
+    
+    // Code is valid - create or get customer
+    let customer = null;
     
     if (ADMIN_API_TOKEN) {
+      // First, check if customer exists
       try {
-        const customerResponse = await fetch(ADMIN_API_URL, {
+        const customerResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -283,44 +203,155 @@ app.post('/auth/verify-code', async (req, res) => {
         });
 
         const customerData = await customerResponse.json();
-        console.log('Customer lookup response:', JSON.stringify(customerData, null, 2));
         
         if (!customerData.errors) {
           const customers = customerData.data?.customers?.edges || [];
           if (customers.length > 0) {
             customer = customers[0].node;
-            console.log(`Found customer: ${customer.id}`);
-          } else {
-            console.log(`No customer found with email: ${email}`);
           }
-        } else {
-          console.error('Error looking up customer:', customerData.errors);
         }
       } catch (error) {
-        console.error('Exception during customer lookup:', error);
+        console.error('Error getting customer:', error);
+      }
+      
+      // If customer doesn't exist, create one
+      if (!customer) {
+        try {
+          const createResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': ADMIN_API_TOKEN,
+            },
+            body: JSON.stringify({
+              query: `
+                mutation customerCreate($input: CustomerInput!) {
+                  customerCreate(input: $input) {
+                    customer {
+                      id
+                      firstName
+                      lastName
+                      email
+                      phone
+                    }
+                    userErrors {
+                      field
+                      message
+                    }
+                  }
+                }
+              `,
+              variables: {
+                input: {
+                  email: email,
+                  acceptsMarketing: true,
+                },
+              },
+            }),
+          });
+
+          const createData = await createResponse.json();
+          
+          if (!createData.errors && !createData.data?.customerCreate?.userErrors?.length) {
+            customer = createData.data?.customerCreate?.customer;
+          }
+        } catch (error) {
+          console.error('Error creating customer:', error);
+        }
       }
     }
     
-    // Clean up the session
-    if (sessionId) {
-      delete pendingSessions[sessionId];
+    // If we still don't have a customer, create a placeholder
+    if (!customer) {
+      customer = {
+        id: `gid://shopify/Customer/${Date.now()}`,
+        firstName: '',
+        lastName: '',
+        email: email,
+        phone: null,
+        defaultAddress: null
+      };
     }
     
-    // Simulate successful verification
-    const simulatedToken = `simulated_token_${Date.now()}`;
+    // Generate an access token
+    const accessToken = generateAccessToken();
     
-    // Return success with customer data
+    // Store the verified customer
+    verifiedCustomers[accessToken] = {
+      customer,
+      expires: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days expiration
+    };
+    
+    // Clean up the session
+    delete pendingSessions[sessionId];
+    
+    // Return success with customer data and token
     res.json({
       success: true,
-      accessToken: simulatedToken,
+      accessToken: accessToken,
       customer: customer
     });
   } catch (error) {
-    console.error('Error verifying code:', error);
+    console.error('Error in verify-code endpoint:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// Helper function to generate a verification code
+function generateVerificationCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// Helper function to generate an access token
+function generateAccessToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Helper function to send verification email
+async function sendVerificationEmail(email, code, isNewCustomer) {
+  const mailOptions = {
+    from: EMAIL_USER,
+    to: email,
+    subject: 'Dein Anmeldecode für Metallbude',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 5px;">
+        <div style="text-align: center; margin-bottom: 20px;">
+          <img src="https://metallbude.com/wp-content/uploads/2023/03/metallbude-logo.png" alt="Metallbude Logo" style="max-width: 200px;">
+        </div>
+        
+        <h2 style="color: #333; text-align: center;">Dein Anmeldecode</h2>
+        
+        <p style="color: #666; font-size: 16px; line-height: 1.5;">
+          ${isNewCustomer ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' : 'Willkommen zurück bei Metallbude!'}
+        </p>
+        
+        <p style="color: #666; font-size: 16px; line-height: 1.5;">
+          Hier ist dein Anmeldecode:
+        </p>
+        
+        <div style="background-color: #f4f4f4; padding: 15px; font-size: 24px; text-align: center; letter-spacing: 5px; font-weight: bold; margin: 20px 0; border-radius: 5px;">
+          ${code}
+        </div>
+        
+        <p style="color: #666; font-size: 16px; line-height: 1.5;">
+          Dieser Code ist 15 Minuten gültig.
+        </p>
+        
+        <p style="color: #666; font-size: 14px; margin-top: 30px; text-align: center;">
+          Falls du diese E-Mail nicht angefordert hast, kannst du sie ignorieren.
+        </p>
+        
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eaeaea; text-align: center; color: #999; font-size: 12px;">
+          &copy; ${new Date().getFullYear()} Metallbude. Alle Rechte vorbehalten.
+        </div>
+      </div>
+    `
+  };
+
+  return transporter.sendMail(mailOptions);
+}
+
 app.listen(PORT, () => {
   console.log(`✅ Backend is live on port ${PORT}`);
+  console.log(`Email configuration: ${EMAIL_USER ? 'Set' : 'Not set'}`);
 });
