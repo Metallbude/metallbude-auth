@@ -311,52 +311,35 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
-    // Enhanced payload with special property names that might get mapped differently
+    // Use a different endpoint that might handle properties differently
     const klaviyoPayload = {
-      data: {
-        type: 'event',
-        attributes: {
-          profile: {
-            email,
-            first_name: firstName,
-            last_name: lastName
-          },
-          metric: {
-            name: 'one_time_code_requested'
-          },
-          properties: {
-            // Try all possible variations of the property name
-            verification_code: code,
-            code: code,
-            verificationCode: code,
-            otp: code,
-            // Special property names that might get mapped differently
-            '__verification_code': code,
-            '$verification_code': code,
-            '_verification_code': code,
-            // Include it as a top-level property name too
-            'verification_code_top': code,
-            // Other properties
-            welcome_message: isNewCustomer
-              ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
-              : 'Willkommen zurück bei Metallbude!',
-            is_new_customer: isNewCustomer,
-            formatted_code: code.split('').join(' ')
-          }
-        }
+      token: KLAVIYO_PUBLIC_KEY, // You'll need your public key for this approach
+      event: 'one_time_code_requested',
+      customer_properties: {
+        $email: email,
+        $first_name: firstName,
+        $last_name: lastName
+      },
+      properties: {
+        verification_code: code,
+        verificationCode: code,
+        code: code,
+        otp: code,
+        formatted_code: code.split('').join(' '),
+        welcome_message: isNewCustomer
+          ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
+          : 'Willkommen zurück bei Metallbude!',
+        is_new_customer: isNewCustomer
       }
     };
     
-    console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
+    console.log('📦 Klaviyo track event payload:', JSON.stringify(klaviyoPayload, null, 2));
     
-    // Make the API request with improved error handling
-    const response = await fetch('https://a.klaviyo.com/api/events/', {
+    // Use the client-side track endpoint
+    const response = await fetch('https://a.klaviyo.com/api/track', {
       method: 'POST',
       headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_PRIVATE_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2023-02-22',
-        'Accept': 'application/json'
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify(klaviyoPayload)
     });
@@ -389,3 +372,4 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     return false;
   }
 }
+
