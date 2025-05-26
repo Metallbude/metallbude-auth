@@ -72,5 +72,5 @@ app.post('/auth/request-code', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Backend is running at http://localhost:${PORT}`);
+  console.log(`✅ Backend is live at https://metallbude-auth.onrender.com`);
 });
