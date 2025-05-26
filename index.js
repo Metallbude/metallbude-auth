@@ -18,7 +18,7 @@ app.use(bodyParser.json());
 const SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
 const STOREFRONT_TOKEN = process.env.SHOPIFY_STOREFRONT_TOKEN || '8af29dd8b68e0bcfe5f9f99a86ebf1a3';
 const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-const API_VERSION = '2023-04';
+const API_VERSION = '2023-10'; // Updated to latest version
 
 // MailerSend configuration
 const MAILERSEND_API_KEY = process.env.MAILERSEND_API_KEY;
@@ -157,6 +157,7 @@ app.post('/auth/verify-code', async (req, res) => {
     
     // Code is valid - create or get customer
     let customer = null;
+    let shopifyCustomerAccessToken = null;
     
     if (ADMIN_API_TOKEN) {
       // First, check if customer exists
@@ -185,6 +186,33 @@ app.post('/auth/verify-code', async (req, res) => {
                         country
                         zip
                       }
+                      addresses {
+                        id
+                        address1
+                        address2
+                        city
+                        country
+                        firstName
+                        lastName
+                        phone
+                        zip
+                      }
+                      orders(first: 5) {
+                        edges {
+                          node {
+                            id
+                            name
+                            processedAt
+                            totalPriceSet {
+                              shopMoney {
+                                amount
+                                currencyCode
+                              }
+                            }
+                            fulfillmentStatus
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -202,6 +230,47 @@ app.post('/auth/verify-code', async (req, res) => {
           const customers = customerData.data?.customers?.edges || [];
           if (customers.length > 0) {
             customer = customers[0].node;
+            
+            // Generate a Shopify customer access token
+            try {
+              const tokenResponse = await fetch(`https://${SHOP_DOMAIN}/api/${API_VERSION}/graphql.json`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Shopify-Storefront-Access-Token': STOREFRONT_TOKEN,
+                },
+                body: JSON.stringify({
+                  query: `
+                    mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+                      customerAccessTokenCreate(input: $input) {
+                        customerAccessToken {
+                          accessToken
+                          expiresAt
+                        }
+                        customerUserErrors {
+                          code
+                          field
+                          message
+                        }
+                      }
+                    }
+                  `,
+                  variables: {
+                    input: {
+                      email: email,
+                      password: generateTemporaryPassword(email)
+                    }
+                  }
+                }),
+              });
+              
+              const tokenData = await tokenResponse.json();
+              if (tokenData.data?.customerAccessTokenCreate?.customerAccessToken?.accessToken) {
+                shopifyCustomerAccessToken = tokenData.data.customerAccessTokenCreate.customerAccessToken.accessToken;
+              }
+            } catch (tokenError) {
+              console.error('Error generating customer access token:', tokenError);
+            }
           }
         }
       } catch (error) {
@@ -211,6 +280,8 @@ app.post('/auth/verify-code', async (req, res) => {
       // If customer doesn't exist, create one
       if (!customer) {
         try {
+          const tempPassword = generateTemporaryPassword(email);
+          
           const createResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
             method: 'POST',
             headers: {
@@ -238,6 +309,7 @@ app.post('/auth/verify-code', async (req, res) => {
               variables: {
                 input: {
                   email: email,
+                  password: tempPassword,
                   acceptsMarketing: true,
                 },
               },
@@ -248,6 +320,47 @@ app.post('/auth/verify-code', async (req, res) => {
           
           if (!createData.errors && !createData.data?.customerCreate?.userErrors?.length) {
             customer = createData.data?.customerCreate?.customer;
+            
+            // Generate a Shopify customer access token for the new customer
+            try {
+              const tokenResponse = await fetch(`https://${SHOP_DOMAIN}/api/${API_VERSION}/graphql.json`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Shopify-Storefront-Access-Token': STOREFRONT_TOKEN,
+                },
+                body: JSON.stringify({
+                  query: `
+                    mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+                      customerAccessTokenCreate(input: $input) {
+                        customerAccessToken {
+                          accessToken
+                          expiresAt
+                        }
+                        customerUserErrors {
+                          code
+                          field
+                          message
+                        }
+                      }
+                    }
+                  `,
+                  variables: {
+                    input: {
+                      email: email,
+                      password: tempPassword
+                    }
+                  }
+                }),
+              });
+              
+              const tokenData = await tokenResponse.json();
+              if (tokenData.data?.customerAccessTokenCreate?.customerAccessToken?.accessToken) {
+                shopifyCustomerAccessToken = tokenData.data.customerAccessTokenCreate.customerAccessToken.accessToken;
+              }
+            } catch (tokenError) {
+              console.error('Error generating customer access token:', tokenError);
+            }
           }
         } catch (error) {
           console.error('Error creating customer:', error);
@@ -273,6 +386,7 @@ app.post('/auth/verify-code', async (req, res) => {
     // Store the verified customer
     verifiedCustomers[accessToken] = {
       customer,
+      shopifyCustomerAccessToken,
       expires: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days expiration
     };
     
@@ -283,12 +397,40 @@ app.post('/auth/verify-code', async (req, res) => {
     res.json({
       success: true,
       accessToken: accessToken,
+      shopifyCustomerAccessToken: shopifyCustomerAccessToken,
       customer: customer
     });
   } catch (error) {
     console.error('Error in verify-code endpoint:', error);
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// Get customer profile endpoint
+app.get('/customer/profile', async (req, res) => {
+  const accessToken = req.headers.authorization?.split(' ')[1];
+  
+  if (!accessToken) {
+    return res.status(401).json({ success: false, error: 'Authorization token required' });
+  }
+  
+  const verifiedCustomer = verifiedCustomers[accessToken];
+  
+  if (!verifiedCustomer) {
+    return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+  }
+  
+  if (Date.now() > verifiedCustomer.expires) {
+    delete verifiedCustomers[accessToken];
+    return res.status(401).json({ success: false, error: 'Token expired' });
+  }
+  
+  // Return the customer profile
+  res.json({
+    success: true,
+    customer: verifiedCustomer.customer,
+    shopifyCustomerAccessToken: verifiedCustomer.shopifyCustomerAccessToken
+  });
 });
 
 // Helper function to generate a verification code
@@ -299,6 +441,11 @@ function generateVerificationCode() {
 // Helper function to generate an access token
 function generateAccessToken() {
   return crypto.randomBytes(32).toString('hex');
+}
+
+// Helper function to generate a temporary password for Shopify customers
+function generateTemporaryPassword(email) {
+  return crypto.createHash('sha256').update(email + Date.now().toString()).digest('hex').substring(0, 20);
 }
 
 // Helper function to send verification email using MailerSend
