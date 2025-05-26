@@ -375,8 +375,13 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     }
 
     // Log successful response
-    const responseData = await response.json();
-    console.log('✅ MailerSend API response:', JSON.stringify(responseData, null, 2));
+    let responseData = {};
+    try {
+      responseData = await response.json();
+      console.log('✅ MailerSend API response:', JSON.stringify(responseData, null, 2));
+    } catch (e) {
+      console.log('✅ MailerSend response had no JSON body or malformed content.');
+    }
     console.log(`📬 Verification email sent to ${email} with code ${code}`);
     return true;
   } catch (error) {
