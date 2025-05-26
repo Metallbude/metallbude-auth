@@ -311,10 +311,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
-    // Make sure the code is a string
-    const codeString = String(code);
-    
-    // Create payload with the verification code in multiple formats
+    // Structure the payload to match the template's expectations
     const klaviyoPayload = {
       data: {
         type: 'event',
@@ -327,13 +324,11 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
           metric: {
             name: 'one_time_code_requested'
           },
+          // Add verification_code directly to the attributes
+          verification_code: code,
+          // Keep properties for backward compatibility
           properties: {
-            // Include the code in multiple formats to ensure template compatibility
-            verification_code: codeString,
-            code: codeString,
-            // Add the code directly at the root level for easier template access
-            $verification_code: codeString,
-            $code: codeString,
+            verification_code: code,
             welcome_message: isNewCustomer
               ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
               : 'Willkommen zurück bei Metallbude!',
@@ -354,13 +349,9 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
       body: JSON.stringify(klaviyoPayload)
     });
 
-    // Log the full response for debugging
-    const responseText = await response.text();
-    console.log(`Klaviyo API response status: ${response.status}`);
-    console.log(`Klaviyo API response body: ${responseText}`);
-
     if (!response.ok) {
-      throw new Error(`Klaviyo API error: ${response.status} - ${responseText}`);
+      const errorBody = await response.text();
+      throw new Error(`Klaviyo API error: ${errorBody}`);
     }
 
     console.log(`📬 Klaviyo one_time_code_requested event triggered for ${email}`);
@@ -370,3 +361,4 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     return false;
   }
 }
+
