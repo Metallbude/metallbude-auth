@@ -23,13 +23,12 @@ const API_VERSION = '2023-04';
 
 // Klaviyo configuration
 const KLAVIYO_PRIVATE_KEY = process.env.KLAVIYO_PRIVATE_KEY;
-const KLAVIYO_TEMPLATE_NAME = 'OneTimeCode'; // The name of your template in Klaviyo
 
 // Initialize Klaviyo if API key is available
-let klaviyo = null;
+let klaviyoClient = null;
 if (KLAVIYO_PRIVATE_KEY) {
-  klaviyo = new Klaviyo({
-    privateKey: KLAVIYO_PRIVATE_KEY
+  klaviyoClient = new Klaviyo({
+    apiKey: KLAVIYO_PRIVATE_KEY
   });
   console.log('Klaviyo initialized with private key');
 }
@@ -314,35 +313,84 @@ function generateAccessToken() {
 // Helper function to send verification email using Klaviyo
 async function sendVerificationEmail(email, code, isNewCustomer, firstName, lastName) {
   // If Klaviyo is available, use it to send the email
-  if (klaviyo) {
+  if (klaviyoClient) {
     try {
-      // Create a profile in Klaviyo (this will update if it already exists)
-      await klaviyo.profiles.create({
-        email: email,
-        firstName: firstName,
-        lastName: lastName,
-        properties: {
+      // Track an event in Klaviyo
+      await klaviyoClient.track({
+        event: 'Verification Code Requested',
+        customer_properties: {
+          $email: email,
+          $first_name: firstName || '',
+          $last_name: lastName || '',
           isNewCustomer: isNewCustomer
+        },
+        properties: {
+          verification_code: code
         }
       });
       
-      // Send the template email
-      await klaviyo.templates.sendTemplate({
-        templateName: KLAVIYO_TEMPLATE_NAME,
-        to: email,
-        context: {
-          verification_code: code,
-          is_new_customer: isNewCustomer,
-          welcome_message: isNewCustomer 
-            ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' 
-            : 'Willkommen zurück bei Metallbude!',
-          first_name: firstName
-        }
+      // Send an email using Klaviyo's API directly
+      const emailResponse = await fetch('https://a.klaviyo.com/api/v1/email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          api_key: KLAVIYO_PRIVATE_KEY,
+          from_email: 'noreply@metallbude.com',
+          from_name: 'Metallbude',
+          subject: 'Dein Anmeldecode für Metallbude',
+          to: email,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 5px;">
+              <div style="text-align: center; margin-bottom: 20px;">
+                <h1 style="color: #333;">Metallbude</h1>
+              </div>
+              
+              <h2 style="color: #333; text-align: center;">Dein Anmeldecode</h2>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                ${firstName ? `Hallo ${firstName},` : 'Hallo,'}
+              </p>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                ${isNewCustomer ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' : 'Willkommen zurück bei Metallbude!'}
+              </p>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                Hier ist dein Anmeldecode:
+              </p>
+              
+              <div style="background-color: #f4f4f4; padding: 15px; font-size: 24px; text-align: center; letter-spacing: 5px; font-weight: bold; margin: 20px 0; border-radius: 5px;">
+                ${code}
+              </div>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                Dieser Code ist 15 Minuten gültig.
+              </p>
+              
+              <p style="color: #666; font-size: 14px; margin-top: 30px; text-align: center;">
+                Falls du diese E-Mail nicht angefordert hast, kannst du sie ignorieren.
+              </p>
+              
+              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eaeaea; text-align: center; color: #999; font-size: 12px;">
+                &copy; ${new Date().getFullYear()} Metallbude. Alle Rechte vorbehalten.
+              </div>
+            </div>
+          `
+        })
       });
       
+      const emailData = await emailResponse.json();
+      
+      if (emailData.status !== 1) {
+        throw new Error(emailData.message || 'Failed to send email');
+      }
+      
+      console.log('Klaviyo email sent successfully to', email);
       return true;
     } catch (error) {
-      console.error('Klaviyo error:', error);
+      console.error('Klaviyo API error:', error);
       // Fall through to the simulation
     }
   }
