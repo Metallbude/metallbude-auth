@@ -332,9 +332,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
         }
       }
     };
-
     console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
-
     const response = await fetch('https://a.klaviyo.com/api/events/', {
       method: 'POST',
       headers: {
