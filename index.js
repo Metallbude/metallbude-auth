@@ -314,7 +314,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     // Create the email payload for MailerSend
     const mailerSendPayload = {
       from: {
-        email: "noreply@metallbude.de", // Update with your verified domain
+        email: "noreply@metallbude.com", // Update with your verified domain
         name: "Metallbude"
       },
       to: [
