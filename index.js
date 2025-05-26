@@ -314,7 +314,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     // Enhanced payload with multiple ways to access the verification code
     const klaviyoPayload = {
       data: {
-        type: 'event',
+        type: "event",
         attributes: {
           profile: {
             email,
@@ -322,22 +322,25 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
             last_name: lastName
           },
           metric: {
-            name: 'one_time_code_requested'
+            name: "one_time_code_requested"
           },
+          verification_code: code, // Add this line
           properties: {
+            // Keep the rest as is
             verification_code: code,
-            code: code, // Alternative simpler property name
-            verificationCode: code, // Camel case alternative
-            otp: code, // Common abbreviation for one-time password
+            code: code,
+            verificationCode: code,
+            otp: code,
             welcome_message: isNewCustomer
               ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
               : 'Willkommen zurück bei Metallbude!',
-            is_new_customer: isNewCustomer, // Add this flag for template logic
-            formatted_code: code.split('').join(' ') // Spaced format to avoid filtering
+            is_new_customer: isNewCustomer,
+            formatted_code: code.split('').join(' ')
           }
         }
       }
     };
+    
     
     console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
     
