@@ -797,19 +797,18 @@ async function verifyCodeWithShopify(email, code) {
 
 // Discovery endpoint
 app.get('/.well-known/openid-configuration', (req, res) => {
-  const baseUrl = 'https://auth.metallbude.com';
+  const issuer = `https://${req.headers.host}`;
   res.json({
-    issuer: baseUrl,
-    authorization_endpoint: `${baseUrl}/authorize`,
-    token_endpoint: `${baseUrl}/token`,
-    userinfo_endpoint: `${baseUrl}/userinfo`,
-    end_session_endpoint: `${baseUrl}/logout`,
+    issuer,
+    authorization_endpoint: `${issuer}/authorize`,
+    token_endpoint: `${issuer}/token`,
+    userinfo_endpoint: `${issuer}/userinfo`,
+    end_session_endpoint: `${issuer}/logout`,
     response_types_supported: ['code'],
     subject_types_supported: ['public'],
     id_token_signing_alg_values_supported: ['RS256'],
-    scopes_supported: ['openid', 'email'],
+    scopes_supported: ['openid', 'email', 'profile'],
     token_endpoint_auth_methods_supported: ['client_secret_post'],
-    claims_supported: ['sub', 'email']
   });
 });
 
