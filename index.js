@@ -736,3 +736,59 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Backend is live on port ${PORT}`);
   console.log(`MailerSend API Key: ${MAILERSEND_API_KEY ? 'Set' : 'Not set'}`);
 });
+
+// Function to verify code with Shopify (Shopify Account API)
+async function verifyCodeWithShopify(email, code) {
+  try {
+    const response = await fetch('https://metallbude-de.myshopify.com/account/api/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Customer-Account-API-Version': '2023-07',
+      },
+      body: JSON.stringify({
+        query: `
+          mutation customerAccessTokenCreateWithEmailVerificationCode($email: String!, $emailVerificationCode: String!) {
+            customerAccessTokenCreateWithEmailVerificationCode(email: $email, emailVerificationCode: $emailVerificationCode) {
+              customerAccessToken {
+                accessToken
+                expiresAt
+              }
+              customerUserErrors {
+                field
+                message
+                code
+              }
+            }
+          }
+        `,
+        variables: {
+          email,
+          emailVerificationCode: code,
+        }
+      })
+    });
+
+    const result = await response.json();
+    console.log("🔐 Shopify Login Response:", JSON.stringify(result, null, 2));
+
+    if (result.data?.customerAccessTokenCreateWithEmailVerificationCode?.customerAccessToken) {
+      return {
+        success: true,
+        accessToken: result.data.customerAccessTokenCreateWithEmailVerificationCode.customerAccessToken.accessToken,
+        expiresAt: result.data.customerAccessTokenCreateWithEmailVerificationCode.customerAccessToken.expiresAt,
+      };
+    } else {
+      return {
+        success: false,
+        errors: result.data?.customerAccessTokenCreateWithEmailVerificationCode?.customerUserErrors ?? [],
+      };
+    }
+  } catch (err) {
+    console.error('Error verifying code with Shopify:', err);
+    return {
+      success: false,
+      error: 'Unexpected error while verifying with Shopify.'
+    };
+  }
+}
