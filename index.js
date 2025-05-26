@@ -25,6 +25,7 @@ const MAILERSEND_API_KEY = process.env.MAILERSEND_API_KEY;
 console.log(`MailerSend API Key: ${MAILERSEND_API_KEY ? 'Set' : 'Not set'}`);
 
 // Store for verification codes and sessions
+const authCodes = {};
 const pendingSessions = {};
 const verifiedCustomers = {};
 
@@ -792,3 +793,120 @@ async function verifyCodeWithShopify(email, code) {
     };
   }
 }
+// ---- OIDC endpoints ----
+
+// Discovery endpoint
+app.get('/.well-known/openid-configuration', (req, res) => {
+  const baseUrl = 'https://auth.metallbude.com';
+  res.json({
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/authorize`,
+    token_endpoint: `${baseUrl}/token`,
+    userinfo_endpoint: `${baseUrl}/userinfo`,
+    end_session_endpoint: `${baseUrl}/logout`,
+    response_types_supported: ['code'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    scopes_supported: ['openid', 'email'],
+    token_endpoint_auth_methods_supported: ['client_secret_post'],
+    claims_supported: ['sub', 'email']
+  });
+});
+
+// --- OIDC Authorization endpoint ---
+import { v4 as uuidv4 } from 'uuid';
+
+app.get('/authorize', (req, res) => {
+  const { response_type, client_id, redirect_uri, state, scope, code_challenge, code_challenge_method } = req.query;
+
+  if (!redirect_uri || !client_id || !state || !response_type) {
+    return res.status(400).send('Missing required parameters.');
+  }
+
+  const authCode = uuidv4();
+  const email = 'rudolf.klause@metallbude.com'; // TODO: pull from session once real login exists
+  authCodes[authCode] = { email };
+
+  const redirectWithCode = `${redirect_uri}?code=${authCode}&state=${state}`;
+  res.redirect(redirectWithCode);
+});
+
+app.post('/token', async (req, res) => {
+  const { code, client_id, client_secret, redirect_uri, grant_type } = req.body;
+
+  if (grant_type !== 'authorization_code') {
+    return res.status(400).json({ error: 'unsupported_grant_type' });
+  }
+
+  if (!code || !client_id || !client_secret || !redirect_uri) {
+    return res.status(400).json({ error: 'invalid_request' });
+  }
+
+  const session = authCodes[code];
+  if (!session || session.expires < Date.now()) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+
+  // Generate dummy tokens for now (replace with JWTs later if needed)
+  const accessToken = crypto.randomBytes(32).toString('hex');
+  const idToken = crypto.randomBytes(32).toString('hex');
+
+  verifiedCustomers[accessToken] = {
+    email: session.email,
+    created: Date.now(),
+  };
+
+  delete authCodes[code]; // Code is single-use
+
+  res.json({
+    access_token: accessToken,
+    id_token: idToken,
+    token_type: 'Bearer',
+    expires_in: 3600,
+  });
+});
+
+// Userinfo endpoint (stub)
+app.get('/userinfo', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  const customer = verifiedCustomers[token];
+
+  if (!customer) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  res.json({
+    sub: customer.id,
+    email: customer.email,
+    email_verified: true,
+  });
+});
+
+// Userinfo endpoint (stub)
+
+// Logout endpoint
+app.get('/logout', (req, res) => {
+  res.send('Logged out');
+});
+
+// Discovery Endpoint
+app.get('/.well-known/openid-configuration', (req, res) => {
+  const issuer = `https://${req.headers.host}`;
+  res.json({
+    issuer,
+    authorization_endpoint: `${issuer}/authorize`,
+    token_endpoint: `${issuer}/token`,
+    userinfo_endpoint: `${issuer}/userinfo`,
+    end_session_endpoint: `${issuer}/logout`,
+    response_types_supported: ['code'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    scopes_supported: ['openid', 'email', 'profile'],
+    token_endpoint_auth_methods_supported: ['client_secret_post'],
+  });
+});
