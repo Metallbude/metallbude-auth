@@ -793,24 +793,6 @@ async function verifyCodeWithShopify(email, code) {
     };
   }
 }
-// ---- OIDC endpoints ----
-
-// Discovery endpoint
-app.get('/.well-known/openid-configuration', (req, res) => {
-  const issuer = `https://${req.headers.host}`;
-  res.json({
-    issuer,
-    authorization_endpoint: `${issuer}/authorize`,
-    token_endpoint: `${issuer}/token`,
-    userinfo_endpoint: `${issuer}/userinfo`,
-    end_session_endpoint: `${issuer}/logout`,
-    response_types_supported: ['code'],
-    subject_types_supported: ['public'],
-    id_token_signing_alg_values_supported: ['RS256'],
-    scopes_supported: ['openid', 'email', 'profile'],
-    token_endpoint_auth_methods_supported: ['client_secret_post'],
-  });
-});
 
 // --- OIDC Authorization endpoint ---
 
@@ -892,3 +874,19 @@ app.get('/logout', (req, res) => {
   res.send('Logged out');
 });
 
+// Discovery endpoint
+app.get('/.well-known/openid-configuration', (req, res) => {
+  const issuer = `https://${req.headers.host}`;
+  res.json({
+    issuer,
+    authorization_endpoint: `${issuer}/authorize`,
+    token_endpoint: `${issuer}/token`,
+    userinfo_endpoint: `${issuer}/userinfo`,
+    end_session_endpoint: `${issuer}/logout`,
+    response_types_supported: ['code'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    scopes_supported: ['openid', 'email', 'profile'],
+    token_endpoint_auth_methods_supported: ['client_secret_post'],
+  });
+});
