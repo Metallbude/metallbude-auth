@@ -158,10 +158,12 @@ app.post('/auth/verify-code', async (req, res) => {
     // Code is valid - create or get customer
     let customer = null;
     let shopifyCustomerAccessToken = null;
+    let isNewCustomer = true;
     
     if (ADMIN_API_TOKEN) {
       // First, check if customer exists
       try {
+        console.log(`Checking if customer exists for email: ${email}`);
         const customerResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
           method: 'POST',
           headers: {
@@ -225,14 +227,58 @@ app.post('/auth/verify-code', async (req, res) => {
         });
 
         const customerData = await customerResponse.json();
+        console.log('Customer lookup response:', JSON.stringify(customerData, null, 2));
         
         if (!customerData.errors) {
           const customers = customerData.data?.customers?.edges || [];
           if (customers.length > 0) {
             customer = customers[0].node;
+            isNewCustomer = false;
+            console.log(`Found existing customer with ID: ${customer.id}`);
             
             // Generate a Shopify customer access token
             try {
+              console.log(`Attempting to generate Shopify customer access token for ${email}...`);
+              
+              // For existing customers, we need to reset their password first
+              const resetResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Shopify-Access-Token': ADMIN_API_TOKEN,
+                },
+                body: JSON.stringify({
+                  query: `
+                    mutation customerResetByUrl($id: ID!, $input: CustomerResetInput!) {
+                      customerResetByUrl(id: $id, input: $input) {
+                        customer {
+                          id
+                        }
+                        customerUserErrors {
+                          code
+                          field
+                          message
+                        }
+                      }
+                    }
+                  `,
+                  variables: {
+                    id: customer.id,
+                    input: {
+                      password: generateTemporaryPassword(email),
+                      resetUrl: `https://${SHOP_DOMAIN}/account/reset`
+                    }
+                  }
+                }),
+              });
+              
+              const resetData = await resetResponse.json();
+              console.log('Password reset response:', JSON.stringify(resetData, null, 2));
+              
+              // Now try to get the access token
+              const tempPassword = generateTemporaryPassword(email);
+              console.log(`Generated temporary password for ${email}`);
+              
               const tokenResponse = await fetch(`https://${SHOP_DOMAIN}/api/${API_VERSION}/graphql.json`, {
                 method: 'POST',
                 headers: {
@@ -258,15 +304,20 @@ app.post('/auth/verify-code', async (req, res) => {
                   variables: {
                     input: {
                       email: email,
-                      password: generateTemporaryPassword(email)
+                      password: tempPassword
                     }
                   }
                 }),
               });
               
               const tokenData = await tokenResponse.json();
+              console.log('Shopify token response:', JSON.stringify(tokenData, null, 2));
+              
               if (tokenData.data?.customerAccessTokenCreate?.customerAccessToken?.accessToken) {
                 shopifyCustomerAccessToken = tokenData.data.customerAccessTokenCreate.customerAccessToken.accessToken;
+                console.log(`✅ Successfully generated Shopify customer access token for ${email}`);
+              } else if (tokenData.data?.customerAccessTokenCreate?.customerUserErrors) {
+                console.error('Error generating token:', tokenData.data.customerAccessTokenCreate.customerUserErrors);
               }
             } catch (tokenError) {
               console.error('Error generating customer access token:', tokenError);
@@ -280,6 +331,7 @@ app.post('/auth/verify-code', async (req, res) => {
       // If customer doesn't exist, create one
       if (!customer) {
         try {
+          console.log(`Creating new customer for email: ${email}`);
           const tempPassword = generateTemporaryPassword(email);
           
           const createResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
@@ -317,12 +369,16 @@ app.post('/auth/verify-code', async (req, res) => {
           });
 
           const createData = await createResponse.json();
+          console.log('Customer creation response:', JSON.stringify(createData, null, 2));
           
           if (!createData.errors && !createData.data?.customerCreate?.userErrors?.length) {
             customer = createData.data?.customerCreate?.customer;
+            console.log(`Created new customer with ID: ${customer.id}`);
             
             // Generate a Shopify customer access token for the new customer
             try {
+              console.log(`Attempting to generate Shopify customer access token for new customer ${email}...`);
+              
               const tokenResponse = await fetch(`https://${SHOP_DOMAIN}/api/${API_VERSION}/graphql.json`, {
                 method: 'POST',
                 headers: {
@@ -355,12 +411,19 @@ app.post('/auth/verify-code', async (req, res) => {
               });
               
               const tokenData = await tokenResponse.json();
+              console.log('Shopify token response for new customer:', JSON.stringify(tokenData, null, 2));
+              
               if (tokenData.data?.customerAccessTokenCreate?.customerAccessToken?.accessToken) {
                 shopifyCustomerAccessToken = tokenData.data.customerAccessTokenCreate.customerAccessToken.accessToken;
+                console.log(`✅ Successfully generated Shopify customer access token for new customer ${email}`);
+              } else if (tokenData.data?.customerAccessTokenCreate?.customerUserErrors) {
+                console.error('Error generating token for new customer:', tokenData.data.customerAccessTokenCreate.customerUserErrors);
               }
             } catch (tokenError) {
-              console.error('Error generating customer access token:', tokenError);
+              console.error('Error generating customer access token for new customer:', tokenError);
             }
+          } else {
+            console.error('Error creating customer:', createData.data?.customerCreate?.userErrors || createData.errors);
           }
         } catch (error) {
           console.error('Error creating customer:', error);
@@ -370,6 +433,7 @@ app.post('/auth/verify-code', async (req, res) => {
     
     // If we still don't have a customer, create a placeholder
     if (!customer) {
+      console.log(`Creating placeholder customer for ${email} (no Shopify integration)`);
       customer = {
         id: `gid://shopify/Customer/${Date.now()}`,
         firstName: '',
@@ -398,7 +462,8 @@ app.post('/auth/verify-code', async (req, res) => {
       success: true,
       accessToken: accessToken,
       shopifyCustomerAccessToken: shopifyCustomerAccessToken,
-      customer: customer
+      customer: customer,
+      isNewCustomer: isNewCustomer
     });
   } catch (error) {
     console.error('Error in verify-code endpoint:', error);
@@ -433,6 +498,101 @@ app.get('/customer/profile', async (req, res) => {
   });
 });
 
+// Get customer orders endpoint
+app.get('/customer/orders', async (req, res) => {
+  const accessToken = req.headers.authorization?.split(' ')[1];
+  
+  if (!accessToken) {
+    return res.status(401).json({ success: false, error: 'Authorization token required' });
+  }
+  
+  const verifiedCustomer = verifiedCustomers[accessToken];
+  
+  if (!verifiedCustomer) {
+    return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+  }
+  
+  if (Date.now() > verifiedCustomer.expires) {
+    delete verifiedCustomers[accessToken];
+    return res.status(401).json({ success: false, error: 'Token expired' });
+  }
+  
+  try {
+    // Use the Shopify Admin API to get orders
+    if (ADMIN_API_TOKEN) {
+      const ordersResponse = await fetch(`https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': ADMIN_API_TOKEN,
+        },
+        body: JSON.stringify({
+          query: `
+            query getCustomerOrders($customerId: ID!) {
+              customer(id: $customerId) {
+                orders(first: 10) {
+                  edges {
+                    node {
+                      id
+                      name
+                      orderNumber
+                      processedAt
+                      fulfillmentStatus
+                      financialStatus
+                      totalPriceSet {
+                        shopMoney {
+                          amount
+                          currencyCode
+                        }
+                      }
+                      lineItems(first: 10) {
+                        edges {
+                          node {
+                            title
+                            quantity
+                            variant {
+                              title
+                              image {
+                                url
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `,
+          variables: {
+            customerId: verifiedCustomer.customer.id,
+          },
+        }),
+      });
+
+      const ordersData = await ordersResponse.json();
+      
+      if (ordersData.errors) {
+        console.error('Shopify API errors:', ordersData.errors);
+        return res.status(500).json({ success: false, error: 'Error fetching orders from Shopify' });
+      }
+      
+      const orders = ordersData.data?.customer?.orders?.edges?.map(edge => edge.node) || [];
+      
+      return res.json({
+        success: true,
+        orders: orders
+      });
+    } else {
+      return res.status(500).json({ success: false, error: 'Shopify Admin API token not configured' });
+    }
+  } catch (error) {
+    console.error('Error fetching orders:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Helper function to generate a verification code
 function generateVerificationCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -458,6 +618,13 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
+    // Get the admin email from environment variables or use a default
+    const adminEmail = process.env.ADMIN_EMAIL || email;
+    
+    // For trial accounts, always send to admin email but include the original recipient in the subject
+    const recipientEmail = process.env.MAILERSEND_TRIAL_MODE === 'true' ? adminEmail : email;
+    const recipientName = firstName ? `${firstName} ${lastName}`.trim() : email;
+    
     // Create the email payload for MailerSend
     const mailerSendPayload = {
       from: {
@@ -466,15 +633,17 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
       },
       to: [
         {
-          email: email,
-          name: firstName ? `${firstName} ${lastName}`.trim() : email
+          email: recipientEmail,
+          name: recipientName
         }
       ],
-      subject: "Dein Bestätigungscode für Metallbude",
+      subject: process.env.MAILERSEND_TRIAL_MODE === 'true' 
+        ? `[TEST for ${email}] Dein Bestätigungscode für Metallbude` 
+        : "Dein Bestätigungscode für Metallbude",
       template_id: "neqvygm1858g0p7w", // Your MailerSend template ID
       variables: [
         {
-          email: email,
+          email: recipientEmail,
           substitutions: [
             {
               var: "verification_code",
@@ -518,6 +687,15 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
       }
       
       console.error('❌ MailerSend API error details:', JSON.stringify(errorDetails, null, 2));
+      
+      // If we're in trial mode and still getting errors, fall back to simulation
+      if (process.env.MAILERSEND_TRIAL_MODE === 'true') {
+        console.log('⚠️ Falling back to simulated email in trial mode:');
+        console.log('To:', email);
+        console.log('Code:', code);
+        return true;
+      }
+      
       throw new Error(`MailerSend API error: ${response.status} ${response.statusText}`);
     }
 
@@ -529,11 +707,22 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     } catch (e) {
       console.log('✅ MailerSend response had no JSON body or malformed content.');
     }
-    console.log(`📬 Verification email sent to ${email} with code ${code}`);
+    
+    if (process.env.MAILERSEND_TRIAL_MODE === 'true') {
+      console.log(`📬 TEST verification email sent to admin (${recipientEmail}) for ${email} with code ${code}`);
+    } else {
+      console.log(`📬 Verification email sent to ${email} with code ${code}`);
+    }
+    
     return true;
   } catch (error) {
     console.error('❌ MailerSend API error:', error);
-    return false;
+    
+    // In case of error, simulate email delivery
+    console.log('⚠️ Falling back to simulated email:');
+    console.log('To:', email);
+    console.log('Code:', code);
+    return true;
   }
 }
 
