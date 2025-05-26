@@ -312,6 +312,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
 
   try {
     // Structure the payload to match what the template expects (event.verification_code)
+    // while keeping all the debugging properties
     const klaviyoPayload = {
       data: {
         type: 'event',
@@ -328,9 +329,14 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
           verification_code: code,
           properties: {
             verification_code: code,
+            code: code, // Alternative simpler property name
+            verificationCode: code, // Camel case alternative
+            otp: code, // Common abbreviation for one-time password
             welcome_message: isNewCustomer
               ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
               : 'Willkommen zurück bei Metallbude!',
+            is_new_customer: isNewCustomer, // Add this flag for template logic
+            formatted_code: code.split('').join(' ') // Spaced format to avoid filtering
           }
         }
       }
@@ -338,22 +344,40 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     
     console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
     
+    // Make the API request with improved error handling
     const response = await fetch('https://a.klaviyo.com/api/events/', {
       method: 'POST',
       headers: {
         'Authorization': `Klaviyo-API-Key ${KLAVIYO_PRIVATE_KEY}`,
         'Content-Type': 'application/json',
         'revision': '2023-02-22',
+        'Accept': 'application/json'
       },
       body: JSON.stringify(klaviyoPayload)
     });
 
+    // Enhanced error handling with detailed response logging
     if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Klaviyo API error: ${errorBody}`);
+      let errorDetails;
+      try {
+        errorDetails = await response.json();
+      } catch (e) {
+        errorDetails = await response.text();
+      }
+      
+      console.error('❌ Klaviyo API error details:', JSON.stringify(errorDetails, null, 2));
+      throw new Error(`Klaviyo API error: ${response.status} ${response.statusText}`);
     }
 
-    console.log(`📬 Klaviyo one_time_code_requested event triggered for ${email}`);
+    // Log successful response data
+    try {
+      const responseData = await response.json();
+      console.log('✅ Klaviyo API response:', JSON.stringify(responseData, null, 2));
+    } catch (e) {
+      console.log('✅ Klaviyo request successful (no JSON response)');
+    }
+
+    console.log(`📬 Klaviyo one_time_code_requested event triggered for ${email} with code ${code}`);
     return true;
   } catch (error) {
     console.error('❌ Klaviyo API error:', error);
@@ -361,8 +385,8 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 }
 
-// Keep your existing app.listen code
 app.listen(PORT, () => {
   console.log(`✅ Backend is live on port ${PORT}`);
   console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
 });
+
