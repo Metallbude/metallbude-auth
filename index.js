@@ -311,8 +311,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
-    // Structure the payload to match what the template expects (event.verification_code)
-    // while keeping all the debugging properties
+    // Enhanced payload with multiple ways to access the verification code
     const klaviyoPayload = {
       data: {
         type: 'event',
@@ -325,8 +324,6 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
           metric: {
             name: 'one_time_code_requested'
           },
-          // Add verification_code at the attributes level to match template
-          verification_code: code,
           properties: {
             verification_code: code,
             code: code, // Alternative simpler property name
@@ -385,8 +382,15 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 }
 
+// Optional: Add a fallback email sender function
+async function sendFallbackEmail(email, code) {
+  console.log('⚠️ Using fallback email method for', email);
+  // Implement your fallback email sending logic here
+  // This could use a different service like SendGrid, AWS SES, etc.
+  return true;
+}
+
 app.listen(PORT, () => {
   console.log(`✅ Backend is live on port ${PORT}`);
   console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
 });
-
