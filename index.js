@@ -329,6 +329,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
               ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
               : 'Willkommen zurück bei Metallbude!',
           }
+          
         }
       }
     };
