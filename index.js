@@ -5,7 +5,6 @@ import bodyParser from 'body-parser';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import Klaviyo from 'klaviyo-node';
 
 dotenv.config();
 
@@ -23,15 +22,7 @@ const API_VERSION = '2023-04';
 
 // Klaviyo configuration
 const KLAVIYO_PRIVATE_KEY = process.env.KLAVIYO_PRIVATE_KEY;
-
-// Initialize Klaviyo if API key is available
-let klaviyoClient = null;
-if (KLAVIYO_PRIVATE_KEY) {
-  klaviyoClient = new Klaviyo({
-    apiKey: KLAVIYO_PRIVATE_KEY
-  });
-  console.log('Klaviyo initialized with private key');
-}
+console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
 
 // Store for verification codes and sessions
 const pendingSessions = {};
@@ -310,26 +301,61 @@ function generateAccessToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-// Helper function to send verification email using Klaviyo
+// Helper function to send verification email using Klaviyo API directly
 async function sendVerificationEmail(email, code, isNewCustomer, firstName, lastName) {
-  // If Klaviyo is available, use it to send the email
-  if (klaviyoClient) {
+  if (KLAVIYO_PRIVATE_KEY) {
     try {
-      // Track an event in Klaviyo
-      await klaviyoClient.track({
-        event: 'Verification Code Requested',
-        customer_properties: {
-          $email: email,
-          $first_name: firstName || '',
-          $last_name: lastName || '',
-          isNewCustomer: isNewCustomer
+      // First, create or update the profile in Klaviyo
+      const profileResponse = await fetch('https://a.klaviyo.com/api/v2/people', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-        properties: {
-          verification_code: code
-        }
+        body: JSON.stringify({
+          token: KLAVIYO_PRIVATE_KEY,
+          properties: {
+            $email: email,
+            $first_name: firstName || '',
+            $last_name: lastName || '',
+            isNewCustomer: isNewCustomer
+          }
+        })
       });
       
-      // Send an email using Klaviyo's API directly
+      if (!profileResponse.ok) {
+        console.error('Failed to create/update Klaviyo profile:', await profileResponse.text());
+      } else {
+        console.log('Klaviyo profile created/updated for', email);
+      }
+      
+      // Then, track an event in Klaviyo
+      const eventResponse = await fetch('https://a.klaviyo.com/api/v2/track', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          token: KLAVIYO_PRIVATE_KEY,
+          event: 'Verification Code Requested',
+          customer_properties: {
+            $email: email,
+            $first_name: firstName || '',
+            $last_name: lastName || ''
+          },
+          properties: {
+            verification_code: code,
+            is_new_customer: isNewCustomer
+          }
+        })
+      });
+      
+      if (!eventResponse.ok) {
+        console.error('Failed to track Klaviyo event:', await eventResponse.text());
+      } else {
+        console.log('Klaviyo event tracked for', email);
+      }
+      
+      // Finally, send the email
       const emailResponse = await fetch('https://a.klaviyo.com/api/v1/email', {
         method: 'POST',
         headers: {
