@@ -323,14 +323,18 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
           metric: {
             name: 'one_time_code_requested'
           },
-          "properties": {
-            "verification_code": "758154",
-            "welcome_message": "Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt."
+          properties: {
+            verification_code: code,
+            welcome_message: isNewCustomer
+              ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
+              : 'Willkommen zurück bei Metallbude!',
           }
         }
       }
     };
+
     console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
+
     const response = await fetch('https://a.klaviyo.com/api/events/', {
       method: 'POST',
       headers: {
