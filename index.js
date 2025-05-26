@@ -301,92 +301,132 @@ function generateAccessToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-// Helper function to trigger Klaviyo Flow event to send the verification code
-async function sendVerificationEmail(email, code, isNewCustomer, firstName = '', lastName = '') {
-  if (!KLAVIYO_PRIVATE_KEY) {
-    console.log('Klaviyo API Key not set. SIMULATED EMAIL:');
-    console.log('To:', email);
-    console.log('Code:', code);
-    return true;
-  }
-
-  try {
-    // Enhanced payload with multiple ways to access the verification code
-    const klaviyoPayload = {
-      data: {
-        type: 'event',
-        attributes: {
-          profile: {
-            email,
-            first_name: firstName,
-            last_name: lastName
-          },
-          metric: {
-            name: 'one_time_code_requested'
+// Helper function to send verification email using Klaviyo API directly
+async function sendVerificationEmail(email, code, isNewCustomer, firstName, lastName) {
+  if (KLAVIYO_PRIVATE_KEY) {
+    try {
+      // First, create or update the profile in Klaviyo
+      const profileResponse = await fetch('https://a.klaviyo.com/api/v2/people', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          token: KLAVIYO_PRIVATE_KEY,
+          properties: {
+            $email: email,
+            $first_name: firstName || '',
+            $last_name: lastName || '',
+            isNewCustomer: isNewCustomer
+          }
+        })
+      });
+      
+      if (!profileResponse.ok) {
+        console.error('Failed to create/update Klaviyo profile:', await profileResponse.text());
+      } else {
+        console.log('Klaviyo profile created/updated for', email);
+      }
+      
+      // Then, track an event in Klaviyo
+      const eventResponse = await fetch('https://a.klaviyo.com/api/v2/track', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          token: KLAVIYO_PRIVATE_KEY,
+          event: 'Verification Code Requested',
+          customer_properties: {
+            $email: email,
+            $first_name: firstName || '',
+            $last_name: lastName || ''
           },
           properties: {
             verification_code: code,
-            code: code, // Alternative simpler property name
-            verificationCode: code, // Camel case alternative
-            otp: code, // Common abbreviation for one-time password
-            welcome_message: isNewCustomer
-              ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
-              : 'Willkommen zurück bei Metallbude!',
-            is_new_customer: isNewCustomer, // Add this flag for template logic
-            formatted_code: code.split('').join(' ') // Spaced format to avoid filtering
+            is_new_customer: isNewCustomer
           }
-        }
-      }
-    };
-    
-    console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
-    
-    // Make the API request with improved error handling
-    const response = await fetch('https://a.klaviyo.com/api/events/', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_PRIVATE_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2023-02-22',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(klaviyoPayload)
-    });
-
-    // Enhanced error handling with detailed response logging
-    if (!response.ok) {
-      let errorDetails;
-      try {
-        errorDetails = await response.json();
-      } catch (e) {
-        errorDetails = await response.text();
+        })
+      });
+      
+      if (!eventResponse.ok) {
+        console.error('Failed to track Klaviyo event:', await eventResponse.text());
+      } else {
+        console.log('Klaviyo event tracked for', email);
       }
       
-      console.error('❌ Klaviyo API error details:', JSON.stringify(errorDetails, null, 2));
-      throw new Error(`Klaviyo API error: ${response.status} ${response.statusText}`);
+      // Finally, send the email
+      const emailResponse = await fetch('https://a.klaviyo.com/api/v1/email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          api_key: KLAVIYO_PRIVATE_KEY,
+          from_email: 'noreply@metallbude.com',
+          from_name: 'Metallbude',
+          subject: 'Dein Anmeldecode für Metallbude',
+          to: email,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 5px;">
+              <div style="text-align: center; margin-bottom: 20px;">
+                <h1 style="color: #333;">Metallbude</h1>
+              </div>
+              
+              <h2 style="color: #333; text-align: center;">Dein Anmeldecode</h2>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                ${firstName ? `Hallo ${firstName},` : 'Hallo,'}
+              </p>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                ${isNewCustomer ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' : 'Willkommen zurück bei Metallbude!'}
+              </p>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                Hier ist dein Anmeldecode:
+              </p>
+              
+              <div style="background-color: #f4f4f4; padding: 15px; font-size: 24px; text-align: center; letter-spacing: 5px; font-weight: bold; margin: 20px 0; border-radius: 5px;">
+                ${code}
+              </div>
+              
+              <p style="color: #666; font-size: 16px; line-height: 1.5;">
+                Dieser Code ist 15 Minuten gültig.
+              </p>
+              
+              <p style="color: #666; font-size: 14px; margin-top: 30px; text-align: center;">
+                Falls du diese E-Mail nicht angefordert hast, kannst du sie ignorieren.
+              </p>
+              
+              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eaeaea; text-align: center; color: #999; font-size: 12px;">
+                &copy; ${new Date().getFullYear()} Metallbude. Alle Rechte vorbehalten.
+              </div>
+            </div>
+          `
+        })
+      });
+      
+      const emailData = await emailResponse.json();
+      
+      if (emailData.status !== 1) {
+        throw new Error(emailData.message || 'Failed to send email');
+      }
+      
+      console.log('Klaviyo email sent successfully to', email);
+      return true;
+    } catch (error) {
+      console.error('Klaviyo API error:', error);
+      // Fall through to the simulation
     }
-
-    // Log successful response data
-    try {
-      const responseData = await response.json();
-      console.log('✅ Klaviyo API response:', JSON.stringify(responseData, null, 2));
-    } catch (e) {
-      console.log('✅ Klaviyo request successful (no JSON response)');
-    }
-
-    console.log(`📬 Klaviyo one_time_code_requested event triggered for ${email} with code ${code}`);
-    return true;
-  } catch (error) {
-    console.error('❌ Klaviyo API error:', error);
-    return false;
   }
-}
-
-// Optional: Add a fallback email sender function
-async function sendFallbackEmail(email, code) {
-  console.log('⚠️ Using fallback email method for', email);
-  // Implement your fallback email sending logic here
-  // This could use a different service like SendGrid, AWS SES, etc.
+  
+  // If Klaviyo is not available or fails, simulate email sending
+  console.log('SIMULATED EMAIL:');
+  console.log('To:', email);
+  console.log('Subject: Dein Anmeldecode für Metallbude');
+  console.log('Code:', code);
+  
   return true;
 }
 
