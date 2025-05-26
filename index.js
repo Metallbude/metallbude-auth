@@ -157,66 +157,39 @@ app.post('/auth/request-code', async (req, res) => {
 
     // Step 3: Send the recovery email
     try {
-      const response = await fetch(STOREFRONT_API_URL, {
+      const response = await fetch('https://customer-account.shopify.com/account/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Storefront-Access-Token': STOREFRONT_TOKEN,
         },
         body: JSON.stringify({
-          query: `
-            mutation customerRecover($email: String!) {
-              customerRecover(email: $email) {
-                customerUserErrors {
-                  code
-                  field
-                  message
-                }
-              }
-            }
-          `,
-          variables: {
-            email: email,
-          },
+          email,
+          shop: SHOP_DOMAIN,
         }),
       });
 
       const data = await response.json();
-      console.log('Shopify recovery response:', JSON.stringify(data, null, 2));
+      console.log('Login email trigger response:', JSON.stringify(data, null, 2));
 
-      // Check for GraphQL errors
-      if (data.errors) {
-        console.error('GraphQL errors during recovery:', data.errors);
+      if (!response.ok || data.errors) {
         return res.status(400).json({ 
           success: false, 
-          error: data.errors[0].message 
+          error: 'Fehler beim Anfordern des Login-Codes',
+          detail: data,
         });
       }
 
-      // Check for customer user errors
-      const customerUserErrors = data.data?.customerRecover?.customerUserErrors || [];
-      if (customerUserErrors.length > 0) {
-        console.error('Customer user errors during recovery:', customerUserErrors);
-        return res.status(400).json({ 
-          success: false, 
-          error: customerUserErrors[0].message 
-        });
-      }
-
-      // Generate a session ID for this verification attempt
       const sessionId = crypto.randomUUID();
       pendingSessions[sessionId] = {
         email,
-        expires: Date.now() + 15 * 60 * 1000, // 15 minutes expiration
+        expires: Date.now() + 15 * 60 * 1000,
       };
 
-      // Success - code has been sent
-      console.log('Recovery email sent successfully');
-      console.log('Customer exists:', customerExists);
-      res.json({ 
+      res.json({
         success: true,
         isNewCustomer: !customerExists,
-        sessionId: sessionId
+        sessionId,
       });
     } catch (error) {
       console.error('Exception during recovery:', error);
