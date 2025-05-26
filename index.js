@@ -312,151 +312,99 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName, last
   }
 
   try {
-    // Step 1: Create or update the profile in Klaviyo (using V3 API)
-    // Note: V3 API uses a different endpoint and structure for profiles
-    const profileResponse = await fetch('https://a.klaviyo.com/api/v2/identify', { // Still using v2 identify for simplicity with properties
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          token: KLAVIYO_PRIVATE_KEY, // Note: V2 identify still uses public key or private key as token
-          properties: {
-            $email: email,
-            $first_name: firstName || '',
-            $last_name: lastName || '',
-            isNewCustomer: isNewCustomer
-          }
-        })
-      });
-      
-      if (!profileResponse.ok) {
-        console.error('Failed to create/update Klaviyo profile (v2 identify):', await profileResponse.text());
-        // Continue, but log the error
-      } else {
-        console.log('Klaviyo profile created/updated for', email);
-      }
-
-    // Step 2: Track an event in Klaviyo (using V3 API)
-    // Note: V3 API uses a different endpoint and structure for events
-    const eventResponse = await fetch('https://a.klaviyo.com/api/events/', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Klaviyo-API-Key ${KLAVIYO_PRIVATE_KEY}`, // V3 uses private key in Authorization header
-          'Content-Type': 'application/json',
-          'Revision': '2023-07-15' // Specify API version
-        },
-        body: JSON.stringify({
-          data: {
-            type: 'event',
-            attributes: {
-              properties: {
-                verification_code: code,
-                is_new_customer: isNewCustomer
-              },
-              metric: {
-                data: {
-                  type: 'metric',
-                  attributes: {
-                    name: 'Verification Code Requested'
-                  }
-                }
-              },
-              profile: {
-                data: {
-                  type: 'profile',
-                  attributes: {
-                    email: email,
-                    first_name: firstName || '',
-                    last_name: lastName || ''
-                  }
-                }
-              },
-              time: new Date().toISOString()
-            }
-          }
-        })
-      });
-      
-      if (!eventResponse.ok) {
-        console.error('Failed to track Klaviyo event (v3):', await eventResponse.text());
-        // Continue, but log the error
-      } else {
-        console.log('Klaviyo event tracked for', email);
-      }
-
-    // Step 3: Send the email (using V3 API for transactional emails)
-    // Note: Sending transactional emails via API requires a specific setup in Klaviyo
-    // and uses a different endpoint and structure. This is a more complex step.
-    // For simplicity, let's continue using the v1 email endpoint for now,
-    // as it might still work for basic sending if the profile and event tracking succeed.
-    // If v1 email sending consistently fails, we'll need to implement v3 transactional sending.
-
-    const emailResponse = await fetch('https://a.klaviyo.com/api/v1/email', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          api_key: KLAVIYO_PRIVATE_KEY, // v1 still uses api_key in body
-          from_email: 'noreply@metallbude.com', // Use your verified sender email in Klaviyo
-          from_name: 'Metallbude',
-          subject: 'Dein Anmeldecode für Metallbude',
-          to: email,
-          html: `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 5px;">
-              <div style="text-align: center; margin-bottom: 20px;">
-                <h1 style="color: #333;">Metallbude</h1>
-              </div>
-              
-              <h2 style="color: #333; text-align: center;">Dein Anmeldecode</h2>
-              
-              <p style="color: #666; font-size: 16px; line-height: 1.5;">
-                ${firstName ? `Hallo ${firstName},` : 'Hallo,'}
-              </p>
-              
-              <p style="color: #666; font-size: 16px; line-height: 1.5;">
-                ${isNewCustomer ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' : 'Willkommen zurück bei Metallbude!'}
-              </p>
-              
-              <p style="color: #666; font-size: 16px; line-height: 1.5;">
-                Hier ist dein Anmeldecode:
-              </p>
-              
-              <div style="background-color: #f4f4f4; padding: 15px; font-size: 24px; text-align: center; letter-spacing: 5px; font-weight: bold; margin: 20px 0; border-radius: 5px;">
-                ${code}
-              </div>
-              
-              <p style="color: #666; font-size: 16px; line-height: 1.5;">
-                Dieser Code ist 15 Minuten gültig.
-              </p>
-              
-              <p style="color: #666; font-size: 14px; margin-top: 30px; text-align: center;">
-                Falls du diese E-Mail nicht angefordert hast, kannst du sie ignorieren.
-              </p>
-              
-              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eaeaea; text-align: center; color: #999; font-size: 12px;">
-                &copy; ${new Date().getFullYear()} Metallbude. Alle Rechte vorbehalten.
-              </div>
-            </div>
-          `
-        })
-      });
-      
-      const emailData = await emailResponse.json();
-      
-      if (emailData.status !== 1) {
-        // Log the error but don't throw, so the simulation fallback is used
-        console.error('Klaviyo v1 email send failed:', emailData.message || 'Unknown error');
-      } else {
-         console.log('Klaviyo v1 email sent successfully to', email);
-         return true; // Email sent successfully
-      }
-      
-    } catch (error) {
-      console.error('Klaviyo API error:', error);
-      // Fall through to the simulation
+    // Step 1: Create or update the profile in Klaviyo (using V2 identify endpoint)
+    const profileResponse = await fetch('https://a.klaviyo.com/api/identify', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        token: KLAVIYO_PRIVATE_KEY,
+        properties: {
+          $email: email,
+          $first_name: firstName || '',
+          $last_name: lastName || '',
+          isNewCustomer: isNewCustomer
+        }
+      })
+    });
+    
+    if (!profileResponse.ok) {
+      console.error('Failed to create/update Klaviyo profile (identify):', await profileResponse.text());
+      // Continue, but log the error
+    } else {
+      console.log('Klaviyo profile created/updated for', email);
     }
+
+    // Step 2: Send the email directly (using V1 email endpoint)
+    const emailResponse = await fetch('https://a.klaviyo.com/api/v1/email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        api_key: KLAVIYO_PRIVATE_KEY,
+        from_email: 'noreply@metallbude.com',
+        from_name: 'Metallbude',
+        subject: 'Dein Anmeldecode für Metallbude',
+        to: email,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 5px;">
+            <div style="text-align: center; margin-bottom: 20px;">
+              <h1 style="color: #333;">Metallbude</h1>
+            </div>
+            
+            <h2 style="color: #333; text-align: center;">Dein Anmeldecode</h2>
+            
+            <p style="color: #666; font-size: 16px; line-height: 1.5;">
+              ${firstName ? `Hallo ${firstName},` : 'Hallo,'}
+            </p>
+            
+            <p style="color: #666; font-size: 16px; line-height: 1.5;">
+              ${isNewCustomer ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' : 'Willkommen zurück bei Metallbude!'}
+            </p>
+            
+            <p style="color: #666; font-size: 16px; line-height: 1.5;">
+              Hier ist dein Anmeldecode:
+            </p>
+            
+            <div style="background-color: #f4f4f4; padding: 15px; font-size: 24px; text-align: center; letter-spacing: 5px; font-weight: bold; margin: 20px 0; border-radius: 5px;">
+              ${code}
+            </div>
+            
+            <p style="color: #666; font-size: 16px; line-height: 1.5;">
+              Dieser Code ist 15 Minuten gültig.
+            </p>
+            
+            <p style="color: #666; font-size: 14px; margin-top: 30px; text-align: center;">
+              Falls du diese E-Mail nicht angefordert hast, kannst du sie ignorieren.
+            </p>
+            
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eaeaea; text-align: center; color: #999; font-size: 12px;">
+              &copy; ${new Date().getFullYear()} Metallbude. Alle Rechte vorbehalten.
+            </div>
+          </div>
+        `
+      })
+    });
+    
+    let emailData;
+    try {
+      emailData = await emailResponse.json();
+    } catch (e) {
+      console.error('Failed to parse email response:', e);
+      throw new Error('Failed to parse email response');
+    }
+    
+    if (emailData.status !== 1) {
+      throw new Error(emailData.message || 'Failed to send email');
+    }
+    
+    console.log('Klaviyo email sent successfully to', email);
+    return true;
+  } catch (error) {
+    console.error('Klaviyo API error:', error);
+    // Fall through to the simulation
   }
   
   // If Klaviyo is not available or fails, simulate email sending
@@ -466,7 +414,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName, last
   console.log('Code:', code);
   
   return true;
-
+}
 
 app.listen(PORT, () => {
   console.log(`✅ Backend is live on port ${PORT}`);
