@@ -313,34 +313,34 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   try {
     // Enhanced payload with multiple ways to access the verification code
     const klaviyoPayload = {
-      data: {
-        type: "event",
-        attributes: {
-          profile: {
-            email,
-            first_name: firstName,
-            last_name: lastName
-          },
-          metric: {
-            name: "one_time_code_requested"
-          },
-          verification_code: code, // Add this line
-          properties: {
-            // Keep the rest as is
-            verification_code: code,
-            code: code,
-            verificationCode: code,
-            otp: code,
-            welcome_message: isNewCustomer
-              ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
-              : 'Willkommen zurück bei Metallbude!',
-            is_new_customer: isNewCustomer,
-            formatted_code: code.split('').join(' ')
-          }
-        }
+  data: {
+    type: "event",
+    attributes: {
+      profile: {
+        email,
+        first_name: firstName,
+        last_name: lastName
+      },
+      metric: {
+        name: "one_time_code_requested"
+      },
+      verification_code: code, // Add this line
+      properties: {
+        // Keep the rest as is
+        verification_code: code,
+        code: code,
+        verificationCode: code,
+        otp: code,
+        welcome_message: isNewCustomer
+          ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
+          : 'Willkommen zurück bei Metallbude!',
+        is_new_customer: isNewCustomer,
+        formatted_code: code.split('').join(' ')
       }
-    };
-    
+    }
+  }
+};
+
     
     console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
     
