@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import fetch from 'node-fetch';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -15,12 +16,18 @@ app.use(bodyParser.json());
 // Shopify API configuration
 const SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
 const STOREFRONT_TOKEN = process.env.SHOPIFY_STOREFRONT_TOKEN || '8af29dd8b68e0bcfe5f9f99a86ebf1a3';
-const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN; // Your metallbudeauth app's Admin API token
-const API_VERSION = '2023-04'; // Update to your preferred API version
+const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
+const API_VERSION = '2023-04';
+const CLIENT_ID = 'b5878c27-621a-40d5-b6b6-43ce36dfa4bf'; // From the URL you provided
 
 // Shopify API URLs
 const STOREFRONT_API_URL = `https://${SHOP_DOMAIN}/api/${API_VERSION}/graphql.json`;
 const ADMIN_API_URL = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`;
+const CUSTOMER_ACCOUNT_API_URL = 'https://account.metallbude.com';
+
+// Store for verification codes and sessions
+const verificationCodes = {};
+const pendingSessions = {};
 
 // Request one-time code endpoint
 app.post('/auth/request-code', async (req, res) => {
@@ -57,7 +64,7 @@ app.post('/auth/request-code', async (req, res) => {
               }
             `,
             variables: {
-              query: email,
+              query: `email:${email}`,
             },
           }),
         });
@@ -79,10 +86,7 @@ app.post('/auth/request-code', async (req, res) => {
         }
       } catch (error) {
         console.error('Exception during customer lookup:', error);
-        // Continue with the flow even if customer lookup fails
       }
-    } else {
-      console.warn('No ADMIN_API_TOKEN provided, skipping customer lookup');
     }
     
     // Step 2: If customer doesn't exist, create one
@@ -125,12 +129,10 @@ app.post('/auth/request-code', async (req, res) => {
         
         if (createData.errors) {
           console.error('GraphQL errors during customer creation:', createData.errors);
-          // Don't return error, try to continue with the flow
         } else {
           const userErrors = createData.data?.customerCreate?.userErrors || [];
           if (userErrors.length > 0) {
             console.error('User errors during customer creation:', userErrors);
-            // Check if the error is because the customer already exists
             const alreadyExistsError = userErrors.some(err => 
               err.message?.includes('already exists') || 
               err.message?.includes('bereits existiert')
@@ -140,7 +142,6 @@ app.post('/auth/request-code', async (req, res) => {
               console.log('Customer already exists, continuing with the flow');
               customerExists = true;
             }
-            // Don't return error, try to continue with the flow
           } else {
             customerId = createData.data?.customerCreate?.customer?.id;
             if (customerId) {
@@ -151,7 +152,6 @@ app.post('/auth/request-code', async (req, res) => {
         }
       } catch (error) {
         console.error('Exception during customer creation:', error);
-        // Continue with the flow even if customer creation fails
       }
     }
 
@@ -203,11 +203,20 @@ app.post('/auth/request-code', async (req, res) => {
         });
       }
 
+      // Generate a session ID for this verification attempt
+      const sessionId = crypto.randomUUID();
+      pendingSessions[sessionId] = {
+        email,
+        expires: Date.now() + 15 * 60 * 1000, // 15 minutes expiration
+      };
+
       // Success - code has been sent
       console.log('Recovery email sent successfully');
+      console.log('Customer exists:', customerExists);
       res.json({ 
         success: true,
-        isNewCustomer: !customerExists
+        isNewCustomer: !customerExists,
+        sessionId: sessionId
       });
     } catch (error) {
       console.error('Exception during recovery:', error);
@@ -224,24 +233,33 @@ app.post('/auth/request-code', async (req, res) => {
 
 // Verify code endpoint
 app.post('/auth/verify-code', async (req, res) => {
-  const { email, code } = req.body;
+  const { email, code, sessionId } = req.body;
 
   if (!email || !code) {
     return res.status(400).json({ success: false, error: 'Email und Code sind erforderlich' });
   }
 
   try {
-    // With the new customer accounts system, we need to:
-    // 1. Redirect the user to a special URL that includes the code
-    // 2. Capture the token from the redirect
+    // Check if we have a pending session
+    if (sessionId && pendingSessions[sessionId]) {
+      if (pendingSessions[sessionId].email !== email) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Ungültige Sitzung' 
+        });
+      }
+      
+      if (Date.now() > pendingSessions[sessionId].expires) {
+        delete pendingSessions[sessionId];
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Sitzung abgelaufen. Bitte fordere einen neuen Code an' 
+        });
+      }
+    }
     
-    // Since we can't do this directly in a mobile app without WebView,
-    // we'll use a workaround that simulates the verification:
-    
-    // For demonstration purposes, we'll create a session token
-    // In a real implementation, you would need a backend service to:
-    // - Verify the code against Shopify's system
-    // - Generate a valid customer access token
+    // In a real implementation, we would verify the code against Shopify's system
+    // For now, we'll simulate a successful verification
     
     // Get customer data from Shopify
     let customer = {
@@ -286,7 +304,7 @@ app.post('/auth/verify-code', async (req, res) => {
               }
             `,
             variables: {
-              query: email,
+              query: `email:${email}`,
             },
           }),
         });
@@ -308,6 +326,11 @@ app.post('/auth/verify-code', async (req, res) => {
       } catch (error) {
         console.error('Exception during customer lookup:', error);
       }
+    }
+    
+    // Clean up the session
+    if (sessionId) {
+      delete pendingSessions[sessionId];
     }
     
     // Simulate successful verification
