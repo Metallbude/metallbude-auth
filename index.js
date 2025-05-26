@@ -20,9 +20,9 @@ const STOREFRONT_TOKEN = process.env.SHOPIFY_STOREFRONT_TOKEN || '8af29dd8b68e0b
 const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const API_VERSION = '2023-04';
 
-// Klaviyo configuration
-const KLAVIYO_PRIVATE_KEY = process.env.KLAVIYO_PRIVATE_KEY;
-console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
+// MailerSend configuration
+const MAILERSEND_API_KEY = process.env.MAILERSEND_API_KEY;
+console.log(`MailerSend API Key: ${MAILERSEND_API_KEY ? 'Set' : 'Not set'}`);
 
 // Store for verification codes and sessions
 const pendingSessions = {};
@@ -314,7 +314,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     // Create the email payload for MailerSend
     const mailerSendPayload = {
       from: {
-        email: "noreply@yourdomain.com",
+        email: "noreply@metallbude.de", // Update with your verified domain
         name: "Metallbude"
       },
       to: [
@@ -324,7 +324,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
         }
       ],
       subject: "Dein Bestätigungscode für Metallbude",
-      template_id: "neqvygm1858g0p7w", // Replace with your MailerSend template ID
+      template_id: "neqvygm1858g0p7w", // Your MailerSend template ID
       variables: [
         {
           email: email,
@@ -384,3 +384,14 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     return false;
   }
 }
+
+// Add a health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Start the server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Backend is live on port ${PORT}`);
+  console.log(`MailerSend API Key: ${MAILERSEND_API_KEY ? 'Set' : 'Not set'}`);
+});
