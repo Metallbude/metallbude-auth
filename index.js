@@ -301,60 +301,86 @@ function generateAccessToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-// Helper function to trigger Klaviyo Flow event to send the verification code
+// Helper function to send verification email using MailerSend
 async function sendVerificationEmail(email, code, isNewCustomer, firstName = '', lastName = '') {
-  if (!KLAVIYO_PRIVATE_KEY) {
-    console.log('Klaviyo API Key not set. SIMULATED EMAIL:');
+  if (!MAILERSEND_API_KEY) {
+    console.log('MailerSend API Key not set. SIMULATED EMAIL:');
     console.log('To:', email);
     console.log('Code:', code);
     return true;
   }
 
   try {
-    const response = await fetch('https://a.klaviyo.com/api/events/', {
+    // Create the email payload for MailerSend
+    const mailerSendPayload = {
+      from: {
+        email: "noreply@yourdomain.com",
+        name: "Metallbude"
+      },
+      to: [
+        {
+          email: email,
+          name: firstName ? `${firstName} ${lastName}`.trim() : email
+        }
+      ],
+      subject: "Dein Bestätigungscode für Metallbude",
+      template_id: "neqvygm1858g0p7w", // Replace with your MailerSend template ID
+      variables: [
+        {
+          email: email,
+          substitutions: [
+            {
+              var: "verification_code",
+              value: code
+            },
+            {
+              var: "welcome_message",
+              value: isNewCustomer
+                ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
+                : 'Willkommen zurück bei Metallbude!'
+            },
+            {
+              var: "first_name",
+              value: firstName || ""
+            }
+          ]
+        }
+      ]
+    };
+    
+    console.log('📦 MailerSend payload:', JSON.stringify(mailerSendPayload, null, 2));
+    
+    // Make the API request
+    const response = await fetch('https://api.mailersend.com/v1/email', {
       method: 'POST',
       headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_PRIVATE_KEY}`,
+        'Authorization': `Bearer ${MAILERSEND_API_KEY}`,
         'Content-Type': 'application/json',
-        'revision': '2023-02-22',
+        'X-Requested-With': 'XMLHttpRequest'
       },
-      body: JSON.stringify({
-        data: {
-          type: 'event',
-          attributes: {
-            profile: {
-              email,
-              first_name: firstName,
-              last_name: lastName
-            },
-            metric: {
-              name: 'one_time_code_requested'
-            },
-            properties: {
-              verification_code: code,
-              welcome_message: isNewCustomer
-                ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
-                : 'Willkommen zurück bei Metallbude!',
-            },
-          }
-        }
-      })
+      body: JSON.stringify(mailerSendPayload)
     });
 
+    // Handle response
     if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Klaviyo API error: ${errorBody}`);
+      let errorDetails;
+      try {
+        errorDetails = await response.json();
+      } catch (e) {
+        errorDetails = await response.text();
+      }
+      
+      console.error('❌ MailerSend API error details:', JSON.stringify(errorDetails, null, 2));
+      throw new Error(`MailerSend API error: ${response.status} ${response.statusText}`);
     }
 
-    console.log(`📬 Klaviyo one_time_code_requested event triggered for ${email}`);
+    // Log successful response
+    const responseData = await response.json();
+    console.log('✅ MailerSend API response:', JSON.stringify(responseData, null, 2));
+    console.log(`📬 Verification email sent to ${email} with code ${code}`);
     return true;
   } catch (error) {
-    console.error('❌ Klaviyo API error:', error);
+    console.error('❌ MailerSend API error:', error);
     return false;
   }
 }
-
-app.listen(PORT, () => {
-  console.log(`✅ Backend is live on port ${PORT}`);
-  console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
-});
