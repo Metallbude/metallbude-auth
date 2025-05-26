@@ -311,10 +311,10 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
-    // Enhanced payload with multiple ways to access the verification code
+    // Enhanced payload with special property names that might get mapped differently
     const klaviyoPayload = {
       data: {
-        type: "event",
+        type: 'event',
         attributes: {
           profile: {
             email,
@@ -322,15 +322,21 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
             last_name: lastName
           },
           metric: {
-            name: "one_time_code_requested"
+            name: 'one_time_code_requested'
           },
-          verification_code: code, // Add this line
           properties: {
-            // Keep the rest as is
+            // Try all possible variations of the property name
             verification_code: code,
             code: code,
             verificationCode: code,
             otp: code,
+            // Special property names that might get mapped differently
+            '__verification_code': code,
+            '$verification_code': code,
+            '_verification_code': code,
+            // Include it as a top-level property name too
+            'verification_code_top': code,
+            // Other properties
             welcome_message: isNewCustomer
               ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
               : 'Willkommen zurück bei Metallbude!',
@@ -340,7 +346,6 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
         }
       }
     };
-    
     
     console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
     
@@ -384,16 +389,3 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     return false;
   }
 }
-
-// Optional: Add a fallback email sender function
-async function sendFallbackEmail(email, code) {
-  console.log('⚠️ Using fallback email method for', email);
-  // Implement your fallback email sending logic here
-  // This could use a different service like SendGrid, AWS SES, etc.
-  return true;
-}
-
-app.listen(PORT, () => {
-  console.log(`✅ Backend is live on port ${PORT}`);
-  console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
-});
