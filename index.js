@@ -1,10 +1,11 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const fetch = require('node-fetch');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -18,11 +19,12 @@ app.post('/auth/verify-code', async (req, res) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': process.env.SHOPIFY_STOREFRONT_TOKEN,
       },
       body: JSON.stringify({
         email,
         code,
-        shop: 'metallbude.com',
+        shop: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude.com',
       }),
     });
 
