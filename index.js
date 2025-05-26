@@ -311,6 +311,28 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
+    const klaviyoPayload = {
+      data: {
+        type: 'event',
+        attributes: {
+          profile: {
+            email,
+            first_name: firstName,
+            last_name: lastName
+          },
+          metric: {
+            name: 'one_time_code_requested'
+          },
+          properties: {
+            verification_code: code,
+            welcome_message: isNewCustomer
+              ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
+              : 'Willkommen zurück bei Metallbude!',
+          }
+        }
+      }
+    };
+    console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
     const response = await fetch('https://a.klaviyo.com/api/events/', {
       method: 'POST',
       headers: {
@@ -318,27 +340,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
         'Content-Type': 'application/json',
         'revision': '2023-02-22',
       },
-      body: JSON.stringify({
-        data: {
-          type: 'event',
-          attributes: {
-            profile: {
-              email,
-              first_name: firstName,
-              last_name: lastName
-            },
-            metric: {
-              name: 'one_time_code_requested'
-            },
-            properties: {
-              verification_code: code,
-              welcome_message: isNewCustomer
-                ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
-                : 'Willkommen zurück bei Metallbude!',
-            },
-          }
-        }
-      })
+      body: JSON.stringify(klaviyoPayload)
     });
 
     if (!response.ok) {
