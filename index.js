@@ -5,7 +5,7 @@ import bodyParser from 'body-parser';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import nodemailer from 'nodemailer';
+import Klaviyo from 'klaviyo-node';
 
 dotenv.config();
 
@@ -21,37 +21,18 @@ const STOREFRONT_TOKEN = process.env.SHOPIFY_STOREFRONT_TOKEN || '8af29dd8b68e0b
 const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const API_VERSION = '2023-04';
 
-// Email configuration
-const EMAIL_USER = process.env.EMAIL_USER;
-const EMAIL_PASS = process.env.EMAIL_PASS;
-const EMAIL_SERVICE = process.env.EMAIL_SERVICE || 'gmail';
+// Klaviyo configuration
+const KLAVIYO_PRIVATE_KEY = process.env.KLAVIYO_PRIVATE_KEY;
+const KLAVIYO_TEMPLATE_NAME = 'OneTimeCode'; // The name of your template in Klaviyo
 
-// Create email transporter with more detailed configuration
-let transporter;
-
-if (EMAIL_USER && EMAIL_PASS) {
-  transporter = nodemailer.createTransport({
-    service: EMAIL_SERVICE,
-    auth: {
-      user: EMAIL_USER,
-      pass: EMAIL_PASS
-    },
-    debug: true // Enable debug logs
+// Initialize Klaviyo if API key is available
+let klaviyo = null;
+if (KLAVIYO_PRIVATE_KEY) {
+  klaviyo = new Klaviyo({
+    privateKey: KLAVIYO_PRIVATE_KEY
   });
-} else {
-  console.warn('Email credentials not provided. Email sending will be simulated.');
-  // Create a mock transporter that logs instead of sending
-  transporter = {
-    sendMail: (options) => {
-      console.log('MOCK EMAIL SENT:');
-      console.log('To:', options.to);
-      console.log('Subject:', options.subject);
-      console.log('Code:', options.html.match(/\d{6}/)[0]);
-      return Promise.resolve({ messageId: 'mock-id' });
-    }
-  };
+  console.log('Klaviyo initialized with private key');
 }
-
 
 // Store for verification codes and sessions
 const pendingSessions = {};
@@ -83,6 +64,8 @@ app.post('/auth/request-code', async (req, res) => {
     
     // Check if customer exists in Shopify
     let isNewCustomer = true;
+    let firstName = '';
+    let lastName = '';
     
     if (ADMIN_API_TOKEN) {
       try {
@@ -100,6 +83,8 @@ app.post('/auth/request-code', async (req, res) => {
                     node {
                       id
                       email
+                      firstName
+                      lastName
                     }
                   }
                 }
@@ -117,6 +102,8 @@ app.post('/auth/request-code', async (req, res) => {
           const customers = customerData.data?.customers?.edges || [];
           if (customers.length > 0) {
             isNewCustomer = false;
+            firstName = customers[0].node.firstName || '';
+            lastName = customers[0].node.lastName || '';
           }
         }
       } catch (error) {
@@ -126,7 +113,7 @@ app.post('/auth/request-code', async (req, res) => {
     
     // Send verification email
     try {
-      await sendVerificationEmail(email, verificationCode, isNewCustomer);
+      await sendVerificationEmail(email, verificationCode, isNewCustomer, firstName, lastName);
       console.log(`Verification email sent to ${email}`);
     } catch (emailError) {
       console.error('Error sending email:', emailError);
@@ -146,7 +133,6 @@ app.post('/auth/request-code', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
 
 // Verify code endpoint
 app.post('/auth/verify-code', async (req, res) => {
@@ -325,68 +311,52 @@ function generateAccessToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-// Helper function to send verification email
-async function sendVerificationEmail(email, code, isNewCustomer) {
-  try {
-    const mailOptions = {
-      from: EMAIL_USER || 'noreply@metallbude.com',
-      to: email,
-      subject: 'Dein Anmeldecode für Metallbude',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 5px;">
-          <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #333;">Metallbude</h1>
-          </div>
-          
-          <h2 style="color: #333; text-align: center;">Dein Anmeldecode</h2>
-          
-          <p style="color: #666; font-size: 16px; line-height: 1.5;">
-            ${isNewCustomer ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' : 'Willkommen zurück bei Metallbude!'}
-          </p>
-          
-          <p style="color: #666; font-size: 16px; line-height: 1.5;">
-            Hier ist dein Anmeldecode:
-          </p>
-          
-          <div style="background-color: #f4f4f4; padding: 15px; font-size: 24px; text-align: center; letter-spacing: 5px; font-weight: bold; margin: 20px 0; border-radius: 5px;">
-            ${code}
-          </div>
-          
-          <p style="color: #666; font-size: 16px; line-height: 1.5;">
-            Dieser Code ist 15 Minuten gültig.
-          </p>
-          
-          <p style="color: #666; font-size: 14px; margin-top: 30px; text-align: center;">
-            Falls du diese E-Mail nicht angefordert hast, kannst du sie ignorieren.
-          </p>
-          
-          <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eaeaea; text-align: center; color: #999; font-size: 12px;">
-            &copy; ${new Date().getFullYear()} Metallbude. Alle Rechte vorbehalten.
-          </div>
-        </div>
-      `
-    };
-
-    if (!EMAIL_USER || !EMAIL_PASS) {
-      console.log('SIMULATED EMAIL:');
-      console.log('To:', email);
-      console.log('Code:', code);
-      return { messageId: 'simulated' };
+// Helper function to send verification email using Klaviyo
+async function sendVerificationEmail(email, code, isNewCustomer, firstName, lastName) {
+  // If Klaviyo is available, use it to send the email
+  if (klaviyo) {
+    try {
+      // Create a profile in Klaviyo (this will update if it already exists)
+      await klaviyo.profiles.create({
+        email: email,
+        firstName: firstName,
+        lastName: lastName,
+        properties: {
+          isNewCustomer: isNewCustomer
+        }
+      });
+      
+      // Send the template email
+      await klaviyo.templates.sendTemplate({
+        templateName: KLAVIYO_TEMPLATE_NAME,
+        to: email,
+        context: {
+          verification_code: code,
+          is_new_customer: isNewCustomer,
+          welcome_message: isNewCustomer 
+            ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.' 
+            : 'Willkommen zurück bei Metallbude!',
+          first_name: firstName
+        }
+      });
+      
+      return true;
+    } catch (error) {
+      console.error('Klaviyo error:', error);
+      // Fall through to the simulation
     }
-
-    return await transporter.sendMail(mailOptions);
-  } catch (error) {
-    console.error('Error in sendVerificationEmail:', error);
-    // Don't throw the error, just log it and return a simulated success
-    console.log('Falling back to simulated email');
-    console.log('To:', email);
-    console.log('Code:', code);
-    return { messageId: 'fallback-simulated' };
   }
+  
+  // If Klaviyo is not available or fails, simulate email sending
+  console.log('SIMULATED EMAIL:');
+  console.log('To:', email);
+  console.log('Subject: Dein Anmeldecode für Metallbude');
+  console.log('Code:', code);
+  
+  return true;
 }
-
 
 app.listen(PORT, () => {
   console.log(`✅ Backend is live on port ${PORT}`);
-  console.log(`Email configuration: ${EMAIL_USER ? 'Set' : 'Not set'}`);
+  console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
 });
