@@ -311,6 +311,10 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
+    // Make sure the code is a string
+    const codeString = String(code);
+    
+    // Create payload with the verification code in multiple formats
     const klaviyoPayload = {
       data: {
         type: 'event',
@@ -324,16 +328,22 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
             name: 'one_time_code_requested'
           },
           properties: {
-            verification_code: code,
+            // Include the code in multiple formats to ensure template compatibility
+            verification_code: codeString,
+            code: codeString,
+            // Add the code directly at the root level for easier template access
+            $verification_code: codeString,
+            $code: codeString,
             welcome_message: isNewCustomer
               ? 'Willkommen bei Metallbude! Wir haben ein Konto für dich erstellt.'
               : 'Willkommen zurück bei Metallbude!',
           }
-          
         }
       }
     };
+    
     console.log('📦 Klaviyo event payload:', JSON.stringify(klaviyoPayload, null, 2));
+    
     const response = await fetch('https://a.klaviyo.com/api/events/', {
       method: 'POST',
       headers: {
@@ -344,9 +354,13 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
       body: JSON.stringify(klaviyoPayload)
     });
 
+    // Log the full response for debugging
+    const responseText = await response.text();
+    console.log(`Klaviyo API response status: ${response.status}`);
+    console.log(`Klaviyo API response body: ${responseText}`);
+
     if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Klaviyo API error: ${errorBody}`);
+      throw new Error(`Klaviyo API error: ${response.status} - ${responseText}`);
     }
 
     console.log(`📬 Klaviyo one_time_code_requested event triggered for ${email}`);
@@ -356,8 +370,3 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
     return false;
   }
 }
-
-app.listen(PORT, () => {
-  console.log(`✅ Backend is live on port ${PORT}`);
-  console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
-});
