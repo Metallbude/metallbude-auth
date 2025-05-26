@@ -311,7 +311,7 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 
   try {
-    // Structure the payload to match the template's expectations
+    // Structure the payload to match what the template expects (event.verification_code)
     const klaviyoPayload = {
       data: {
         type: 'event',
@@ -324,9 +324,8 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
           metric: {
             name: 'one_time_code_requested'
           },
-          // Add verification_code directly to the attributes
+          // Add verification_code at the attributes level to match template
           verification_code: code,
-          // Keep properties for backward compatibility
           properties: {
             verification_code: code,
             welcome_message: isNewCustomer
@@ -362,3 +361,8 @@ async function sendVerificationEmail(email, code, isNewCustomer, firstName = '',
   }
 }
 
+// Keep your existing app.listen code
+app.listen(PORT, () => {
+  console.log(`✅ Backend is live on port ${PORT}`);
+  console.log(`Klaviyo API Key: ${KLAVIYO_PRIVATE_KEY ? 'Set' : 'Not set'}`);
+});
