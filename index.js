@@ -513,6 +513,49 @@ app.post('/auth/request-code', async (req, res) => {
     return res.status(400).json({ success: false, error: 'E-Mail-Adresse ist erforderlich' });
   }
 
+  // Check if customer exists in Shopify
+  let isNewCustomer = true;
+  try {
+    // Try to authenticate with a dummy password to check existence
+    const checkQuery = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerUserErrors {
+            code
+          }
+        }
+      }
+    `;
+
+    const checkResult = await axios.post(
+      config.apiUrl,
+      {
+        query: checkQuery,
+        variables: {
+          input: {
+            email: email,
+            password: 'dummy_check_' + Date.now()
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const errors = checkResult.data?.data?.customerAccessTokenCreate?.customerUserErrors || [];
+    // If we get UNIDENTIFIED_CUSTOMER, the customer doesn't exist
+    // If we get INVALID_CREDENTIALS, the customer exists
+    isNewCustomer = errors.some(err => err.code === 'UNIDENTIFIED_CUSTOMER');
+    
+    console.log(`Customer ${email} - exists in Shopify: ${!isNewCustomer}`);
+  } catch (error) {
+    console.error('Error checking customer existence:', error.message);
+  }
+
   const code = generateVerificationCode();
   const sessionId = generateSessionId();
 
@@ -521,7 +564,7 @@ app.post('/auth/request-code', async (req, res) => {
     code,
     createdAt: Date.now(),
     expiresAt: Date.now() + 10 * 60 * 1000,
-    isNewCustomer: !config.customerEmails.has(email)
+    isNewCustomer
   });
 
   await sendVerificationEmail(email, code);
@@ -529,7 +572,7 @@ app.post('/auth/request-code', async (req, res) => {
 
   res.json({
     success: true,
-    isNewCustomer: !config.customerEmails.has(email),
+    isNewCustomer,
     sessionId,
     message: 'Verifizierungscode wurde gesendet'
   });
@@ -548,9 +591,29 @@ app.post('/auth/verify-code', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Ungültiger oder abgelaufener Code' });
   }
 
-  // Mark customer as registered
-  if (!config.customerEmails.has(email)) {
-    const customerId = `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`;
+  // For existing Shopify customers, we need to get their actual customer ID
+  let customerId;
+  let customerData;
+  
+  if (!verificationData.isNewCustomer) {
+    // Try to get customer data using Admin API or create a customer-specific token
+    // For now, we'll generate a consistent ID based on email
+    customerId = `gid://shopify/Customer/${crypto.createHash('sha256').update(email).digest('hex').substring(0, 16)}`;
+    customerData = {
+      id: customerId,
+      email: email,
+      displayName: email.split('@')[0]
+    };
+  } else {
+    // New customer - generate new ID
+    customerId = `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`;
+    customerData = {
+      id: customerId,
+      email: email,
+      displayName: email.split('@')[0]
+    };
+    
+    // Store for future reference
     config.customerEmails.set(email, customerId);
   }
 
@@ -558,7 +621,8 @@ app.post('/auth/verify-code', async (req, res) => {
   const accessToken = crypto.randomBytes(32).toString('hex');
   config.sessions.set(accessToken, {
     email,
-    customerId: config.customerEmails.get(email),
+    customerId,
+    customerData,
     createdAt: Date.now()
   });
 
@@ -567,11 +631,7 @@ app.post('/auth/verify-code', async (req, res) => {
   res.json({
     success: true,
     accessToken,
-    customer: {
-      id: config.customerEmails.get(email),
-      email: email,
-      displayName: email.split('@')[0]
-    }
+    customer: customerData
   });
 });
 
