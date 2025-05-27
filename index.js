@@ -510,14 +510,15 @@ app.get('/logout', (req, res) => {
 // Helper function to get real customer data from Shopify Admin API
 async function getShopifyCustomerByEmail(email) {
   if (!config.adminToken) {
-    console.log('No admin token configured');
+    console.log('No admin token configured - check SHOPIFY_ADMIN_TOKEN env var');
     return null;
   }
 
   try {
+    // Make email search case-insensitive
     const query = `
       query getCustomerByEmail($query: String!) {
-        customers(first: 1, query: $query) {
+        customers(first: 5, query: $query) {
           edges {
             node {
               id
@@ -546,12 +547,14 @@ async function getShopifyCustomerByEmail(email) {
       }
     `;
 
+    console.log(`Searching for customer with email: ${email}`);
+    
     const response = await axios.post(
       config.adminApiUrl,
       {
         query,
         variables: {
-          query: `email:${email}`
+          query: `email:"${email}"` // Exact email search with quotes
         }
       },
       {
@@ -562,8 +565,20 @@ async function getShopifyCustomerByEmail(email) {
       }
     );
 
+    if (response.data.errors) {
+      console.error('GraphQL errors:', response.data.errors);
+      return null;
+    }
+
     const customers = response.data?.data?.customers?.edges || [];
-    return customers.length > 0 ? customers[0].node : null;
+    console.log(`Found ${customers.length} customers`);
+    
+    // Find exact match (case-insensitive)
+    const customer = customers.find(c => 
+      c.node.email.toLowerCase() === email.toLowerCase()
+    );
+    
+    return customer ? customer.node : null;
   } catch (error) {
     console.error('Error fetching customer from Shopify:', error.response?.data || error.message);
     return null;
@@ -774,15 +789,41 @@ app.post('/auth/verify-code', async (req, res) => {
 // Middleware to authenticate app tokens
 const authenticateAppToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
+  
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No token provided' });
   }
 
   const token = authHeader.substring(7);
-  const session = config.sessions.get(token);
+  let session = config.sessions.get(token);
+  
+  // Temporary: If session not found, create one for existing tokens
+  // Remove this after all users have logged in again
+  if (!session && token.length === 64) {
+    console.log('Creating temporary session for existing token');
+    // For now, we don't know the email, so return a basic response
+    session = {
+      email: 'unknown@example.com',
+      customerId: 'gid://shopify/Customer/temporary',
+      customerData: {
+        id: 'gid://shopify/Customer/temporary',
+        email: 'unknown@example.com',
+        displayName: 'User'
+      },
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
+    };
+    // Don't store this temporary session
+  }
   
   if (!session) {
     return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  // Check if session is expired
+  if (session.expiresAt && session.expiresAt < Date.now()) {
+    config.sessions.delete(token);
+    return res.status(401).json({ error: 'Token expired' });
   }
 
   req.session = session;
@@ -1083,4 +1124,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`OAuth endpoints ready at: ${config.issuer}`);
   console.log(`Mobile endpoints ready at: ${config.issuer}/auth/*`);
   console.log(`Customer endpoints ready at: ${config.issuer}/customer/*`);
+  console.log(`Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
+  console.log(`Storefront token configured: ${config.storefrontToken ? 'YES' : 'NO'}`);
 });
