@@ -141,7 +141,11 @@ app.post('/auth/request-code', async (req, res) => {
     let isNewCustomer = false;
     
     if (!customerPassword) {
-      // Try to authenticate with a dummy password to check if customer exists
+      // Generate a password for this email
+      customerPassword = generateSecurePassword();
+      config.customerPasswords.set(email, customerPassword);
+      
+      // Try to authenticate to check if customer account exists
       const checkCustomerMutation = `
         mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
           customerAccessTokenCreate(input: $input) {
@@ -160,20 +164,15 @@ app.post('/auth/request-code', async (req, res) => {
       const checkResult = await shopifyStorefrontQuery(checkCustomerMutation, {
         input: {
           email: email,
-          password: 'dummy_check_password'
+          password: customerPassword
         }
       });
 
-      // If the error is UNIDENTIFIED_CUSTOMER, the customer doesn't exist
+      // If we get UNIDENTIFIED_CUSTOMER, it means no account exists
       const errors = checkResult.data?.customerAccessTokenCreate?.customerUserErrors || [];
       isNewCustomer = errors.some(err => err.code === 'UNIDENTIFIED_CUSTOMER');
       
-      if (!isNewCustomer) {
-        // Customer exists but we don't have their password stored
-        // Generate a new password for them
-        customerPassword = generateSecurePassword();
-        config.customerPasswords.set(email, customerPassword);
-      }
+      console.log(`Customer ${email} - Account exists: ${!isNewCustomer}`);
     }
     
     // Store code with expiration (10 minutes)
@@ -282,10 +281,6 @@ app.post('/auth/verify-code', async (req, res) => {
               lastName
               displayName
             }
-            customerAccessToken {
-              accessToken
-              expiresAt
-            }
             customerUserErrors {
               field
               message
@@ -315,7 +310,40 @@ app.post('/auth/verify-code', async (req, res) => {
       }
 
       customerData = createResult.data?.customerCreate?.customer;
-      customerAccessToken = createResult.data?.customerCreate?.customerAccessToken?.accessToken;
+      
+      // Now authenticate the newly created customer
+      const tokenMutation = `
+        mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+          customerAccessTokenCreate(input: $input) {
+            customerAccessToken {
+              accessToken
+              expiresAt
+            }
+            customerUserErrors {
+              field
+              message
+              code
+            }
+          }
+        }
+      `;
+
+      const tokenResult = await shopifyStorefrontQuery(tokenMutation, {
+        input: {
+          email: email,
+          password: customerPassword
+        }
+      });
+
+      if (tokenResult.data?.customerAccessTokenCreate?.customerUserErrors?.length > 0) {
+        const error = tokenResult.data.customerAccessTokenCreate.customerUserErrors[0];
+        return res.status(400).json({ 
+          success: false, 
+          error: error.message 
+        });
+      }
+
+      customerAccessToken = tokenResult.data?.customerAccessTokenCreate?.customerAccessToken?.accessToken;
       
       console.log('Customer data:', customerData);
       console.log('Access token received:', !!customerAccessToken);
