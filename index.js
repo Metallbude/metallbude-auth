@@ -849,10 +849,15 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       return res.json({ orders: [] });
     }
 
+    console.log('Fetching orders for customer:', req.session.customerId);
+    console.log('Session data:', JSON.stringify(req.session));
+
     // Get orders from Shopify Admin API
     const query = `
       query getCustomerOrders($customerId: ID!) {
         customer(id: $customerId) {
+          id
+          email
           orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
             edges {
               node {
@@ -950,7 +955,15 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       }
     );
 
+    console.log('Orders response:', JSON.stringify(response.data).substring(0, 200));
+
+    if (response.data.errors) {
+      console.error('GraphQL errors:', response.data.errors);
+      return res.json({ orders: [] });
+    }
+
     const orderEdges = response.data?.data?.customer?.orders?.edges || [];
+    console.log(`Found ${orderEdges.length} orders`);
     
     // Transform orders to match the expected format
     const orders = orderEdges.map(edge => {
@@ -1015,10 +1028,14 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       return res.json({ amount: 0.0, currency: 'EUR' });
     }
 
+    console.log('Fetching store credit for customer:', req.session.customerId);
+
     // Query customer metafields for store credit
     const query = `
       query getCustomerMetafield($customerId: ID!) {
         customer(id: $customerId) {
+          id
+          email
           metafield(namespace: "customer", key: "store_credit") {
             value
             type
@@ -1043,11 +1060,16 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       }
     );
 
+    console.log('Store credit response:', JSON.stringify(response.data));
+
     const metafield = response.data?.data?.customer?.metafield;
     let creditAmount = 0.0;
     
     if (metafield && metafield.value) {
       creditAmount = parseFloat(metafield.value) || 0.0;
+      console.log('Found store credit:', creditAmount);
+    } else {
+      console.log('No store credit metafield found');
     }
 
     res.json({
