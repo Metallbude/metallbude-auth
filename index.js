@@ -1,8 +1,9 @@
-import express from 'express';
-import crypto from 'crypto';
-import jwt from 'jsonwebtoken';
-import bodyParser from 'body-parser';
-import { URL } from 'url';
+const express = require('express');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const bodyParser = require('body-parser');
+const { URL } = require('url');
+
 
 // Initialize Express app
 const app = express();
@@ -342,11 +343,22 @@ function generateIdToken(user, clientId, nonce, expiresIn) {
     payload.nonce = nonce;
   }
 
-  // Sign the ID token with the private key
-  return jwt.sign(payload, config.privateKey, {
-    algorithm: 'RS256',
-    keyid: 'oidc-key-1'
-  });
+  // Replace the jwt.sign function with this:
+  function signJWT(payload, privateKey, options) {
+    const header = {
+      alg: 'RS256',
+      typ: 'JWT',
+      kid: options.keyid
+    };
+    
+    const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64url');
+    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    
+    const signatureInput = `${encodedHeader}.${encodedPayload}`;
+    const signature = crypto.sign('sha256', Buffer.from(signatureInput), privateKey);
+    
+    return `${signatureInput}.${signature.toString('base64url')}`;
+  }
 }
 
 // Helper function to redirect with an error
