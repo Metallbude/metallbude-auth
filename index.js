@@ -527,7 +527,9 @@ async function getShopifyCustomerByEmail(email) {
               lastName
               displayName
               phone
-              acceptsMarketing
+              emailMarketingConsent {
+                marketingState
+              }
               defaultAddress {
                 id
                 firstName
@@ -618,7 +620,6 @@ async function createShopifyCustomer(email) {
         variables: {
           input: {
             email: email,
-            acceptsMarketing: false,
             emailMarketingConsent: {
               marketingState: "NOT_SUBSCRIBED"
             }
@@ -654,47 +655,14 @@ app.post('/auth/request-code', async (req, res) => {
     return res.status(400).json({ success: false, error: 'E-Mail-Adresse ist erforderlich' });
   }
 
-  // Check if customer exists in Shopify
+  // Check if customer exists in Shopify using Admin API
   let isNewCustomer = true;
-  try {
-    // Try to authenticate with a dummy password to check existence
-    const checkQuery = `
-      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
-        customerAccessTokenCreate(input: $input) {
-          customerUserErrors {
-            code
-          }
-        }
-      }
-    `;
-
-    const checkResult = await axios.post(
-      config.apiUrl,
-      {
-        query: checkQuery,
-        variables: {
-          input: {
-            email: email,
-            password: 'dummy_check_' + Date.now()
-          }
-        }
-      },
-      {
-        headers: {
-          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const errors = checkResult.data?.data?.customerAccessTokenCreate?.customerUserErrors || [];
-    // If we get UNIDENTIFIED_CUSTOMER, the customer doesn't exist
-    // If we get INVALID_CREDENTIALS, the customer exists
-    isNewCustomer = errors.some(err => err.code === 'UNIDENTIFIED_CUSTOMER');
-    
+  if (config.adminToken) {
+    const existingCustomer = await getShopifyCustomerByEmail(email);
+    isNewCustomer = !existingCustomer;
     console.log(`Customer ${email} - exists in Shopify: ${!isNewCustomer}`);
-  } catch (error) {
-    console.error('Error checking customer existence:', error.message);
+  } else {
+    console.log('Cannot check customer existence - no admin token');
   }
 
   const code = generateVerificationCode();
@@ -852,7 +820,7 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
         lastName: shopifyCustomer.lastName || '',
         displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
         phone: shopifyCustomer.phone || null,
-        acceptsMarketing: shopifyCustomer.acceptsMarketing || false,
+        acceptsMarketing: shopifyCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
         defaultAddress: shopifyCustomer.defaultAddress || null
       };
       res.json({ customer });
