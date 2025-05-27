@@ -623,7 +623,8 @@ app.post('/auth/verify-code', async (req, res) => {
     email,
     customerId,
     customerData,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
   });
 
   config.verificationCodes.delete(sessionId);
@@ -635,6 +636,94 @@ app.post('/auth/verify-code', async (req, res) => {
   });
 });
 
+// ===== CUSTOMER DATA ENDPOINTS FOR FLUTTER APP =====
+
+// Middleware to authenticate app tokens
+const authenticateAppToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  const token = authHeader.substring(7);
+  const session = config.sessions.get(token);
+  
+  if (!session) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  req.session = session;
+  next();
+};
+
+// GET /auth/validate - Validate app token
+app.get('/auth/validate', authenticateAppToken, (req, res) => {
+  res.json({
+    valid: true,
+    customer: req.session.customerData
+  });
+});
+
+// GET /customer/profile - Get customer profile
+app.get('/customer/profile', authenticateAppToken, async (req, res) => {
+  try {
+    const customer = {
+      ...req.session.customerData,
+      firstName: req.session.customerData.displayName,
+      lastName: '',
+      phone: null,
+      acceptsMarketing: false,
+      defaultAddress: null
+    };
+
+    res.json({ customer });
+  } catch (error) {
+    console.error('Profile fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// GET /customer/orders - Get customer orders
+app.get('/customer/orders', authenticateAppToken, async (req, res) => {
+  try {
+    // Return empty orders for now
+    // In production, you would fetch real orders from Shopify Admin API
+    res.json({ orders: [] });
+  } catch (error) {
+    console.error('Orders fetch error:', error);
+    res.json({ orders: [] });
+  }
+});
+
+// GET /customer/store-credit - Get store credit
+app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
+  try {
+    // Return default store credit
+    // In production, you would fetch from Shopify metafields
+    res.json({
+      amount: 0.0,
+      currency: 'EUR'
+    });
+  } catch (error) {
+    console.error('Store credit error:', error);
+    res.json({
+      amount: 0.0,
+      currency: 'EUR'
+    });
+  }
+});
+
+// POST /auth/logout - Logout
+app.post('/auth/logout', authenticateAppToken, (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader.substring(7);
+  
+  // Remove session
+  config.sessions.delete(token);
+  
+  res.json({ success: true });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
@@ -642,6 +731,7 @@ app.get('/health', (req, res) => {
     mode: 'combined',
     oauth: true,
     oneTimeCode: true,
+    customerEndpoints: true,
     issuer: config.issuer
   });
 });
@@ -651,4 +741,5 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
   console.log(`OAuth endpoints ready at: ${config.issuer}`);
   console.log(`Mobile endpoints ready at: ${config.issuer}/auth/*`);
+  console.log(`Customer endpoints ready at: ${config.issuer}/customer/*`);
 });
