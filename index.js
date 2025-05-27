@@ -33,7 +33,9 @@ const config = {
   issuer: process.env.SERVER_URL || 'https://metallbude-auth.onrender.com',
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
   storefrontToken: process.env.SHOPIFY_STOREFRONT_TOKEN,
+  adminToken: process.env.SHOPIFY_ADMIN_TOKEN, // Add admin token
   apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
+  adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2024-10/graphql.json',
   mailerSendApiKey: process.env.MAILERSEND_API_KEY,
   privateKey,
   publicKey,
@@ -505,6 +507,130 @@ app.get('/logout', (req, res) => {
 
 // ===== MOBILE APP ENDPOINTS =====
 
+// Helper function to get real customer data from Shopify Admin API
+async function getShopifyCustomerByEmail(email) {
+  if (!config.adminToken) {
+    console.log('No admin token configured');
+    return null;
+  }
+
+  try {
+    const query = `
+      query getCustomerByEmail($query: String!) {
+        customers(first: 1, query: $query) {
+          edges {
+            node {
+              id
+              email
+              firstName
+              lastName
+              displayName
+              phone
+              acceptsMarketing
+              defaultAddress {
+                id
+                firstName
+                lastName
+                company
+                address1
+                address2
+                city
+                province
+                country
+                zip
+                phone
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query,
+        variables: {
+          query: `email:${email}`
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const customers = response.data?.data?.customers?.edges || [];
+    return customers.length > 0 ? customers[0].node : null;
+  } catch (error) {
+    console.error('Error fetching customer from Shopify:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+// Helper function to create customer in Shopify
+async function createShopifyCustomer(email) {
+  if (!config.adminToken) {
+    console.log('No admin token configured');
+    return null;
+  }
+
+  try {
+    const mutation = `
+      mutation customerCreate($input: CustomerInput!) {
+        customerCreate(input: $input) {
+          customer {
+            id
+            email
+            firstName
+            lastName
+            displayName
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: mutation,
+        variables: {
+          input: {
+            email: email,
+            acceptsMarketing: false,
+            emailMarketingConsent: {
+              marketingState: "NOT_SUBSCRIBED"
+            }
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const result = response.data?.data?.customerCreate;
+    if (result?.customer) {
+      return result.customer;
+    }
+
+    console.error('Customer creation errors:', result?.userErrors);
+    return null;
+  } catch (error) {
+    console.error('Error creating customer in Shopify:', error.response?.data || error.message);
+    return null;
+  }
+}
+
 // Request one-time code endpoint (for Flutter app)
 app.post('/auth/request-code', async (req, res) => {
   const { email } = req.body;
@@ -591,29 +717,36 @@ app.post('/auth/verify-code', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Ungültiger oder abgelaufener Code' });
   }
 
-  // For existing Shopify customers, we need to get their actual customer ID
   let customerId;
   let customerData;
   
-  if (!verificationData.isNewCustomer) {
-    // Try to get customer data using Admin API or create a customer-specific token
-    // For now, we'll generate a consistent ID based on email
-    customerId = `gid://shopify/Customer/${crypto.createHash('sha256').update(email).digest('hex').substring(0, 16)}`;
+  // Try to get real customer data from Shopify
+  let shopifyCustomer = await getShopifyCustomerByEmail(email);
+  
+  if (!shopifyCustomer && verificationData.isNewCustomer) {
+    // Create new customer in Shopify
+    shopifyCustomer = await createShopifyCustomer(email);
+  }
+  
+  if (shopifyCustomer) {
+    // Use real Shopify customer data
+    customerId = shopifyCustomer.id;
     customerData = {
-      id: customerId,
-      email: email,
-      displayName: email.split('@')[0]
+      id: shopifyCustomer.id,
+      email: shopifyCustomer.email,
+      displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
+      firstName: shopifyCustomer.firstName || '',
+      lastName: shopifyCustomer.lastName || ''
     };
   } else {
-    // New customer - generate new ID
-    customerId = `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`;
+    // Fallback to generated data if Shopify API fails
+    customerId = config.customerEmails.get(email) || 
+                 `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`;
     customerData = {
       id: customerId,
       email: email,
       displayName: email.split('@')[0]
     };
-    
-    // Store for future reference
     config.customerEmails.set(email, customerId);
   }
 
@@ -667,16 +800,33 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 // GET /customer/profile - Get customer profile
 app.get('/customer/profile', authenticateAppToken, async (req, res) => {
   try {
-    const customer = {
-      ...req.session.customerData,
-      firstName: req.session.customerData.displayName,
-      lastName: '',
-      phone: null,
-      acceptsMarketing: false,
-      defaultAddress: null
-    };
-
-    res.json({ customer });
+    // Try to get fresh data from Shopify
+    const shopifyCustomer = await getShopifyCustomerByEmail(req.session.email);
+    
+    if (shopifyCustomer) {
+      const customer = {
+        id: shopifyCustomer.id,
+        email: shopifyCustomer.email,
+        firstName: shopifyCustomer.firstName || '',
+        lastName: shopifyCustomer.lastName || '',
+        displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
+        phone: shopifyCustomer.phone || null,
+        acceptsMarketing: shopifyCustomer.acceptsMarketing || false,
+        defaultAddress: shopifyCustomer.defaultAddress || null
+      };
+      res.json({ customer });
+    } else {
+      // Fallback to session data
+      const customer = {
+        ...req.session.customerData,
+        firstName: req.session.customerData.firstName || req.session.customerData.displayName,
+        lastName: req.session.customerData.lastName || '',
+        phone: null,
+        acceptsMarketing: false,
+        defaultAddress: null
+      };
+      res.json({ customer });
+    }
   } catch (error) {
     console.error('Profile fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch profile' });
@@ -686,11 +836,165 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
 // GET /customer/orders - Get customer orders
 app.get('/customer/orders', authenticateAppToken, async (req, res) => {
   try {
-    // Return empty orders for now
-    // In production, you would fetch real orders from Shopify Admin API
-    res.json({ orders: [] });
+    if (!config.adminToken) {
+      return res.json({ orders: [] });
+    }
+
+    // Get orders from Shopify Admin API
+    const query = `
+      query getCustomerOrders($customerId: ID!) {
+        customer(id: $customerId) {
+          orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+            edges {
+              node {
+                id
+                name
+                orderNumber
+                processedAt
+                fulfillmentStatus
+                displayFinancialStatus
+                currentTotalPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                totalRefundedSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                currentSubtotalPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                totalShippingPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                currentTotalTaxSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                shippingAddress {
+                  address1
+                  address2
+                  city
+                  province
+                  country
+                  zip
+                }
+                lineItems(first: 250) {
+                  edges {
+                    node {
+                      title
+                      quantity
+                      variant {
+                        id
+                        title
+                        price
+                        image {
+                          url
+                          altText
+                        }
+                        product {
+                          id
+                          handle
+                        }
+                      }
+                      originalUnitPriceSet {
+                        shopMoney {
+                          amount
+                          currencyCode
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query,
+        variables: {
+          customerId: req.session.customerId
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const orderEdges = response.data?.data?.customer?.orders?.edges || [];
+    
+    // Transform orders to match the expected format
+    const orders = orderEdges.map(edge => {
+      const order = edge.node;
+      return {
+        id: order.id,
+        name: order.name,
+        orderNumber: order.orderNumber || 0,
+        processedAt: order.processedAt,
+        fulfillmentStatus: order.fulfillmentStatus,
+        financialStatus: order.displayFinancialStatus,
+        currentTotalPrice: {
+          amount: order.currentTotalPriceSet.shopMoney.amount,
+          currencyCode: order.currentTotalPriceSet.shopMoney.currencyCode
+        },
+        totalPriceV2: {
+          amount: order.currentTotalPriceSet.shopMoney.amount,
+          currencyCode: order.currentTotalPriceSet.shopMoney.currencyCode
+        },
+        totalRefundedV2: order.totalRefundedSet ? {
+          amount: order.totalRefundedSet.shopMoney.amount,
+          currencyCode: order.totalRefundedSet.shopMoney.currencyCode
+        } : null,
+        subtotalPriceV2: {
+          amount: order.currentSubtotalPriceSet.shopMoney.amount,
+          currencyCode: order.currentSubtotalPriceSet.shopMoney.currencyCode
+        },
+        totalShippingPriceV2: {
+          amount: order.totalShippingPriceSet.shopMoney.amount,
+          currencyCode: order.totalShippingPriceSet.shopMoney.currencyCode
+        },
+        totalTaxV2: order.currentTotalTaxSet ? {
+          amount: order.currentTotalTaxSet.shopMoney.amount,
+          currencyCode: order.currentTotalTaxSet.shopMoney.currencyCode
+        } : null,
+        shippingAddress: order.shippingAddress,
+        lineItems: {
+          edges: order.lineItems.edges.map(item => ({
+            node: {
+              ...item.node,
+              originalTotalPrice: item.node.originalUnitPriceSet ? {
+                amount: (parseFloat(item.node.originalUnitPriceSet.shopMoney.amount) * item.node.quantity).toString(),
+                currencyCode: item.node.originalUnitPriceSet.shopMoney.currencyCode
+              } : null
+            }
+          }))
+        }
+      };
+    });
+
+    res.json({ orders });
   } catch (error) {
-    console.error('Orders fetch error:', error);
+    console.error('Orders fetch error:', error.response?.data || error.message);
     res.json({ orders: [] });
   }
 });
@@ -698,14 +1002,51 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
 // GET /customer/store-credit - Get store credit
 app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   try {
-    // Return default store credit
-    // In production, you would fetch from Shopify metafields
+    if (!config.adminToken) {
+      return res.json({ amount: 0.0, currency: 'EUR' });
+    }
+
+    // Query customer metafields for store credit
+    const query = `
+      query getCustomerMetafield($customerId: ID!) {
+        customer(id: $customerId) {
+          metafield(namespace: "customer", key: "store_credit") {
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query,
+        variables: {
+          customerId: req.session.customerId
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const metafield = response.data?.data?.customer?.metafield;
+    let creditAmount = 0.0;
+    
+    if (metafield && metafield.value) {
+      creditAmount = parseFloat(metafield.value) || 0.0;
+    }
+
     res.json({
-      amount: 0.0,
+      amount: creditAmount,
       currency: 'EUR'
     });
   } catch (error) {
-    console.error('Store credit error:', error);
+    console.error('Store credit error:', error.response?.data || error.message);
     res.json({
       amount: 0.0,
       currency: 'EUR'
