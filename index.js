@@ -19,7 +19,7 @@ const config = {
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
   storefrontToken: process.env.SHOPIFY_STOREFRONT_TOKEN,
   adminApiToken: process.env.SHOPIFY_ADMIN_API_TOKEN, // You'll need this for creating customers
-  apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-01/graphql.json',
+  apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
   adminApiUrl: `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/graphql.json`,
   mailerSendApiKey: process.env.MAILERSEND_API_KEY,
   // In-memory storage for verification codes and sessions
@@ -92,6 +92,9 @@ async function sendVerificationEmail(email, code) {
 // GraphQL client for Shopify Storefront API
 async function shopifyStorefrontQuery(query, variables = {}) {
   try {
+    console.log('Shopify API URL:', config.apiUrl);
+    console.log('Has Storefront Token:', !!config.storefrontToken);
+    
     const response = await axios.post(
       config.apiUrl,
       { query, variables },
@@ -102,9 +105,17 @@ async function shopifyStorefrontQuery(query, variables = {}) {
         }
       }
     );
+    
+    // Log any GraphQL errors
+    if (response.data.errors) {
+      console.error('GraphQL Errors:', JSON.stringify(response.data.errors, null, 2));
+    }
+    
     return response.data;
   } catch (error) {
     console.error('Storefront API error:', error.response?.data || error.message);
+    console.error('API URL used:', config.apiUrl);
+    console.error('Token exists:', !!config.storefrontToken);
     throw error;
   }
 }
@@ -292,8 +303,11 @@ app.post('/auth/verify-code', async (req, res) => {
         }
       });
 
+      console.log('Create customer result:', JSON.stringify(createResult, null, 2));
+
       if (createResult.data?.customerCreate?.customerUserErrors?.length > 0) {
         const error = createResult.data.customerCreate.customerUserErrors[0];
+        console.error('Customer creation error:', error);
         return res.status(400).json({ 
           success: false, 
           error: error.message 
@@ -302,6 +316,9 @@ app.post('/auth/verify-code', async (req, res) => {
 
       customerData = createResult.data?.customerCreate?.customer;
       customerAccessToken = createResult.data?.customerCreate?.customerAccessToken?.accessToken;
+      
+      console.log('Customer data:', customerData);
+      console.log('Access token received:', !!customerAccessToken);
       
     } else {
       // Existing customer - try to authenticate
@@ -385,9 +402,15 @@ app.post('/auth/verify-code', async (req, res) => {
 
   } catch (error) {
     console.error('Verify code error:', error);
+    console.error('Error details:', error.response?.data || error.message);
+    
     res.status(500).json({ 
       success: false, 
-      error: 'Fehler bei der Verifizierung' 
+      error: 'Fehler bei der Verifizierung',
+      // Include debug info in development
+      ...(process.env.NODE_ENV !== 'production' && { 
+        debug: error.response?.data || error.message 
+      })
     });
   }
 });
