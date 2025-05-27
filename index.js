@@ -1,378 +1,380 @@
+require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
 const bodyParser = require('body-parser');
+const cors = require('cors');
+const axios = require('axios');
 const { URL } = require('url');
-
 
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
+app.use(cors()); // Enable CORS for all origins
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Generate RSA key pair for signing tokens
-const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
-  modulusLength: 2048,
-  publicKeyEncoding: {
-    type: 'spki',
-    format: 'pem'
-  },
-  privateKeyEncoding: {
-    type: 'pkcs8',
-    format: 'pem'
-  }
-});
-
-// Store keys and other configuration
+// Configuration from environment variables
 const config = {
-  issuer: 'https://auth.metallbude.com',
-  privateKey,
-  publicKey,
-  clients: {
-    'shopify_client_id': {
-      client_secret: 'shopify_client_secret',
-      redirect_uris: [
-        'https://metallbude-de.myshopify.com/account/auth/callback',
-        'https://metallbude-de.myshopify.com/account/connect/callback',
-        'http://localhost:3000/callback' // For testing
-      ]
-    }
-  },
-  // In-memory storage for authorization codes and tokens
-  authorizationCodes: new Map(),
-  accessTokens: new Map()
+  shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
+  storefrontToken: process.env.SHOPIFY_STOREFRONT_TOKEN,
+  apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2023-04/graphql.json',
+  mailerSendApiKey: process.env.MAILERSEND_API_KEY,
+  // In-memory storage for verification codes and sessions
+  verificationCodes: new Map(),
+  sessions: new Map()
 };
 
-// Test user
-const testUser = {
-  sub: 'user_123456789',
-  email: 'rudolf.klause@metallbude.com',
-  email_verified: true,
-  name: 'Rudolf Klause',
-  given_name: 'Rudolf',
-  family_name: 'Klause',
-  preferred_username: 'rudolf.klause',
-  updated_at: Math.floor(Date.now() / 1000)
-};
+// Helper function to generate random code
+function generateVerificationCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit code
+}
 
-// JWKS endpoint - returns the public key in JWKS format
-app.get('/.well-known/jwks.json', (req, res) => {
-  // Extract the modulus and exponent from the public key
-  const pem = config.publicKey;
-  const pemHeader = '-----BEGIN PUBLIC KEY-----';
-  const pemFooter = '-----END PUBLIC KEY-----';
-  const pemContents = pem.substring(
-    pemHeader.length,
-    pem.length - pemFooter.length - 1
-  ).replace(/\n/g, '');
-  
-  const binaryDer = Buffer.from(pemContents, 'base64');
-  const key = crypto.createPublicKey(pem);
-  const jwk = key.export({ format: 'jwk' });
+// Helper function to generate session ID
+function generateSessionId() {
+  return crypto.randomBytes(32).toString('hex');
+}
 
-  res.json({
-    keys: [
+// Send email using MailerSend
+async function sendVerificationEmail(email, code) {
+  if (!config.mailerSendApiKey) {
+    console.log(`Verification code for ${email}: ${code}`);
+    return true;
+  }
+
+  try {
+    const response = await axios.post(
+      'https://api.mailersend.com/v1/email',
       {
-        kty: jwk.kty,
-        kid: 'oidc-key-1',
-        use: 'sig',
-        alg: 'RS256',
-        n: jwk.n,
-        e: jwk.e
+        from: {
+          email: 'noreply@metallbude.com',
+          name: 'Metallbude'
+        },
+        to: [{
+          email: email
+        }],
+        subject: 'Ihr Anmeldecode für Metallbude',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Ihr Anmeldecode</h2>
+            <p>Geben Sie diesen Code in der App ein:</p>
+            <h1 style="font-size: 32px; letter-spacing: 5px; color: #333;">${code}</h1>
+            <p>Dieser Code ist 10 Minuten gültig.</p>
+            <p>Wenn Sie diesen Code nicht angefordert haben, ignorieren Sie diese E-Mail bitte.</p>
+          </div>
+        `,
+        text: `Ihr Anmeldecode: ${code}\n\nDieser Code ist 10 Minuten gültig.`
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${config.mailerSendApiKey}`,
+          'Content-Type': 'application/json'
+        }
       }
-    ]
-  });
+    );
+
+    return response.status === 202;
+  } catch (error) {
+    console.error('MailerSend error:', error.response?.data || error.message);
+    // Fallback to console log
+    console.log(`Verification code for ${email}: ${code}`);
+    return true;
+  }
+}
+
+// GraphQL client for Shopify Storefront API
+async function shopifyStorefrontQuery(query, variables = {}) {
+  try {
+    const response = await axios.post(
+      config.apiUrl,
+      { query, variables },
+      {
+        headers: {
+          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+          'Content-Type': 'application/json',
+        }
+      }
+    );
+    return response.data;
+  } catch (error) {
+    console.error('Storefront API error:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+// Request one-time code endpoint
+app.post('/auth/request-code', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'E-Mail-Adresse ist erforderlich' 
+    });
+  }
+
+  try {
+    // Check if customer exists
+    const checkCustomerQuery = `
+      query checkCustomer($email: String!) {
+        customers(first: 1, query: $email) {
+          edges {
+            node {
+              id
+              email
+            }
+          }
+        }
+      }
+    `;
+
+    let isNewCustomer = false;
+    
+    // Note: This query might not work with Storefront API
+    // You might need to handle customer creation differently
+    
+    // Generate verification code
+    const code = generateVerificationCode();
+    const sessionId = generateSessionId();
+    
+    // Store code with expiration (10 minutes)
+    config.verificationCodes.set(sessionId, {
+      email,
+      code,
+      isNewCustomer,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+    });
+
+    // Clean up expired codes
+    setTimeout(() => {
+      config.verificationCodes.delete(sessionId);
+    }, 10 * 60 * 1000);
+
+    // Send verification email
+    await sendVerificationEmail(email, code);
+
+    console.log(`Generated verification code for ${email}: ${code}`);
+
+    res.json({
+      success: true,
+      isNewCustomer,
+      sessionId,
+      message: 'Verifizierungscode wurde gesendet',
+      // Only include debug code in development
+      ...(process.env.NODE_ENV !== 'production' && { debug: { code } })
+    });
+
+  } catch (error) {
+    console.error('Request code error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Fehler beim Senden des Codes' 
+    });
+  }
 });
 
-// OpenID Configuration endpoint
-app.get('/.well-known/openid-configuration', (req, res) => {
-  res.json({
-    issuer: config.issuer,
-    authorization_endpoint: `${config.issuer}/authorize`,
-    token_endpoint: `${config.issuer}/token`,
-    userinfo_endpoint: `${config.issuer}/userinfo`,
-    jwks_uri: `${config.issuer}/.well-known/jwks.json`,
-    end_session_endpoint: `${config.issuer}/logout`,
-    response_types_supported: ['code'],
-    subject_types_supported: ['public'],
-    id_token_signing_alg_values_supported: ['RS256'],
-    scopes_supported: ['openid', 'email', 'profile'],
-    token_endpoint_auth_methods_supported: ['client_secret_post'],
-    claims_supported: [
-      'sub', 'iss', 'auth_time', 'name', 'given_name', 'family_name',
-      'email', 'email_verified', 'preferred_username', 'updated_at'
-    ]
-  });
-});
+// Verify code endpoint
+app.post('/auth/verify-code', async (req, res) => {
+  const { email, code, sessionId } = req.body;
 
-// Authorization endpoint
-app.get('/authorize', (req, res) => {
-  const {
-    client_id,
-    redirect_uri,
-    response_type,
-    scope,
-    state,
-    nonce
-  } = req.query;
-
-  // Validate required parameters
-  if (!client_id || !redirect_uri || !response_type || !scope) {
-    return res.status(400).send('Missing required parameters');
-  }
-
-  // Validate client and redirect URI
-  const client = config.clients[client_id];
-  if (!client) {
-    return res.status(400).send('Invalid client_id');
-  }
-
-  if (!client.redirect_uris.includes(redirect_uri)) {
-    return res.status(400).send('Invalid redirect_uri');
-  }
-
-  // Validate response type
-  if (response_type !== 'code') {
-    return redirectWithError(redirect_uri, 'unsupported_response_type', state);
-  }
-
-  // Generate authorization code
-  const code = crypto.randomBytes(32).toString('hex');
-  const authInfo = {
-    client_id,
-    redirect_uri,
-    scope,
-    nonce,
-    user: testUser,
-    created_at: Date.now()
-  };
-
-  // Store the code with a 10-minute expiration
-  config.authorizationCodes.set(code, authInfo);
-  setTimeout(() => {
-    config.authorizationCodes.delete(code);
-  }, 10 * 60 * 1000);
-
-  // Redirect back to the client with the code
-  const redirectUrl = new URL(redirect_uri);
-  redirectUrl.searchParams.append('code', code);
-  if (state) {
-    redirectUrl.searchParams.append('state', state);
-  }
-
-  console.log(`Authorization successful for ${testUser.email}. Redirecting to: ${redirectUrl.toString()}`);
-  res.redirect(redirectUrl.toString());
-});
-
-// Token endpoint
-app.post('/token', (req, res) => {
-  const {
-    grant_type,
-    code,
-    redirect_uri,
-    client_id,
-    client_secret
-  } = req.body;
-
-  // Validate grant type
-  if (grant_type !== 'authorization_code') {
-    return res.status(400).json({
-      error: 'unsupported_grant_type',
-      error_description: 'Only authorization_code grant type is supported'
+  if (!email || !code || !sessionId) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'E-Mail, Code und Session ID sind erforderlich' 
     });
   }
 
-  // Validate client credentials
-  const client = config.clients[client_id];
-  if (!client || client.client_secret !== client_secret) {
-    return res.status(401).json({
-      error: 'invalid_client',
-      error_description: 'Invalid client credentials'
+  // Get stored verification data
+  const verificationData = config.verificationCodes.get(sessionId);
+
+  if (!verificationData) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Ungültige oder abgelaufene Sitzung' 
     });
   }
 
-  // Validate authorization code
-  const authInfo = config.authorizationCodes.get(code);
-  if (!authInfo) {
-    return res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'Invalid or expired authorization code'
+  // Check if code has expired
+  if (verificationData.expiresAt < Date.now()) {
+    config.verificationCodes.delete(sessionId);
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Verifizierungscode ist abgelaufen' 
     });
   }
 
-  // Validate redirect URI
-  if (authInfo.redirect_uri !== redirect_uri) {
-    return res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'Redirect URI mismatch'
+  // Verify email matches
+  if (verificationData.email !== email) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'E-Mail stimmt nicht überein' 
     });
   }
 
-  // Delete the used code
-  config.authorizationCodes.delete(code);
-
-  // Generate access token
-  const accessToken = crypto.randomBytes(32).toString('hex');
-  const expiresIn = 3600; // 1 hour
-  const tokenInfo = {
-    user: authInfo.user,
-    scope: authInfo.scope,
-    client_id,
-    expires_at: Date.now() + expiresIn * 1000
-  };
-
-  // Store the access token
-  config.accessTokens.set(accessToken, tokenInfo);
-  setTimeout(() => {
-    config.accessTokens.delete(accessToken);
-  }, expiresIn * 1000);
-
-  // Generate ID token
-  const idToken = generateIdToken(
-    authInfo.user,
-    client_id,
-    authInfo.nonce,
-    expiresIn
-  );
-
-  console.log(`Token issued for ${authInfo.user.email}`);
-  
-  // Return the tokens
-  res.json({
-    access_token: accessToken,
-    token_type: 'Bearer',
-    expires_in: expiresIn,
-    id_token: idToken
-  });
-});
-
-// UserInfo endpoint
-app.get('/userinfo', (req, res) => {
-  // Extract the access token from the Authorization header
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({
-      error: 'invalid_token',
-      error_description: 'Missing or invalid access token'
+  // Verify code
+  if (verificationData.code !== code) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Ungültiger Verifizierungscode' 
     });
   }
 
-  const accessToken = authHeader.substring(7);
-  const tokenInfo = config.accessTokens.get(accessToken);
+  try {
+    // For existing customers, we need to create a customer access token
+    // Since we're using one-time codes, we'll need to use a different approach
+    
+    // Option 1: Use a master password for all one-time code logins
+    // Option 2: Create temporary passwords
+    // Option 3: Use a custom authentication solution
+    
+    // For this example, we'll create a temporary password
+    const tempPassword = crypto.randomBytes(32).toString('hex');
+    
+    let customerAccessToken = null;
+    let customer = null;
 
-  // Validate the access token
-  if (!tokenInfo) {
-    return res.status(401).json({
-      error: 'invalid_token',
-      error_description: 'Invalid or expired access token'
-    });
-  }
+    if (verificationData.isNewCustomer) {
+      // Create new customer
+      const createCustomerMutation = `
+        mutation customerCreate($input: CustomerCreateInput!) {
+          customerCreate(input: $input) {
+            customer {
+              id
+              email
+              firstName
+              lastName
+            }
+            customerUserErrors {
+              field
+              message
+              code
+            }
+          }
+        }
+      `;
 
-  // Check if the token has expired
-  if (tokenInfo.expires_at < Date.now()) {
-    config.accessTokens.delete(accessToken);
-    return res.status(401).json({
-      error: 'invalid_token',
-      error_description: 'Access token has expired'
-    });
-  }
+      const createResult = await shopifyStorefrontQuery(createCustomerMutation, {
+        input: {
+          email: email,
+          password: tempPassword,
+          acceptsMarketing: false
+        }
+      });
 
-  // Return the user info
-  const scopes = tokenInfo.scope.split(' ');
-  const userInfo = { sub: tokenInfo.user.sub };
+      if (createResult.data?.customerCreate?.customerUserErrors?.length > 0) {
+        const error = createResult.data.customerCreate.customerUserErrors[0];
+        return res.status(400).json({ 
+          success: false, 
+          error: error.message 
+        });
+      }
 
-  if (scopes.includes('email')) {
-    userInfo.email = tokenInfo.user.email;
-    userInfo.email_verified = tokenInfo.user.email_verified;
-  }
-
-  if (scopes.includes('profile')) {
-    userInfo.name = tokenInfo.user.name;
-    userInfo.given_name = tokenInfo.user.given_name;
-    userInfo.family_name = tokenInfo.user.family_name;
-    userInfo.preferred_username = tokenInfo.user.preferred_username;
-    userInfo.updated_at = tokenInfo.user.updated_at;
-  }
-
-  console.log(`UserInfo requested for ${tokenInfo.user.email}`);
-  res.json(userInfo);
-});
-
-// Logout endpoint
-app.get('/logout', (req, res) => {
-  const { id_token_hint, post_logout_redirect_uri, state } = req.query;
-  
-  // In a real implementation, you would validate the id_token_hint
-  // and invalidate any active sessions
-  
-  if (post_logout_redirect_uri) {
-    const redirectUrl = new URL(post_logout_redirect_uri);
-    if (state) {
-      redirectUrl.searchParams.append('state', state);
+      customer = createResult.data?.customerCreate?.customer;
     }
-    return res.redirect(redirectUrl.toString());
+
+    // Create customer access token
+    const tokenMutation = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerAccessToken {
+            accessToken
+            expiresAt
+          }
+          customerUserErrors {
+            field
+            message
+            code
+          }
+        }
+      }
+    `;
+
+    // For existing customers, you might need to implement a different strategy
+    // This is a limitation of Shopify's customer authentication system
+    
+    // As a workaround, you could:
+    // 1. Use Shopify's passwordless authentication (if available)
+    // 2. Implement a proxy authentication system
+    // 3. Use Shopify's multipass (requires Shopify Plus)
+    
+    // For now, let's create a mock token for demonstration
+    customerAccessToken = crypto.randomBytes(32).toString('hex');
+    
+    // In a real implementation, you would get the actual customer data
+    if (!customer) {
+      customer = {
+        id: `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`,
+        email: email,
+        firstName: '',
+        lastName: ''
+      };
+    }
+
+    // Store session
+    config.sessions.set(customerAccessToken, {
+      email,
+      customer,
+      createdAt: Date.now()
+    });
+
+    // Clean up verification code
+    config.verificationCodes.delete(sessionId);
+
+    console.log(`Successful login for ${email}`);
+
+    res.json({
+      success: true,
+      accessToken: customerAccessToken,
+      customer: customer
+    });
+
+  } catch (error) {
+    console.error('Verify code error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Fehler bei der Verifizierung' 
+    });
   }
-  
-  res.send('You have been logged out successfully.');
 });
 
-// Helper function to generate an ID token
-function generateIdToken(user, clientId, nonce, expiresIn) {
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    iss: config.issuer,
-    sub: user.sub,
-    aud: clientId,
-    exp: now + expiresIn,
-    iat: now,
-    auth_time: now,
-    email: user.email,
-    email_verified: user.email_verified,
-    name: user.name,
-    given_name: user.given_name,
-    family_name: user.family_name,
-    preferred_username: user.preferred_username,
-    updated_at: user.updated_at
-  };
-
-  // Add nonce if provided
-  if (nonce) {
-    payload.nonce = nonce;
-  }
-
-  // Replace the jwt.sign function with this:
-  function signJWT(payload, privateKey, options) {
-    const header = {
-      alg: 'RS256',
-      typ: 'JWT',
-      kid: options.keyid
-    };
-    
-    const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64url');
-    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
-    
-    const signatureInput = `${encodedHeader}.${encodedPayload}`;
-    const signature = crypto.sign('sha256', Buffer.from(signatureInput), privateKey);
-    
-    return `${signatureInput}.${signature.toString('base64url')}`;
-  }
-}
-
-// Helper function to redirect with an error
-function redirectWithError(redirectUri, error, state) {
-  const redirectUrl = new URL(redirectUri);
-  redirectUrl.searchParams.append('error', error);
-  if (state) {
-    redirectUrl.searchParams.append('state', state);
-  }
-  return res.redirect(redirectUrl.toString());
-}
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    environment: {
+      shopDomain: config.shopDomain,
+      hasStorefrontToken: !!config.storefrontToken,
+      hasMailerSendKey: !!config.mailerSendApiKey
+    }
+  });
+});
 
 // Start the server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`OIDC Provider running on port ${PORT}`);
-  console.log(`OpenID Configuration available at: ${config.issuer}/.well-known/openid-configuration`);
+  console.log(`Shopify Customer Auth Server running on port ${PORT}`);
+  console.log(`Shop Domain: ${config.shopDomain}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
+
+// Clean up old sessions and codes periodically
+setInterval(() => {
+  const now = Date.now();
+  
+  // Clean expired verification codes
+  for (const [sessionId, data] of config.verificationCodes.entries()) {
+    if (data.expiresAt < now) {
+      config.verificationCodes.delete(sessionId);
+    }
+  }
+  
+  // Clean old sessions (24 hours)
+  const sessionTimeout = 24 * 60 * 60 * 1000;
+  for (const [token, session] of config.sessions.entries()) {
+    if (now - session.createdAt > sessionTimeout) {
+      config.sessions.delete(token);
+    }
+  }
+}, 60 * 60 * 1000); // Every hour
