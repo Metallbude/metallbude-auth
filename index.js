@@ -863,9 +863,8 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
               node {
                 id
                 name
-                orderNumber
                 processedAt
-                fulfillmentStatus
+                displayFulfillmentStatus
                 displayFinancialStatus
                 currentTotalPriceSet {
                   shopMoney {
@@ -971,9 +970,9 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       return {
         id: order.id,
         name: order.name,
-        orderNumber: order.orderNumber || 0,
+        orderNumber: parseInt(order.name.replace('#', '')) || 0,
         processedAt: order.processedAt,
-        fulfillmentStatus: order.fulfillmentStatus,
+        fulfillmentStatus: order.displayFulfillmentStatus,
         financialStatus: order.displayFinancialStatus,
         currentTotalPrice: {
           amount: order.currentTotalPriceSet.shopMoney.amount,
@@ -1030,15 +1029,22 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
 
     console.log('Fetching store credit for customer:', req.session.customerId);
 
-    // Query customer metafields for store credit
+    // Query customer with store credit balance
     const query = `
-      query getCustomerMetafield($customerId: ID!) {
+      query getCustomerStoreCredit($customerId: ID!) {
         customer(id: $customerId) {
           id
           email
-          metafield(namespace: "customer", key: "store_credit") {
-            value
-            type
+          storeCreditAccounts(first: 10) {
+            edges {
+              node {
+                id
+                balance {
+                  amount
+                  currencyCode
+                }
+              }
+            }
           }
         }
       }
@@ -1062,18 +1068,57 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
 
     console.log('Store credit response:', JSON.stringify(response.data));
 
-    const metafield = response.data?.data?.customer?.metafield;
-    let creditAmount = 0.0;
-    
-    if (metafield && metafield.value) {
-      creditAmount = parseFloat(metafield.value) || 0.0;
-      console.log('Found store credit:', creditAmount);
-    } else {
-      console.log('No store credit metafield found');
+    if (response.data.errors) {
+      console.error('GraphQL errors:', response.data.errors);
+      
+      // Fallback to metafield approach for older Shopify setups
+      const metafieldQuery = `
+        query getCustomerMetafield($customerId: ID!) {
+          customer(id: $customerId) {
+            metafield(namespace: "customer", key: "store_credit") {
+              value
+            }
+          }
+        }
+      `;
+      
+      const metafieldResponse = await axios.post(
+        config.adminApiUrl,
+        {
+          query: metafieldQuery,
+          variables: { customerId: req.session.customerId }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      const metafield = metafieldResponse.data?.data?.customer?.metafield;
+      const creditAmount = metafield?.value ? parseFloat(metafield.value) : 0.0;
+      
+      return res.json({
+        amount: creditAmount,
+        currency: 'EUR'
+      });
     }
 
+    // Calculate total store credit from all accounts
+    let totalCredit = 0.0;
+    const storeCreditAccounts = response.data?.data?.customer?.storeCreditAccounts?.edges || [];
+    
+    storeCreditAccounts.forEach(edge => {
+      if (edge.node?.balance?.amount) {
+        totalCredit += parseFloat(edge.node.balance.amount);
+      }
+    });
+    
+    console.log('Total store credit:', totalCredit);
+
     res.json({
-      amount: creditAmount,
+      amount: totalCredit,
       currency: 'EUR'
     });
   } catch (error) {
