@@ -1130,59 +1130,57 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   }
 });
 
-// Add these endpoints to your index.js file, after the other customer endpoints
+// This is what your backend endpoint should look like (Node.js/Express example)
 
-// PUT /customer/update - Update customer information
-app.put('/customer/update', authenticateAppToken, async (req, res) => {
+app.put('/customer/update', authenticateToken, async (req, res) => {
   try {
     const { updates } = req.body;
+    const customerId = req.user.customerId; // From JWT token
     
-    if (!updates || Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: 'No updates provided' });
-    }
+    // Build the mutation dynamically based on what fields are being updated
+    let mutationFields = [];
+    let variables = { id: customerId };
+    let variableDefinitions = ['$id: ID!'];
     
-    if (!config.adminToken) {
-      return res.status(500).json({ error: 'Admin token not configured' });
-    }
-    
-    // Build the mutation dynamically based on provided fields
-    const updateFields = [];
-    const variables = { customerId: req.session.customerId };
-    
+    // Handle basic fields
     if (updates.firstName !== undefined) {
-      updateFields.push('firstName: $firstName');
+      mutationFields.push('firstName: $firstName');
       variables.firstName = updates.firstName;
+      variableDefinitions.push('$firstName: String');
     }
+    
     if (updates.lastName !== undefined) {
-      updateFields.push('lastName: $lastName');
+      mutationFields.push('lastName: $lastName');
       variables.lastName = updates.lastName;
+      variableDefinitions.push('$lastName: String');
     }
+    
     if (updates.phone !== undefined) {
-      updateFields.push('phone: $phone');
+      mutationFields.push('phone: $phone');
       variables.phone = updates.phone;
+      variableDefinitions.push('$phone: String');
     }
+    
+    // Handle marketing consent separately with correct enum types
     if (updates.acceptsMarketing !== undefined) {
-      updateFields.push('emailMarketingConsent: { marketingState: $marketingState }');
+      mutationFields.push('emailMarketingConsent: { marketingState: $marketingState, marketingOptInLevel: $marketingOptInLevel }');
+      
+      // Use the correct enum values
       variables.marketingState = updates.acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED';
+      variables.marketingOptInLevel = 'SINGLE_OPT_IN';
+      
+      // Add the correct variable types
+      variableDefinitions.push('$marketingState: CustomerEmailMarketingState!');
+      variableDefinitions.push('$marketingOptInLevel: CustomerMarketingOptInLevel!');
     }
     
-    if (updateFields.length === 0) {
-      return res.status(400).json({ error: 'No valid fields to update' });
-    }
-    
-    // Build the GraphQL mutation
-    let variableDefinitions = '$customerId: ID!';
-    if (variables.firstName !== undefined) variableDefinitions += ', $firstName: String';
-    if (variables.lastName !== undefined) variableDefinitions += ', $lastName: String';
-    if (variables.phone !== undefined) variableDefinitions += ', $phone: String';
-    if (variables.marketingState !== undefined) variableDefinitions += ', $marketingState: CustomerMarketingOptInLevel!';
-    
+    // Build the complete mutation
     const mutation = `
-      mutation updateCustomer(${variableDefinitions}) {
+      mutation updateCustomer(${variableDefinitions.join(', ')}) {
         customerUpdate(
           input: {
-            id: $customerId
-            ${updateFields.join('\n            ')}
+            id: $id
+            ${mutationFields.join('\n            ')}
           }
         ) {
           customer {
@@ -1190,11 +1188,8 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
             email
             firstName
             lastName
-            displayName
             phone
-            emailMarketingConsent {
-              marketingState
-            }
+            acceptsMarketing
             defaultAddress {
               id
               company
@@ -1202,9 +1197,7 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
               address2
               city
               province
-              provinceCode
               country
-              countryCodeV2
               zip
               phone
             }
@@ -1217,266 +1210,119 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       }
     `;
     
-    console.log('Updating customer:', req.session.customerId);
-    console.log('Updates:', updates);
-    
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query: mutation,
-        variables
+    // Execute the GraphQL mutation
+    const response = await fetch(SHOPIFY_ADMIN_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
       },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+      body: JSON.stringify({
+        query: mutation,
+        variables: variables,
+      }),
+    });
     
-    if (response.data.errors) {
-      console.error('GraphQL errors:', response.data.errors);
+    const data = await response.json();
+    
+    // Check for errors
+    if (data.errors) {
+      console.error('GraphQL errors:', data.errors);
       return res.status(400).json({ 
-        error: 'Failed to update customer',
-        details: response.data.errors 
+        error: 'Failed to update customer', 
+        details: data.errors 
       });
     }
     
-    const { customer, userErrors } = response.data.data.customerUpdate;
-    
-    if (userErrors && userErrors.length > 0) {
-      console.error('User errors:', userErrors);
+    if (data.data?.customerUpdate?.userErrors?.length > 0) {
+      console.error('User errors:', data.data.customerUpdate.userErrors);
       return res.status(400).json({ 
-        error: userErrors[0].message,
-        field: userErrors[0].field 
+        error: 'Failed to update customer', 
+        details: data.data.customerUpdate.userErrors 
       });
     }
     
-    // Transform the response
-    const customerData = {
-      id: customer.id,
-      email: customer.email,
-      firstName: customer.firstName || '',
-      lastName: customer.lastName || '',
-      displayName: customer.displayName || '',
-      phone: customer.phone || '',
-      acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
-      defaultAddress: customer.defaultAddress
-    };
-    
-    // Update session data
-    req.session.customerData = {
-      ...req.session.customerData,
-      ...customerData
-    };
-    
+    // Return the updated customer
     res.json({ 
-      success: true,
-      customer: customerData
+      customer: data.data.customerUpdate.customer 
     });
+    
   } catch (error) {
-    console.error('Customer update error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      error: 'Failed to update customer',
-      details: error.message 
-    });
+    console.error('Error updating customer:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /customer/address/:addressId? - Create or update customer address
-app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res) => {
-  try {
-    const { address } = req.body;
-    const { addressId } = req.params;
-    
-    if (!address) {
-      return res.status(400).json({ error: 'Address data required' });
-    }
-    
-    if (!config.adminToken) {
-      return res.status(500).json({ error: 'Admin token not configured' });
-    }
-    
-    let mutation;
-    let variables = {
-      customerId: req.session.customerId,
-      address: {
-        address1: address.address1 || '',
-        address2: address.address2 || '',
-        city: address.city || '',
-        company: address.company || '',
-        country: address.country || 'DE',
-        firstName: address.firstName || '',
-        lastName: address.lastName || '',
-        phone: address.phone || '',
-        province: address.province || '',
-        zip: address.zip || ''
-      }
-    };
-    
-    if (addressId) {
-      // Update existing address
-      mutation = `
-        mutation updateAddress($customerId: ID!, $addressId: ID!, $address: MailingAddressInput!) {
-          customerAddressUpdate(
-            customerId: $customerId
-            id: $addressId
-            address: $address
-          ) {
-            customerAddress {
-              id
-              address1
-              address2
-              city
-              company
-              country
-              countryCodeV2
-              firstName
-              lastName
-              phone
-              province
-              provinceCode
-              zip
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-      variables.addressId = addressId;
-    } else {
-      // Create new address
-      mutation = `
-        mutation createAddress($customerId: ID!, $address: MailingAddressInput!) {
-          customerAddressCreate(
-            customerId: $customerId
-            address: $address
-          ) {
-            customerAddress {
-              id
-              address1
-              address2
-              city
-              company
-              country
-              countryCodeV2
-              firstName
-              lastName
-              phone
-              province
-              provinceCode
-              zip
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-    }
-    
-    console.log(`${addressId ? 'Updating' : 'Creating'} address for customer:`, req.session.customerId);
-    console.log('Address data:', address);
-    
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query: mutation,
-        variables
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    if (response.data.errors) {
-      console.error('GraphQL errors:', response.data.errors);
-      return res.status(400).json({ 
-        error: 'Failed to update address',
-        details: response.data.errors 
-      });
-    }
-    
-    const result = addressId 
-      ? response.data.data.customerAddressUpdate 
-      : response.data.data.customerAddressCreate;
-    
-    if (result.userErrors && result.userErrors.length > 0) {
-      console.error('User errors:', result.userErrors);
-      return res.status(400).json({ 
-        error: result.userErrors[0].message,
-        field: result.userErrors[0].field 
-      });
-    }
-    
-    // If this is the first/only address, set it as default
-    if (!addressId && result.customerAddress) {
-      await setDefaultAddress(req.session.customerId, result.customerAddress.id);
-    }
-    
-    res.json({ 
-      success: true,
-      address: result.customerAddress 
-    });
-  } catch (error) {
-    console.error('Address update error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      error: 'Failed to update address',
-      details: error.message 
-    });
-  }
-});
-
-// Helper function to set default address
-async function setDefaultAddress(customerId, addressId) {
-  try {
-    const mutation = `
-      mutation setDefaultAddress($customerId: ID!, $addressId: ID!) {
-        customerDefaultAddressUpdate(
-          customerId: $customerId
-          addressId: $addressId
+  // Optional: Separate endpoint for marketing consent to avoid enum issues
+  app.put('/customer/marketing-consent', authenticateToken, async (req, res) => {
+    try {
+      const { acceptsMarketing } = req.body;
+      const customerId = req.user.customerId;
+      
+      const mutation = `
+        mutation updateMarketingConsent(
+          $id: ID!
+          $marketingState: CustomerEmailMarketingState!
+          $marketingOptInLevel: CustomerMarketingOptInLevel!
         ) {
-          customer {
-            id
-            defaultAddress {
+          customerUpdate(
+            input: {
+              id: $id
+              emailMarketingConsent: {
+                marketingState: $marketingState
+                marketingOptInLevel: $marketingOptInLevel
+              }
+            }
+          ) {
+            customer {
               id
+              acceptsMarketing
+            }
+            userErrors {
+              field
+              message
             }
           }
-          userErrors {
-            field
-            message
-          }
         }
-      }
-    `;
-    
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query: mutation,
-        variables: { customerId, addressId }
-      },
-      {
+      `;
+      
+      const variables = {
+        id: customerId,
+        marketingState: acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED',
+        marketingOptInLevel: 'SINGLE_OPT_IN',
+      };
+      
+      const response = await fetch(SHOPIFY_ADMIN_API_URL, {
+        method: 'POST',
         headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
+        },
+        body: JSON.stringify({
+          query: mutation,
+          variables: variables,
+        }),
+      });
+      
+      const data = await response.json();
+      
+      if (data.errors || data.data?.customerUpdate?.userErrors?.length > 0) {
+        return res.status(400).json({ 
+          error: 'Failed to update marketing consent',
+          details: data.errors || data.data.customerUpdate.userErrors
+        });
       }
-    );
-    
-    if (response.data.errors) {
-      console.error('Error setting default address:', response.data.errors);
+      
+      res.json({ 
+        success: true,
+        acceptsMarketing: data.data.customerUpdate.customer.acceptsMarketing 
+      });
+      
+    } catch (error) {
+      console.error('Error updating marketing consent:', error);
+      res.status(500).json({ error: 'Internal server error' });
     }
-  } catch (error) {
-    console.error('Set default address error:', error.message);
-  }
-}
+  });
 
 // POST /auth/logout - Logout
 app.post('/auth/logout', authenticateAppToken, (req, res) => {
