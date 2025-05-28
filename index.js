@@ -1176,7 +1176,7 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       variableDefinitions.push('$marketingOptInLevel: CustomerMarketingOptInLevel!');
     }
     
-    // Build the complete mutation
+    // Build the complete mutation WITHOUT acceptsMarketing field
     const mutation = `
       mutation updateCustomer(${variableDefinitions.join(', ')}) {
         customerUpdate(
@@ -1191,7 +1191,9 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
             firstName
             lastName
             phone
-            acceptsMarketing
+            emailMarketingConsent {
+              marketingState
+            }
             defaultAddress {
               id
               company
@@ -1249,9 +1251,16 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       });
     }
     
+    // Transform the response to include acceptsMarketing
+    const customer = data.data.customerUpdate.customer;
+    const transformedCustomer = {
+      ...customer,
+      acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
+    };
+    
     // Return the updated customer
     res.json({ 
-      customer: data.data.customerUpdate.customer 
+      customer: transformedCustomer 
     });
     
   } catch (error) {
@@ -1283,7 +1292,9 @@ app.put('/customer/marketing-consent', authenticateAppToken, async (req, res) =>
         ) {
           customer {
             id
-            acceptsMarketing
+            emailMarketingConsent {
+              marketingState
+            }
           }
           userErrors {
             field
@@ -1324,7 +1335,7 @@ app.put('/customer/marketing-consent', authenticateAppToken, async (req, res) =>
     
     res.json({ 
       success: true,
-      acceptsMarketing: data.data.customerUpdate.customer.acceptsMarketing 
+      acceptsMarketing: data.data.customerUpdate.customer.emailMarketingConsent.marketingState === 'SUBSCRIBED'
     });
     
   } catch (error) {
@@ -1467,6 +1478,120 @@ app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res)
   } catch (error) {
     console.error('Error managing address:', error.response?.data || error.message);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /customer/create-access-token - Create customer access token for Storefront API
+app.post('/customer/create-access-token', authenticateAppToken, async (req, res) => {
+  try {
+    const email = req.session.email;
+    const customerId = req.session.customerId;
+    
+    if (!email || !customerId) {
+      return res.status(400).json({ error: 'No customer data in session' });
+    }
+    
+    // For passwordless auth, we need a different approach
+    // Option 1: Create a temporary password and immediately use it
+    // Option 2: Use Admin API to create a signed customer URL
+    // Option 3: Implement a custom token system
+    
+    // For now, we'll create a temporary password approach
+    const tempPassword = crypto.randomBytes(32).toString('hex');
+    
+    // Update customer with temporary password using Admin API
+    const updateMutation = `
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const updateResponse = await axios.post(
+      config.adminApiUrl,
+      {
+        query: updateMutation,
+        variables: {
+          input: {
+            id: customerId,
+            password: tempPassword
+          }
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    if (updateResponse.data.errors || updateResponse.data.data?.customerUpdate?.userErrors?.length > 0) {
+      console.error('Failed to set temporary password');
+      return res.status(500).json({ error: 'Failed to create access token' });
+    }
+    
+    // Now create customer access token using Storefront API
+    const createTokenMutation = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerAccessToken {
+            accessToken
+            expiresAt
+          }
+          customerUserErrors {
+            code
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const tokenResponse = await axios.post(
+      config.apiUrl, // Storefront API URL
+      {
+        query: createTokenMutation,
+        variables: {
+          input: {
+            email: email,
+            password: tempPassword
+          }
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+        }
+      }
+    );
+    
+    const tokenData = tokenResponse.data;
+    
+    if (tokenData.data?.customerAccessTokenCreate?.customerAccessToken) {
+      const accessToken = tokenData.data.customerAccessTokenCreate.customerAccessToken.accessToken;
+      const expiresAt = tokenData.data.customerAccessTokenCreate.customerAccessToken.expiresAt;
+      
+      res.json({ 
+        customerAccessToken: accessToken,
+        expiresAt: expiresAt
+      });
+    } else {
+      console.error('Token creation failed:', tokenData);
+      res.status(500).json({ error: 'Failed to create customer access token' });
+    }
+    
+  } catch (error) {
+    console.error('Error creating customer access token:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to create customer access token' });
   }
 });
 
