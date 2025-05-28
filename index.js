@@ -507,9 +507,7 @@ app.get('/logout', (req, res) => {
 
 // ===== MOBILE APP ENDPOINTS =====
 
-// Fixed helper function to get real customer data from Shopify Admin API with phone support
-// Replace the getShopifyCustomerByEmail function (around line 420) with this fixed version:
-
+// Helper function to get real customer data from Shopify Admin API
 async function getShopifyCustomerByEmail(email) {
   if (!config.adminToken) {
     console.log('No admin token configured - check SHOPIFY_ADMIN_TOKEN env var');
@@ -517,7 +515,6 @@ async function getShopifyCustomerByEmail(email) {
   }
 
   try {
-    // Fixed query - addresses is an array, not a connection with edges
     const query = `
       query getCustomerByEmail($query: String!) {
         customers(first: 5, query: $query) {
@@ -533,19 +530,6 @@ async function getShopifyCustomerByEmail(email) {
                 marketingState
               }
               defaultAddress {
-                id
-                firstName
-                lastName
-                company
-                address1
-                address2
-                city
-                province
-                country
-                zip
-                phone
-              }
-              addresses(first: 10) {
                 id
                 firstName
                 lastName
@@ -594,162 +578,12 @@ async function getShopifyCustomerByEmail(email) {
       c.node.email.toLowerCase() === email.toLowerCase()
     );
     
-    if (customer) {
-      const node = customer.node;
-      console.log('Customer found:');
-      console.log('- ID:', node.id);
-      console.log('- Name:', node.firstName, node.lastName);
-      console.log('- Main phone:', node.phone);
-      console.log('- Default address phone:', node.defaultAddress?.phone);
-      
-      // Use phone from addresses if main phone is empty
-      if (!node.phone && node.addresses && node.addresses.length > 0) {
-        for (const addr of node.addresses) {
-          if (addr.phone) {
-            console.log('Using phone from address:', addr.phone);
-            node.phone = addr.phone;
-            break;
-          }
-        }
-      }
-      
-      // Use default address phone if still no main phone
-      if (!node.phone && node.defaultAddress?.phone) {
-        console.log('Using phone from default address');
-        node.phone = node.defaultAddress.phone;
-      }
-      
-      // Transform addresses to match expected format
-      node.addresses = {
-        edges: node.addresses ? node.addresses.map(addr => ({ node: addr })) : []
-      };
-      
-      return node;
-    }
-    
-    return null;
+    return customer ? customer.node : null;
   } catch (error) {
     console.error('Error fetching customer from Shopify:', error.response?.data || error.message);
     return null;
   }
 }
-
-// Also fix the GET /customer/profile endpoint (around line 780) to properly handle customer IDs:
-
-app.get('/customer/profile', authenticateAppToken, async (req, res) => {
-  try {
-    // Make sure we have a valid email
-    if (!req.session.email || req.session.email === 'unknown@example.com') {
-      console.log('Invalid session email:', req.session.email);
-      return res.status(401).json({ error: 'Invalid session' });
-    }
-    
-    const shopifyCustomer = await getShopifyCustomerByEmail(req.session.email);
-    
-    if (shopifyCustomer) {
-      console.log('Customer profile - ID:', shopifyCustomer.id);
-      console.log('Customer profile - Name:', shopifyCustomer.firstName, shopifyCustomer.lastName);
-      console.log('Customer profile - Main phone:', shopifyCustomer.phone);
-      console.log('Customer profile - Default address phone:', shopifyCustomer.defaultAddress?.phone);
-      
-      // Update session with correct customer ID
-      req.session.customerId = shopifyCustomer.id;
-      req.session.customerData = {
-        id: shopifyCustomer.id,
-        email: shopifyCustomer.email,
-        displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
-        firstName: shopifyCustomer.firstName || '',
-        lastName: shopifyCustomer.lastName || '',
-        phone: shopifyCustomer.phone || ''
-      };
-      
-      const customer = {
-        id: shopifyCustomer.id,
-        email: shopifyCustomer.email,
-        firstName: shopifyCustomer.firstName || '',
-        lastName: shopifyCustomer.lastName || '',
-        displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
-        phone: shopifyCustomer.phone || '',
-        acceptsMarketing: shopifyCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
-        defaultAddress: shopifyCustomer.defaultAddress || null,
-        addresses: shopifyCustomer.addresses || { edges: [] }
-      };
-      
-      console.log('Returning customer with phone:', customer.phone);
-      res.json({ customer });
-    } else {
-      // Return 404 if customer not found
-      res.status(404).json({ error: 'Customer not found' });
-    }
-  } catch (error) {
-    console.error('Profile fetch error:', error);
-    res.status(500).json({ error: 'Failed to fetch profile' });
-  }
-});
-
-// Fix the verify-code endpoint to use the correct customer ID format (around line 700):
-
-app.post('/auth/verify-code', async (req, res) => {
-  const { email, code, sessionId } = req.body;
-
-  const verificationData = config.verificationCodes.get(sessionId);
-  
-  if (!verificationData || 
-      verificationData.code !== code || 
-      verificationData.email !== email ||
-      verificationData.expiresAt < Date.now()) {
-    return res.status(400).json({ success: false, error: 'Ungültiger oder abgelaufener Code' });
-  }
-
-  let customerId;
-  let customerData;
-  
-  let shopifyCustomer = await getShopifyCustomerByEmail(email);
-  
-  if (!shopifyCustomer && verificationData.isNewCustomer) {
-    // Try to create the customer
-    shopifyCustomer = await createShopifyCustomer(email);
-    // If creation failed, fetch again (might exist now)
-    if (!shopifyCustomer) {
-      shopifyCustomer = await getShopifyCustomerByEmail(email);
-    }
-  }
-  
-  if (shopifyCustomer) {
-    customerId = shopifyCustomer.id;
-    customerData = {
-      id: shopifyCustomer.id,
-      email: shopifyCustomer.email,
-      displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
-      firstName: shopifyCustomer.firstName || '',
-      lastName: shopifyCustomer.lastName || '',
-      phone: shopifyCustomer.phone || ''
-    };
-  } else {
-    // Don't create fake customer IDs - this will cause issues
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Kunde konnte nicht gefunden oder erstellt werden' 
-    });
-  }
-
-  const accessToken = crypto.randomBytes(32).toString('hex');
-  config.sessions.set(accessToken, {
-    email,
-    customerId,
-    customerData,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
-  });
-
-  config.verificationCodes.delete(sessionId);
-
-  res.json({
-    success: true,
-    accessToken,
-    customer: customerData
-  });
-});
 
 // Helper function to create customer in Shopify
 async function createShopifyCustomer(email) {
@@ -869,12 +703,7 @@ app.post('/auth/verify-code', async (req, res) => {
   let shopifyCustomer = await getShopifyCustomerByEmail(email);
   
   if (!shopifyCustomer && verificationData.isNewCustomer) {
-    // Try to create the customer
     shopifyCustomer = await createShopifyCustomer(email);
-    // If creation failed, fetch again (might exist now)
-    if (!shopifyCustomer) {
-      shopifyCustomer = await getShopifyCustomerByEmail(email);
-    }
   }
   
   if (shopifyCustomer) {
@@ -884,15 +713,17 @@ app.post('/auth/verify-code', async (req, res) => {
       email: shopifyCustomer.email,
       displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
       firstName: shopifyCustomer.firstName || '',
-      lastName: shopifyCustomer.lastName || '',
-      phone: shopifyCustomer.phone || ''
+      lastName: shopifyCustomer.lastName || ''
     };
   } else {
-    // Don't create fake customer IDs - this will cause issues
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Kunde konnte nicht gefunden oder erstellt werden' 
-    });
+    customerId = config.customerEmails.get(email) || 
+                 `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`;
+    customerData = {
+      id: customerId,
+      email: email,
+      displayName: email.split('@')[0]
+    };
+    config.customerEmails.set(email, customerId);
   }
 
   const accessToken = crypto.randomBytes(32).toString('hex');
@@ -915,7 +746,7 @@ app.post('/auth/verify-code', async (req, res) => {
 
 // ===== CUSTOMER DATA ENDPOINTS FOR FLUTTER APP =====
 
-// Fixed Middleware to authenticate app tokens - no more temporary sessions
+// Middleware to authenticate app tokens
 const authenticateAppToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   
@@ -926,11 +757,25 @@ const authenticateAppToken = (req, res, next) => {
   const token = authHeader.substring(7);
   let session = config.sessions.get(token);
   
-  // Don't create temporary sessions for unknown tokens
+  if (!session && token.length === 64) {
+    console.log('Creating temporary session for existing token');
+    session = {
+      email: 'unknown@example.com',
+      customerId: 'gid://shopify/Customer/temporary',
+      customerData: {
+        id: 'gid://shopify/Customer/temporary',
+        email: 'unknown@example.com',
+        displayName: 'User'
+      },
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000
+    };
+  }
+  
   if (!session) {
     return res.status(401).json({ error: 'Invalid token' });
   }
-  
+
   if (session.expiresAt && session.expiresAt < Date.now()) {
     config.sessions.delete(token);
     return res.status(401).json({ error: 'Token expired' });
@@ -948,38 +793,33 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
   });
 });
 
-// GET /customer/profile - Get customer profile (FIXED VERSION)
+// GET /customer/profile - Get customer profile
 app.get('/customer/profile', authenticateAppToken, async (req, res) => {
   try {
-    // Make sure we have a valid email
-    if (!req.session.email || req.session.email === 'unknown@example.com') {
-      console.log('Invalid session email:', req.session.email);
-      return res.status(401).json({ error: 'Invalid session' });
-    }
-    
     const shopifyCustomer = await getShopifyCustomerByEmail(req.session.email);
     
     if (shopifyCustomer) {
-      console.log('Customer profile - Main phone:', shopifyCustomer.phone);
-      console.log('Customer profile - Default address phone:', shopifyCustomer.defaultAddress?.phone);
-      
       const customer = {
         id: shopifyCustomer.id,
         email: shopifyCustomer.email,
         firstName: shopifyCustomer.firstName || '',
         lastName: shopifyCustomer.lastName || '',
         displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
-        phone: shopifyCustomer.phone || '',
+        phone: shopifyCustomer.phone || null,
         acceptsMarketing: shopifyCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
-        defaultAddress: shopifyCustomer.defaultAddress || null,
-        addresses: shopifyCustomer.addresses || { edges: [] }
+        defaultAddress: shopifyCustomer.defaultAddress || null
       };
-      
-      console.log('Returning customer with phone:', customer.phone);
       res.json({ customer });
     } else {
-      // Return minimal data for session issues
-      res.status(404).json({ error: 'Customer not found' });
+      const customer = {
+        ...req.session.customerData,
+        firstName: req.session.customerData.firstName || req.session.customerData.displayName,
+        lastName: req.session.customerData.lastName || '',
+        phone: null,
+        acceptsMarketing: false,
+        defaultAddress: null
+      };
+      res.json({ customer });
     }
   } catch (error) {
     console.error('Profile fetch error:', error);
@@ -1267,7 +1107,7 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   }
 });
 
-// PUT /customer/update - FIXED to update customer and sync names to addresses
+// PUT /customer/update - SIMPLIFIED UPDATE WITHOUT MARKETING
 app.put('/customer/update', authenticateAppToken, async (req, res) => {
   try {
     const { updates } = req.body;
@@ -1276,7 +1116,7 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     console.log('Updating customer:', customerId);
     console.log('Updates:', updates);
     
-    // Build the mutation properly
+    // Only update basic fields - skip marketing for now
     let mutationFields = [];
     let variables = { id: customerId };
     let variableDefinitions = ['$id: ID!'];
@@ -1299,8 +1139,9 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       variableDefinitions.push('$phone: String');
     }
     
-    // First mutation: Update customer basic info
-    const customerMutation = `
+    // Skip marketing consent for now to avoid errors
+    
+    const mutation = `
       mutation updateCustomer(${variableDefinitions.join(', ')}) {
         customerUpdate(
           input: {
@@ -1319,8 +1160,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
             }
             defaultAddress {
               id
-              firstName
-              lastName
               company
               address1
               address2
@@ -1339,13 +1178,13 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       }
     `;
     
-    console.log('Customer mutation:', customerMutation);
+    console.log('GraphQL mutation:', mutation);
     console.log('Variables:', variables);
     
     const response = await axios.post(
       config.adminApiUrl,
       {
-        query: customerMutation,
+        query: mutation,
         variables: variables,
       },
       {
@@ -1375,138 +1214,14 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     }
     
     const customer = data.data.customerUpdate.customer;
+    const transformedCustomer = {
+      ...customer,
+      acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
+    };
     
-    // Now get the full customer with addresses if we need to update them
-    if (updates.firstName !== undefined || updates.lastName !== undefined || updates.phone !== undefined) {
-      console.log('Fetching customer addresses for update...');
-      
-      const getAddressesQuery = `
-        query getCustomerAddresses($id: ID!) {
-          customer(id: $id) {
-            addresses(first: 50) {
-              edges {
-                node {
-                  id
-                  firstName
-                  lastName
-                  company
-                  address1
-                  address2
-                  city
-                  province
-                  country
-                  zip
-                  phone
-                }
-              }
-            }
-          }
-        }
-      `;
-      
-      const addressesResponse = await axios.post(
-        config.adminApiUrl,
-        {
-          query: getAddressesQuery,
-          variables: { id: customerId }
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': config.adminToken,
-          }
-        }
-      );
-      
-      const addresses = addressesResponse.data?.data?.customer?.addresses?.edges || [];
-      
-      if (addresses.length > 0) {
-        console.log(`Updating ${addresses.length} addresses...`);
-        
-        // Update each address
-        const addressUpdatePromises = addresses.map(edge => {
-          const address = edge.node;
-          
-          const addressMutation = `
-            mutation updateAddress($addressId: ID!, $address: MailingAddressInput!) {
-              customerAddressUpdate(
-                customerAddressId: $addressId
-                address: $address
-              ) {
-                customerAddress {
-                  id
-                }
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }
-          `;
-          
-          const addressInput = {
-            firstName: updates.firstName !== undefined ? updates.firstName : address.firstName,
-            lastName: updates.lastName !== undefined ? updates.lastName : address.lastName,
-            company: address.company || '',
-            address1: address.address1 || '',
-            address2: address.address2 || '',
-            city: address.city || '',
-            province: address.province || '',
-            country: address.country || '',
-            zip: address.zip || '',
-            phone: updates.phone !== undefined ? updates.phone : (address.phone || '')
-          };
-          
-          return axios.post(
-            config.adminApiUrl,
-            {
-              query: addressMutation,
-              variables: {
-                addressId: address.id,
-                address: addressInput
-              }
-            },
-            {
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Shopify-Access-Token': config.adminToken,
-              }
-            }
-          ).catch(error => {
-            console.error(`Error updating address ${address.id}:`, error.response?.data || error.message);
-            return null;
-          });
-        });
-        
-        await Promise.all(addressUpdatePromises);
-        console.log('All addresses updated');
-      }
-    }
-    
-    // Get final customer data
-    const finalCustomer = await getShopifyCustomerByEmail(customer.email);
-    
-    if (finalCustomer) {
-      const transformedCustomer = {
-        ...finalCustomer,
-        acceptsMarketing: finalCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
-      };
-      
-      res.json({ 
-        customer: transformedCustomer 
-      });
-    } else {
-      // Return what we have
-      const transformedCustomer = {
-        ...customer,
-        phone: customer.phone || customer.defaultAddress?.phone || '',
-        acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
-      };
-      
-      res.json({ 
-        customer: transformedCustomer 
-      });
-    }
+    res.json({ 
+      customer: transformedCustomer 
+    });
     
   } catch (error) {
     console.error('Error updating customer:', error.response?.data || error.message);
@@ -1589,7 +1304,7 @@ app.put('/customer/marketing-consent', authenticateAppToken, async (req, res) =>
   }
 });
 
-// POST /customer/address - Create or update address with phone sync
+// POST /customer/address - FIXED ADDRESS UPDATE
 app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res) => {
   try {
     const { address } = req.body;
@@ -1613,8 +1328,6 @@ app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res)
       zip: address.zip || '',
       phone: address.phone || ''
     };
-    
-    let addressResult;
     
     if (addressId && addressId !== 'undefined' && addressId !== 'null') {
       // Update existing address
@@ -1672,7 +1385,9 @@ app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res)
         });
       }
       
-      addressResult = data.data.customerAddressUpdate.customerAddress;
+      res.json({ 
+        address: data.data.customerAddressUpdate.customerAddress 
+      });
     } else {
       // Create new address
       const mutation = `
@@ -1729,10 +1444,8 @@ app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res)
         });
       }
       
-      addressResult = data.data.customerAddressCreate.customerAddress;
-      
       // Set as default address if it's the first one
-      if (addressResult?.id) {
+      if (data.data?.customerAddressCreate?.customerAddress?.id) {
         const setDefaultMutation = `
           mutation setDefaultAddress($addressId: ID!, $customerId: ID!) {
             customerDefaultAddressUpdate(
@@ -1755,7 +1468,7 @@ app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res)
           {
             query: setDefaultMutation,
             variables: {
-              addressId: addressResult.id,
+              addressId: data.data.customerAddressCreate.customerAddress.id,
               customerId: customerId
             }
           },
@@ -1767,55 +1480,11 @@ app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res)
           }
         );
       }
-    }
-    
-    // If phone was provided in address, also update customer phone
-    if (address.phone) {
-      console.log('Syncing phone to customer level...');
       
-      const updateCustomerPhoneMutation = `
-        mutation updateCustomerPhone($id: ID!, $phone: String) {
-          customerUpdate(
-            input: {
-              id: $id
-              phone: $phone
-            }
-          ) {
-            customer {
-              id
-              phone
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-      
-      await axios.post(
-        config.adminApiUrl,
-        {
-          query: updateCustomerPhoneMutation,
-          variables: {
-            id: customerId,
-            phone: address.phone
-          }
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': config.adminToken,
-          }
-        }
-      ).catch(error => {
-        console.error('Error syncing phone to customer:', error.response?.data || error.message);
+      res.json({ 
+        address: data.data.customerAddressCreate.customerAddress 
       });
     }
-    
-    res.json({ 
-      address: addressResult 
-    });
   } catch (error) {
     console.error('Error managing address:', error.response?.data || error.message);
     res.status(500).json({ error: 'Internal server error' });
