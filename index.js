@@ -1130,12 +1130,14 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   }
 });
 
-// This is what your backend endpoint should look like (Node.js/Express example)
-
-app.put('/customer/update', authenticateToken, async (req, res) => {
+// PUT /customer/update - Update customer information
+app.put('/customer/update', authenticateAppToken, async (req, res) => {
   try {
     const { updates } = req.body;
-    const customerId = req.user.customerId; // From JWT token
+    const customerId = req.session.customerId;
+    
+    console.log('Updating customer:', customerId);
+    console.log('Updates:', updates);
     
     // Build the mutation dynamically based on what fields are being updated
     let mutationFields = [];
@@ -1210,20 +1212,25 @@ app.put('/customer/update', authenticateToken, async (req, res) => {
       }
     `;
     
+    console.log('GraphQL mutation:', mutation);
+    console.log('Variables:', variables);
+    
     // Execute the GraphQL mutation
-    const response = await fetch(SHOPIFY_ADMIN_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
-      },
-      body: JSON.stringify({
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
         query: mutation,
         variables: variables,
-      }),
-    });
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
     
-    const data = await response.json();
+    const data = response.data;
     
     // Check for errors
     if (data.errors) {
@@ -1248,35 +1255,115 @@ app.put('/customer/update', authenticateToken, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error updating customer:', error);
+    console.error('Error updating customer:', error.response?.data || error.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-  // Optional: Separate endpoint for marketing consent to avoid enum issues
-  app.put('/customer/marketing-consent', authenticateToken, async (req, res) => {
-    try {
-      const { acceptsMarketing } = req.body;
-      const customerId = req.user.customerId;
-      
-      const mutation = `
-        mutation updateMarketingConsent(
-          $id: ID!
-          $marketingState: CustomerEmailMarketingState!
-          $marketingOptInLevel: CustomerMarketingOptInLevel!
-        ) {
-          customerUpdate(
-            input: {
-              id: $id
-              emailMarketingConsent: {
-                marketingState: $marketingState
-                marketingOptInLevel: $marketingOptInLevel
-              }
+// Optional: Separate endpoint for marketing consent to avoid enum issues
+app.put('/customer/marketing-consent', authenticateAppToken, async (req, res) => {
+  try {
+    const { acceptsMarketing } = req.body;
+    const customerId = req.session.customerId;
+    
+    const mutation = `
+      mutation updateMarketingConsent(
+        $id: ID!
+        $marketingState: CustomerEmailMarketingState!
+        $marketingOptInLevel: CustomerMarketingOptInLevel!
+      ) {
+        customerUpdate(
+          input: {
+            id: $id
+            emailMarketingConsent: {
+              marketingState: $marketingState
+              marketingOptInLevel: $marketingOptInLevel
             }
+          }
+        ) {
+          customer {
+            id
+            acceptsMarketing
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const variables = {
+      id: customerId,
+      marketingState: acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED',
+      marketingOptInLevel: 'SINGLE_OPT_IN',
+    };
+    
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: mutation,
+        variables: variables,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    const data = response.data;
+    
+    if (data.errors || data.data?.customerUpdate?.userErrors?.length > 0) {
+      return res.status(400).json({ 
+        error: 'Failed to update marketing consent',
+        details: data.errors || data.data.customerUpdate.userErrors
+      });
+    }
+    
+    res.json({ 
+      success: true,
+      acceptsMarketing: data.data.customerUpdate.customer.acceptsMarketing 
+    });
+    
+  } catch (error) {
+    console.error('Error updating marketing consent:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /customer/address - Create or update customer address
+app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res) => {
+  try {
+    const { address } = req.body;
+    const { addressId } = req.params;
+    const customerId = req.session.customerId;
+    
+    console.log('Updating address for customer:', customerId);
+    console.log('Address data:', address);
+    console.log('Address ID:', addressId);
+    
+    if (addressId) {
+      // Update existing address
+      const mutation = `
+        mutation updateAddress($customerId: ID!, $addressId: ID!, $address: MailingAddressInput!) {
+          customerAddressUpdate(
+            customerAddressId: $addressId
+            address: $address
           ) {
-            customer {
+            customerAddress {
               id
-              acceptsMarketing
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              country
+              zip
+              phone
             }
             userErrors {
               field
@@ -1286,43 +1373,102 @@ app.put('/customer/update', authenticateToken, async (req, res) => {
         }
       `;
       
-      const variables = {
-        id: customerId,
-        marketingState: acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED',
-        marketingOptInLevel: 'SINGLE_OPT_IN',
-      };
-      
-      const response = await fetch(SHOPIFY_ADMIN_API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
-        },
-        body: JSON.stringify({
+      const response = await axios.post(
+        config.adminApiUrl,
+        {
           query: mutation,
-          variables: variables,
-        }),
-      });
+          variables: {
+            customerId: customerId,
+            addressId: addressId,
+            address: address
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': config.adminToken,
+          }
+        }
+      );
       
-      const data = await response.json();
+      const data = response.data;
       
-      if (data.errors || data.data?.customerUpdate?.userErrors?.length > 0) {
+      if (data.errors || data.data?.customerAddressUpdate?.userErrors?.length > 0) {
+        console.error('Address update errors:', data.errors || data.data.customerAddressUpdate.userErrors);
         return res.status(400).json({ 
-          error: 'Failed to update marketing consent',
-          details: data.errors || data.data.customerUpdate.userErrors
+          error: 'Failed to update address',
+          details: data.errors || data.data.customerAddressUpdate.userErrors
         });
       }
       
       res.json({ 
-        success: true,
-        acceptsMarketing: data.data.customerUpdate.customer.acceptsMarketing 
+        address: data.data.customerAddressUpdate.customerAddress 
       });
+    } else {
+      // Create new address
+      const mutation = `
+        mutation createAddress($customerId: ID!, $address: MailingAddressInput!) {
+          customerAddressCreate(
+            customerId: $customerId
+            address: $address
+          ) {
+            customerAddress {
+              id
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              country
+              zip
+              phone
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
       
-    } catch (error) {
-      console.error('Error updating marketing consent:', error);
-      res.status(500).json({ error: 'Internal server error' });
+      const response = await axios.post(
+        config.adminApiUrl,
+        {
+          query: mutation,
+          variables: {
+            customerId: customerId,
+            address: address
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': config.adminToken,
+          }
+        }
+      );
+      
+      const data = response.data;
+      
+      if (data.errors || data.data?.customerAddressCreate?.userErrors?.length > 0) {
+        console.error('Address creation errors:', data.errors || data.data.customerAddressCreate.userErrors);
+        return res.status(400).json({ 
+          error: 'Failed to create address',
+          details: data.errors || data.data.customerAddressCreate.userErrors
+        });
+      }
+      
+      res.json({ 
+        address: data.data.customerAddressCreate.customerAddress 
+      });
     }
-  });
+  } catch (error) {
+    console.error('Error managing address:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // POST /auth/logout - Logout
 app.post('/auth/logout', authenticateAppToken, (req, res) => {
