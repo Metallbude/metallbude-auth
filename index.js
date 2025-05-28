@@ -508,6 +508,8 @@ app.get('/logout', (req, res) => {
 // ===== MOBILE APP ENDPOINTS =====
 
 // Fixed helper function to get real customer data from Shopify Admin API with phone support
+// Replace the getShopifyCustomerByEmail function (around line 420) with this fixed version:
+
 async function getShopifyCustomerByEmail(email) {
   if (!config.adminToken) {
     console.log('No admin token configured - check SHOPIFY_ADMIN_TOKEN env var');
@@ -515,6 +517,7 @@ async function getShopifyCustomerByEmail(email) {
   }
 
   try {
+    // Fixed query - addresses is an array, not a connection with edges
     const query = `
       query getCustomerByEmail($query: String!) {
         customers(first: 5, query: $query) {
@@ -543,21 +546,17 @@ async function getShopifyCustomerByEmail(email) {
                 phone
               }
               addresses(first: 10) {
-                edges {
-                  node {
-                    id
-                    firstName
-                    lastName
-                    company
-                    address1
-                    address2
-                    city
-                    province
-                    country
-                    zip
-                    phone
-                  }
-                }
+                id
+                firstName
+                lastName
+                company
+                address1
+                address2
+                city
+                province
+                country
+                zip
+                phone
               }
             }
           }
@@ -598,31 +597,159 @@ async function getShopifyCustomerByEmail(email) {
     if (customer) {
       const node = customer.node;
       console.log('Customer found:');
+      console.log('- ID:', node.id);
+      console.log('- Name:', node.firstName, node.lastName);
       console.log('- Main phone:', node.phone);
       console.log('- Default address phone:', node.defaultAddress?.phone);
       
-      // Find phone from any source
-      if (!node.phone && node.defaultAddress?.phone) {
-        console.log('Using phone from default address');
-        node.phone = node.defaultAddress.phone;
-      } else if (!node.phone && node.addresses?.edges?.length > 0) {
-        // Check all addresses for a phone
-        for (const addr of node.addresses.edges) {
-          if (addr.node.phone) {
-            console.log('Using phone from address:', addr.node.phone);
-            node.phone = addr.node.phone;
+      // Use phone from addresses if main phone is empty
+      if (!node.phone && node.addresses && node.addresses.length > 0) {
+        for (const addr of node.addresses) {
+          if (addr.phone) {
+            console.log('Using phone from address:', addr.phone);
+            node.phone = addr.phone;
             break;
           }
         }
       }
+      
+      // Use default address phone if still no main phone
+      if (!node.phone && node.defaultAddress?.phone) {
+        console.log('Using phone from default address');
+        node.phone = node.defaultAddress.phone;
+      }
+      
+      // Transform addresses to match expected format
+      node.addresses = {
+        edges: node.addresses ? node.addresses.map(addr => ({ node: addr })) : []
+      };
+      
+      return node;
     }
     
-    return customer ? customer.node : null;
+    return null;
   } catch (error) {
     console.error('Error fetching customer from Shopify:', error.response?.data || error.message);
     return null;
   }
 }
+
+// Also fix the GET /customer/profile endpoint (around line 780) to properly handle customer IDs:
+
+app.get('/customer/profile', authenticateAppToken, async (req, res) => {
+  try {
+    // Make sure we have a valid email
+    if (!req.session.email || req.session.email === 'unknown@example.com') {
+      console.log('Invalid session email:', req.session.email);
+      return res.status(401).json({ error: 'Invalid session' });
+    }
+    
+    const shopifyCustomer = await getShopifyCustomerByEmail(req.session.email);
+    
+    if (shopifyCustomer) {
+      console.log('Customer profile - ID:', shopifyCustomer.id);
+      console.log('Customer profile - Name:', shopifyCustomer.firstName, shopifyCustomer.lastName);
+      console.log('Customer profile - Main phone:', shopifyCustomer.phone);
+      console.log('Customer profile - Default address phone:', shopifyCustomer.defaultAddress?.phone);
+      
+      // Update session with correct customer ID
+      req.session.customerId = shopifyCustomer.id;
+      req.session.customerData = {
+        id: shopifyCustomer.id,
+        email: shopifyCustomer.email,
+        displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
+        firstName: shopifyCustomer.firstName || '',
+        lastName: shopifyCustomer.lastName || '',
+        phone: shopifyCustomer.phone || ''
+      };
+      
+      const customer = {
+        id: shopifyCustomer.id,
+        email: shopifyCustomer.email,
+        firstName: shopifyCustomer.firstName || '',
+        lastName: shopifyCustomer.lastName || '',
+        displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
+        phone: shopifyCustomer.phone || '',
+        acceptsMarketing: shopifyCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
+        defaultAddress: shopifyCustomer.defaultAddress || null,
+        addresses: shopifyCustomer.addresses || { edges: [] }
+      };
+      
+      console.log('Returning customer with phone:', customer.phone);
+      res.json({ customer });
+    } else {
+      // Return 404 if customer not found
+      res.status(404).json({ error: 'Customer not found' });
+    }
+  } catch (error) {
+    console.error('Profile fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// Fix the verify-code endpoint to use the correct customer ID format (around line 700):
+
+app.post('/auth/verify-code', async (req, res) => {
+  const { email, code, sessionId } = req.body;
+
+  const verificationData = config.verificationCodes.get(sessionId);
+  
+  if (!verificationData || 
+      verificationData.code !== code || 
+      verificationData.email !== email ||
+      verificationData.expiresAt < Date.now()) {
+    return res.status(400).json({ success: false, error: 'Ungültiger oder abgelaufener Code' });
+  }
+
+  let customerId;
+  let customerData;
+  
+  let shopifyCustomer = await getShopifyCustomerByEmail(email);
+  
+  if (!shopifyCustomer && verificationData.isNewCustomer) {
+    // Try to create the customer
+    shopifyCustomer = await createShopifyCustomer(email);
+    // If creation failed, fetch again (might exist now)
+    if (!shopifyCustomer) {
+      shopifyCustomer = await getShopifyCustomerByEmail(email);
+    }
+  }
+  
+  if (shopifyCustomer) {
+    customerId = shopifyCustomer.id;
+    customerData = {
+      id: shopifyCustomer.id,
+      email: shopifyCustomer.email,
+      displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
+      firstName: shopifyCustomer.firstName || '',
+      lastName: shopifyCustomer.lastName || '',
+      phone: shopifyCustomer.phone || ''
+    };
+  } else {
+    // Don't create fake customer IDs - this will cause issues
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Kunde konnte nicht gefunden oder erstellt werden' 
+    });
+  }
+
+  const accessToken = crypto.randomBytes(32).toString('hex');
+  config.sessions.set(accessToken, {
+    email,
+    customerId,
+    customerData,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
+  });
+
+  config.verificationCodes.delete(sessionId);
+
+  res.json({
+    success: true,
+    accessToken,
+    customer: customerData
+  });
+});
 
 // Helper function to create customer in Shopify
 async function createShopifyCustomer(email) {
@@ -742,7 +869,12 @@ app.post('/auth/verify-code', async (req, res) => {
   let shopifyCustomer = await getShopifyCustomerByEmail(email);
   
   if (!shopifyCustomer && verificationData.isNewCustomer) {
+    // Try to create the customer
     shopifyCustomer = await createShopifyCustomer(email);
+    // If creation failed, fetch again (might exist now)
+    if (!shopifyCustomer) {
+      shopifyCustomer = await getShopifyCustomerByEmail(email);
+    }
   }
   
   if (shopifyCustomer) {
@@ -756,17 +888,11 @@ app.post('/auth/verify-code', async (req, res) => {
       phone: shopifyCustomer.phone || ''
     };
   } else {
-    customerId = config.customerEmails.get(email) || 
-                 `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`;
-    customerData = {
-      id: customerId,
-      email: email,
-      displayName: email.split('@')[0],
-      firstName: '',
-      lastName: '',
-      phone: ''
-    };
-    config.customerEmails.set(email, customerId);
+    // Don't create fake customer IDs - this will cause issues
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Kunde konnte nicht gefunden oder erstellt werden' 
+    });
   }
 
   const accessToken = crypto.randomBytes(32).toString('hex');
