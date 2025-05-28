@@ -33,7 +33,7 @@ const config = {
   issuer: process.env.SERVER_URL || 'https://metallbude-auth.onrender.com',
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
   storefrontToken: process.env.SHOPIFY_STOREFRONT_TOKEN,
-  adminToken: process.env.SHOPIFY_ADMIN_TOKEN, // Add admin token
+  adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
   apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
   adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2024-10/graphql.json',
   mailerSendApiKey: process.env.MAILERSEND_API_KEY,
@@ -56,7 +56,7 @@ const config = {
   accessTokens: new Map(),
   refreshTokens: new Map(),
   sessions: new Map(),
-  customerEmails: new Map() // Store email -> customer ID mapping
+  customerEmails: new Map()
 };
 
 // Helper functions
@@ -515,7 +515,6 @@ async function getShopifyCustomerByEmail(email) {
   }
 
   try {
-    // Make email search case-insensitive
     const query = `
       query getCustomerByEmail($query: String!) {
         customers(first: 5, query: $query) {
@@ -556,7 +555,7 @@ async function getShopifyCustomerByEmail(email) {
       {
         query,
         variables: {
-          query: `email:"${email}"` // Exact email search with quotes
+          query: `email:"${email}"`
         }
       },
       {
@@ -575,7 +574,6 @@ async function getShopifyCustomerByEmail(email) {
     const customers = response.data?.data?.customers?.edges || [];
     console.log(`Found ${customers.length} customers`);
     
-    // Find exact match (case-insensitive)
     const customer = customers.find(c => 
       c.node.email.toLowerCase() === email.toLowerCase()
     );
@@ -655,7 +653,6 @@ app.post('/auth/request-code', async (req, res) => {
     return res.status(400).json({ success: false, error: 'E-Mail-Adresse ist erforderlich' });
   }
 
-  // Check if customer exists in Shopify using Admin API
   let isNewCustomer = true;
   if (config.adminToken) {
     const existingCustomer = await getShopifyCustomerByEmail(email);
@@ -703,16 +700,13 @@ app.post('/auth/verify-code', async (req, res) => {
   let customerId;
   let customerData;
   
-  // Try to get real customer data from Shopify
   let shopifyCustomer = await getShopifyCustomerByEmail(email);
   
   if (!shopifyCustomer && verificationData.isNewCustomer) {
-    // Create new customer in Shopify
     shopifyCustomer = await createShopifyCustomer(email);
   }
   
   if (shopifyCustomer) {
-    // Use real Shopify customer data
     customerId = shopifyCustomer.id;
     customerData = {
       id: shopifyCustomer.id,
@@ -722,7 +716,6 @@ app.post('/auth/verify-code', async (req, res) => {
       lastName: shopifyCustomer.lastName || ''
     };
   } else {
-    // Fallback to generated data if Shopify API fails
     customerId = config.customerEmails.get(email) || 
                  `gid://shopify/Customer/${crypto.randomBytes(8).toString('hex')}`;
     customerData = {
@@ -733,14 +726,13 @@ app.post('/auth/verify-code', async (req, res) => {
     config.customerEmails.set(email, customerId);
   }
 
-  // Generate access token for the app
   const accessToken = crypto.randomBytes(32).toString('hex');
   config.sessions.set(accessToken, {
     email,
     customerId,
     customerData,
     createdAt: Date.now(),
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
   });
 
   config.verificationCodes.delete(sessionId);
@@ -765,11 +757,8 @@ const authenticateAppToken = (req, res, next) => {
   const token = authHeader.substring(7);
   let session = config.sessions.get(token);
   
-  // Temporary: If session not found, create one for existing tokens
-  // Remove this after all users have logged in again
   if (!session && token.length === 64) {
     console.log('Creating temporary session for existing token');
-    // For now, we don't know the email, so return a basic response
     session = {
       email: 'unknown@example.com',
       customerId: 'gid://shopify/Customer/temporary',
@@ -779,16 +768,14 @@ const authenticateAppToken = (req, res, next) => {
         displayName: 'User'
       },
       createdAt: Date.now(),
-      expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000
     };
-    // Don't store this temporary session
   }
   
   if (!session) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 
-  // Check if session is expired
   if (session.expiresAt && session.expiresAt < Date.now()) {
     config.sessions.delete(token);
     return res.status(401).json({ error: 'Token expired' });
@@ -809,7 +796,6 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 // GET /customer/profile - Get customer profile
 app.get('/customer/profile', authenticateAppToken, async (req, res) => {
   try {
-    // Try to get fresh data from Shopify
     const shopifyCustomer = await getShopifyCustomerByEmail(req.session.email);
     
     if (shopifyCustomer) {
@@ -825,7 +811,6 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       };
       res.json({ customer });
     } else {
-      // Fallback to session data
       const customer = {
         ...req.session.customerData,
         firstName: req.session.customerData.firstName || req.session.customerData.displayName,
@@ -850,9 +835,7 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     }
 
     console.log('Fetching orders for customer:', req.session.customerId);
-    console.log('Session data:', JSON.stringify(req.session));
 
-    // Get orders from Shopify Admin API
     const query = `
       query getCustomerOrders($customerId: ID!) {
         customer(id: $customerId) {
@@ -954,8 +937,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       }
     );
 
-    console.log('Orders response:', JSON.stringify(response.data).substring(0, 200));
-
     if (response.data.errors) {
       console.error('GraphQL errors:', response.data.errors);
       return res.json({ orders: [] });
@@ -964,7 +945,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     const orderEdges = response.data?.data?.customer?.orders?.edges || [];
     console.log(`Found ${orderEdges.length} orders`);
     
-    // Transform orders to match the expected format
     const orders = orderEdges.map(edge => {
       const order = edge.node;
       return {
@@ -1029,7 +1009,6 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
 
     console.log('Fetching store credit for customer:', req.session.customerId);
 
-    // Query customer with store credit balance
     const query = `
       query getCustomerStoreCredit($customerId: ID!) {
         customer(id: $customerId) {
@@ -1071,7 +1050,6 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
     if (response.data.errors) {
       console.error('GraphQL errors:', response.data.errors);
       
-      // Fallback to metafield approach for older Shopify setups
       const metafieldQuery = `
         query getCustomerMetafield($customerId: ID!) {
           customer(id: $customerId) {
@@ -1105,7 +1083,6 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       });
     }
 
-    // Calculate total store credit from all accounts
     let totalCredit = 0.0;
     const storeCreditAccounts = response.data?.data?.customer?.storeCreditAccounts?.edges || [];
     
@@ -1130,7 +1107,8 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   }
 });
 
-// PUT /customer/update - Update customer information
+// PUT /customer/update - SIMPLIFIED UPDATE WITHOUT MARKETING
+// PUT /customer/update - Updated to sync names to addresses
 app.put('/customer/update', authenticateAppToken, async (req, res) => {
   try {
     const { updates } = req.body;
@@ -1139,12 +1117,11 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     console.log('Updating customer:', customerId);
     console.log('Updates:', updates);
     
-    // Build the mutation dynamically based on what fields are being updated
+    // First, update the customer's basic info
     let mutationFields = [];
     let variables = { id: customerId };
     let variableDefinitions = ['$id: ID!'];
     
-    // Handle basic fields
     if (updates.firstName !== undefined) {
       mutationFields.push('firstName: $firstName');
       variables.firstName = updates.firstName;
@@ -1163,20 +1140,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       variableDefinitions.push('$phone: String');
     }
     
-    // Handle marketing consent separately with correct enum types
-    if (updates.acceptsMarketing !== undefined) {
-      mutationFields.push('emailMarketingConsent: { marketingState: $marketingState, marketingOptInLevel: $marketingOptInLevel }');
-      
-      // Use the correct enum values
-      variables.marketingState = updates.acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED';
-      variables.marketingOptInLevel = 'SINGLE_OPT_IN';
-      
-      // Add the correct variable types
-      variableDefinitions.push('$marketingState: CustomerEmailMarketingState!');
-      variableDefinitions.push('$marketingOptInLevel: CustomerMarketingOptInLevel!');
-    }
-    
-    // Build the complete mutation WITHOUT acceptsMarketing field
     const mutation = `
       mutation updateCustomer(${variableDefinitions.join(', ')}) {
         customerUpdate(
@@ -1205,6 +1168,23 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
               zip
               phone
             }
+            addresses(first: 10) {
+              edges {
+                node {
+                  id
+                  firstName
+                  lastName
+                  company
+                  address1
+                  address2
+                  city
+                  province
+                  country
+                  zip
+                  phone
+                }
+              }
+            }
           }
           userErrors {
             field
@@ -1217,7 +1197,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     console.log('GraphQL mutation:', mutation);
     console.log('Variables:', variables);
     
-    // Execute the GraphQL mutation
     const response = await axios.post(
       config.adminApiUrl,
       {
@@ -1234,7 +1213,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     
     const data = response.data;
     
-    // Check for errors
     if (data.errors) {
       console.error('GraphQL errors:', data.errors);
       return res.status(400).json({ 
@@ -1251,14 +1229,78 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       });
     }
     
-    // Transform the response to include acceptsMarketing
     const customer = data.data.customerUpdate.customer;
+    
+    // If we updated the customer's name, update all their addresses too
+    if ((updates.firstName !== undefined || updates.lastName !== undefined) && customer.addresses?.edges?.length > 0) {
+      console.log('Updating names in customer addresses...');
+      
+      const addressUpdatePromises = customer.addresses.edges.map(edge => {
+        const address = edge.node;
+        
+        // Prepare the address update mutation
+        const addressMutation = `
+          mutation updateAddress($addressId: ID!, $address: MailingAddressInput!) {
+            customerAddressUpdate(
+              customerAddressId: $addressId
+              address: $address
+            ) {
+              customerAddress {
+                id
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `;
+        
+        const addressInput = {
+          firstName: updates.firstName !== undefined ? updates.firstName : address.firstName,
+          lastName: updates.lastName !== undefined ? updates.lastName : address.lastName,
+          company: address.company || '',
+          address1: address.address1 || '',
+          address2: address.address2 || '',
+          city: address.city || '',
+          province: address.province || '',
+          country: address.country || '',
+          zip: address.zip || '',
+          phone: address.phone || ''
+        };
+        
+        return axios.post(
+          config.adminApiUrl,
+          {
+            query: addressMutation,
+            variables: {
+              addressId: address.id,
+              address: addressInput
+            }
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': config.adminToken,
+            }
+          }
+        ).catch(error => {
+          console.error(`Error updating address ${address.id}:`, error.response?.data || error.message);
+          return null; // Don't fail the whole operation if one address update fails
+        });
+      });
+      
+      // Wait for all address updates to complete
+      await Promise.all(addressUpdatePromises);
+      console.log('Address names updated successfully');
+    }
+    
+    // Transform the customer data for the response
     const transformedCustomer = {
       ...customer,
       acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
     };
     
-    // Return the updated customer
     res.json({ 
       customer: transformedCustomer 
     });
@@ -1269,52 +1311,51 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
   }
 });
 
-// Optional: Separate endpoint for marketing consent to avoid enum issues
-app.put('/customer/marketing-consent', authenticateAppToken, async (req, res) => {
+// Alternative approach: Create a separate endpoint specifically for updating names across customer and addresses
+app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
   try {
-    const { acceptsMarketing } = req.body;
+    const { firstName, lastName } = req.body;
     const customerId = req.session.customerId;
     
-    const mutation = `
-      mutation updateMarketingConsent(
-        $id: ID!
-        $marketingState: CustomerEmailMarketingState!
-        $marketingOptInLevel: CustomerMarketingOptInLevel!
-      ) {
-        customerUpdate(
-          input: {
-            id: $id
-            emailMarketingConsent: {
-              marketingState: $marketingState
-              marketingOptInLevel: $marketingOptInLevel
+    if (!firstName && !lastName) {
+      return res.status(400).json({ error: 'At least one name field is required' });
+    }
+    
+    console.log('Updating customer name and all addresses:', customerId);
+    
+    // First get current customer data with all addresses
+    const getCustomerQuery = `
+      query getCustomer($id: ID!) {
+        customer(id: $id) {
+          id
+          firstName
+          lastName
+          addresses(first: 50) {
+            edges {
+              node {
+                id
+                firstName
+                lastName
+                company
+                address1
+                address2
+                city
+                province
+                country
+                zip
+                phone
+              }
             }
-          }
-        ) {
-          customer {
-            id
-            emailMarketingConsent {
-              marketingState
-            }
-          }
-          userErrors {
-            field
-            message
           }
         }
       }
     `;
     
-    const variables = {
-      id: customerId,
-      marketingState: acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED',
-      marketingOptInLevel: 'SINGLE_OPT_IN',
-    };
-    
-    const response = await axios.post(
+    const customerResponse = await axios.post(
       config.adminApiUrl,
       {
-        query: mutation,
-        variables: variables,
+        query: getCustomerQuery,
+        variables: { id: customerId }
       },
       {
         headers: {
@@ -1324,57 +1365,70 @@ app.put('/customer/marketing-consent', authenticateAppToken, async (req, res) =>
       }
     );
     
-    const data = response.data;
+    if (customerResponse.data.errors || !customerResponse.data.data?.customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     
-    if (data.errors || data.data?.customerUpdate?.userErrors?.length > 0) {
+    const currentCustomer = customerResponse.data.data.customer;
+    
+    // Update customer basic info
+    const updateCustomerMutation = `
+      mutation updateCustomer($id: ID!, $firstName: String, $lastName: String) {
+        customerUpdate(
+          input: {
+            id: $id
+            firstName: $firstName
+            lastName: $lastName
+          }
+        ) {
+          customer {
+            id
+            firstName
+            lastName
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const customerUpdateResponse = await axios.post(
+      config.adminApiUrl,
+      {
+        query: updateCustomerMutation,
+        variables: {
+          id: customerId,
+          firstName: firstName || currentCustomer.firstName,
+          lastName: lastName || currentCustomer.lastName
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    if (customerUpdateResponse.data.errors || customerUpdateResponse.data.data?.customerUpdate?.userErrors?.length > 0) {
       return res.status(400).json({ 
-        error: 'Failed to update marketing consent',
-        details: data.errors || data.data.customerUpdate.userErrors
+        error: 'Failed to update customer name',
+        details: customerUpdateResponse.data.errors || customerUpdateResponse.data.data.customerUpdate.userErrors
       });
     }
     
-    res.json({ 
-      success: true,
-      acceptsMarketing: data.data.customerUpdate.customer.emailMarketingConsent.marketingState === 'SUBSCRIBED'
-    });
-    
-  } catch (error) {
-    console.error('Error updating marketing consent:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// POST /customer/address - Create or update customer address
-app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res) => {
-  try {
-    const { address } = req.body;
-    const { addressId } = req.params;
-    const customerId = req.session.customerId;
-    
-    console.log('Updating address for customer:', customerId);
-    console.log('Address data:', address);
-    console.log('Address ID:', addressId);
-    
-    if (addressId) {
-      // Update existing address
-      const mutation = `
-        mutation updateAddress($customerId: ID!, $addressId: ID!, $address: MailingAddressInput!) {
+    // Update all addresses
+    if (currentCustomer.addresses?.edges?.length > 0) {
+      const updateAddressMutation = `
+        mutation updateAddress($addressId: ID!, $address: MailingAddressInput!) {
           customerAddressUpdate(
             customerAddressId: $addressId
             address: $address
           ) {
             customerAddress {
               id
-              firstName
-              lastName
-              company
-              address1
-              address2
-              city
-              province
-              country
-              zip
-              phone
             }
             userErrors {
               field
@@ -1384,146 +1438,74 @@ app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res)
         }
       `;
       
-      const response = await axios.post(
-        config.adminApiUrl,
-        {
-          query: mutation,
-          variables: {
-            customerId: customerId,
-            addressId: addressId,
-            address: address
-          }
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': config.adminToken,
-          }
-        }
-      );
-      
-      const data = response.data;
-      
-      if (data.errors || data.data?.customerAddressUpdate?.userErrors?.length > 0) {
-        console.error('Address update errors:', data.errors || data.data.customerAddressUpdate.userErrors);
-        return res.status(400).json({ 
-          error: 'Failed to update address',
-          details: data.errors || data.data.customerAddressUpdate.userErrors
-        });
-      }
-      
-      res.json({ 
-        address: data.data.customerAddressUpdate.customerAddress 
-      });
-    } else {
-      // Create new address
-      const mutation = `
-        mutation createAddress($customerId: ID!, $address: MailingAddressInput!) {
-          customerAddressCreate(
-            customerId: $customerId
-            address: $address
-          ) {
-            customerAddress {
-              id
-              firstName
-              lastName
-              company
-              address1
-              address2
-              city
-              province
-              country
-              zip
-              phone
+      const addressUpdatePromises = currentCustomer.addresses.edges.map(edge => {
+        const address = edge.node;
+        const addressInput = {
+          firstName: firstName || address.firstName || '',
+          lastName: lastName || address.lastName || '',
+          company: address.company || '',
+          address1: address.address1 || '',
+          address2: address.address2 || '',
+          city: address.city || '',
+          province: address.province || '',
+          country: address.country || '',
+          zip: address.zip || '',
+          phone: address.phone || ''
+        };
+        
+        return axios.post(
+          config.adminApiUrl,
+          {
+            query: updateAddressMutation,
+            variables: {
+              addressId: address.id,
+              address: addressInput
             }
-            userErrors {
-              field
-              message
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': config.adminToken,
             }
           }
-        }
-      `;
-      
-      const response = await axios.post(
-        config.adminApiUrl,
-        {
-          query: mutation,
-          variables: {
-            customerId: customerId,
-            address: address
-          }
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': config.adminToken,
-          }
-        }
-      );
-      
-      const data = response.data;
-      
-      if (data.errors || data.data?.customerAddressCreate?.userErrors?.length > 0) {
-        console.error('Address creation errors:', data.errors || data.data.customerAddressCreate.userErrors);
-        return res.status(400).json({ 
-          error: 'Failed to create address',
-          details: data.errors || data.data.customerAddressCreate.userErrors
-        });
-      }
-      
-      res.json({ 
-        address: data.data.customerAddressCreate.customerAddress 
+        );
       });
-    }
-  } catch (error) {
-    console.error('Error managing address:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// POST /customer/create-access-token - Create customer access token for Storefront API
-app.post('/customer/create-access-token', authenticateAppToken, async (req, res) => {
-  try {
-    const email = req.session.email;
-    const customerId = req.session.customerId;
-    
-    if (!email || !customerId) {
-      return res.status(400).json({ error: 'No customer data in session' });
+      
+      await Promise.all(addressUpdatePromises);
     }
     
-    // For passwordless auth, we need a different approach
-    // Option 1: Create a temporary password and immediately use it
-    // Option 2: Use Admin API to create a signed customer URL
-    // Option 3: Implement a custom token system
-    
-    // For now, we'll create a temporary password approach
-    const tempPassword = crypto.randomBytes(32).toString('hex');
-    
-    // Update customer with temporary password using Admin API
-    const updateMutation = `
-      mutation customerUpdate($input: CustomerInput!) {
-        customerUpdate(input: $input) {
-          customer {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    const updateResponse = await axios.post(
+    // Fetch and return updated customer data
+    const finalCustomerResponse = await axios.post(
       config.adminApiUrl,
       {
-        query: updateMutation,
-        variables: {
-          input: {
-            id: customerId,
-            password: tempPassword
+        query: `
+          query getUpdatedCustomer($id: ID!) {
+            customer(id: $id) {
+              id
+              email
+              firstName
+              lastName
+              phone
+              emailMarketingConsent {
+                marketingState
+              }
+              defaultAddress {
+                id
+                firstName
+                lastName
+                company
+                address1
+                address2
+                city
+                province
+                country
+                zip
+                phone
+              }
+            }
           }
-        }
+        `,
+        variables: { id: customerId }
       },
       {
         headers: {
@@ -1533,65 +1515,20 @@ app.post('/customer/create-access-token', authenticateAppToken, async (req, res)
       }
     );
     
-    if (updateResponse.data.errors || updateResponse.data.data?.customerUpdate?.userErrors?.length > 0) {
-      console.error('Failed to set temporary password');
-      return res.status(500).json({ error: 'Failed to create access token' });
-    }
+    const updatedCustomer = finalCustomerResponse.data.data.customer;
+    const transformedCustomer = {
+      ...updatedCustomer,
+      acceptsMarketing: updatedCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
+    };
     
-    // Now create customer access token using Storefront API
-    const createTokenMutation = `
-      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
-        customerAccessTokenCreate(input: $input) {
-          customerAccessToken {
-            accessToken
-            expiresAt
-          }
-          customerUserErrors {
-            code
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    const tokenResponse = await axios.post(
-      config.apiUrl, // Storefront API URL
-      {
-        query: createTokenMutation,
-        variables: {
-          input: {
-            email: email,
-            password: tempPassword
-          }
-        }
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
-        }
-      }
-    );
-    
-    const tokenData = tokenResponse.data;
-    
-    if (tokenData.data?.customerAccessTokenCreate?.customerAccessToken) {
-      const accessToken = tokenData.data.customerAccessTokenCreate.customerAccessToken.accessToken;
-      const expiresAt = tokenData.data.customerAccessTokenCreate.customerAccessToken.expiresAt;
-      
-      res.json({ 
-        customerAccessToken: accessToken,
-        expiresAt: expiresAt
-      });
-    } else {
-      console.error('Token creation failed:', tokenData);
-      res.status(500).json({ error: 'Failed to create customer access token' });
-    }
+    res.json({ 
+      customer: transformedCustomer,
+      message: 'Customer name updated across profile and all addresses'
+    });
     
   } catch (error) {
-    console.error('Error creating customer access token:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create customer access token' });
+    console.error('Error updating customer name:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -1600,7 +1537,6 @@ app.post('/auth/logout', authenticateAppToken, (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader.substring(7);
   
-  // Remove session
   config.sessions.delete(token);
   
   res.json({ success: true });
