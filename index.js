@@ -1107,8 +1107,50 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   }
 });
 
-// PUT /customer/update - SIMPLIFIED UPDATE WITHOUT MARKETING
-// PUT /customer/update - Updated to sync names to addresses
+// Update the GET /customer/profile endpoint to handle phone from address
+app.get('/customer/profile', authenticateAppToken, async (req, res) => {
+  try {
+    const shopifyCustomer = await getShopifyCustomerByEmail(req.session.email);
+    
+    if (shopifyCustomer) {
+      // Log both phone fields for debugging
+      console.log('Customer profile - Main phone:', shopifyCustomer.phone);
+      console.log('Customer profile - Default address phone:', shopifyCustomer.defaultAddress?.phone);
+      
+      // Use phone from customer level, or fall back to default address phone
+      const phone = shopifyCustomer.phone || shopifyCustomer.defaultAddress?.phone || '';
+      
+      const customer = {
+        id: shopifyCustomer.id,
+        email: shopifyCustomer.email,
+        firstName: shopifyCustomer.firstName || '',
+        lastName: shopifyCustomer.lastName || '',
+        displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
+        phone: phone, // Use the phone we found
+        acceptsMarketing: shopifyCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
+        defaultAddress: shopifyCustomer.defaultAddress || null
+      };
+      
+      console.log('Returning customer data with phone:', customer.phone);
+      res.json({ customer });
+    } else {
+      const customer = {
+        ...req.session.customerData,
+        firstName: req.session.customerData.firstName || req.session.customerData.displayName,
+        lastName: req.session.customerData.lastName || '',
+        phone: '', // Default empty phone for temporary customers
+        acceptsMarketing: false,
+        defaultAddress: null
+      };
+      res.json({ customer });
+    }
+  } catch (error) {
+    console.error('Profile fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// Update the customer update to also update phone at customer level
 app.put('/customer/update', authenticateAppToken, async (req, res) => {
   try {
     const { updates } = req.body;
@@ -1117,7 +1159,7 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     console.log('Updating customer:', customerId);
     console.log('Updates:', updates);
     
-    // First, update the customer's basic info
+    // First, update the customer's basic info including phone
     let mutationFields = [];
     let variables = { id: customerId };
     let variableDefinitions = ['$id: ID!'];
@@ -1159,6 +1201,8 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
             }
             defaultAddress {
               id
+              firstName
+              lastName
               company
               address1
               address2
@@ -1194,9 +1238,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       }
     `;
     
-    console.log('GraphQL mutation:', mutation);
-    console.log('Variables:', variables);
-    
     const response = await axios.post(
       config.adminApiUrl,
       {
@@ -1231,14 +1272,13 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     
     const customer = data.data.customerUpdate.customer;
     
-    // If we updated the customer's name, update all their addresses too
-    if ((updates.firstName !== undefined || updates.lastName !== undefined) && customer.addresses?.edges?.length > 0) {
-      console.log('Updating names in customer addresses...');
+    // Update addresses with new names AND phone if provided
+    if ((updates.firstName !== undefined || updates.lastName !== undefined || updates.phone !== undefined) && customer.addresses?.edges?.length > 0) {
+      console.log('Updating customer addresses...');
       
       const addressUpdatePromises = customer.addresses.edges.map(edge => {
         const address = edge.node;
         
-        // Prepare the address update mutation
         const addressMutation = `
           mutation updateAddress($addressId: ID!, $address: MailingAddressInput!) {
             customerAddressUpdate(
@@ -1266,7 +1306,7 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
           province: address.province || '',
           country: address.country || '',
           zip: address.zip || '',
-          phone: address.phone || ''
+          phone: updates.phone !== undefined ? updates.phone : (address.phone || '')
         };
         
         return axios.post(
@@ -1286,18 +1326,21 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
           }
         ).catch(error => {
           console.error(`Error updating address ${address.id}:`, error.response?.data || error.message);
-          return null; // Don't fail the whole operation if one address update fails
+          return null;
         });
       });
       
-      // Wait for all address updates to complete
       await Promise.all(addressUpdatePromises);
-      console.log('Address names updated successfully');
+      console.log('Addresses updated successfully');
     }
     
     // Transform the customer data for the response
+    // Include phone from customer or default address
+    const finalPhone = customer.phone || customer.defaultAddress?.phone || '';
+    
     const transformedCustomer = {
       ...customer,
+      phone: finalPhone,
       acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
     };
     
@@ -1311,117 +1354,36 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
   }
 });
 
-// Alternative approach: Create a separate endpoint specifically for updating names across customer and addresses
-app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
+// Also update the POST /customer/address endpoint to sync phone to customer level
+app.post('/customer/address/:addressId?', authenticateAppToken, async (req, res) => {
   try {
-    const { firstName, lastName } = req.body;
+    const { address } = req.body;
+    const { addressId } = req.params;
     const customerId = req.session.customerId;
     
-    if (!firstName && !lastName) {
-      return res.status(400).json({ error: 'At least one name field is required' });
-    }
+    console.log('Address operation for customer:', customerId);
+    console.log('Address data:', address);
+    console.log('Address ID:', addressId);
     
-    console.log('Updating customer name and all addresses:', customerId);
+    // Ensure address has all required fields
+    const addressInput = {
+      firstName: address.firstName || '',
+      lastName: address.lastName || '',
+      company: address.company || '',
+      address1: address.address1 || '',
+      address2: address.address2 || '',
+      city: address.city || '',
+      province: address.province || '',
+      country: address.country || 'DE',
+      zip: address.zip || '',
+      phone: address.phone || ''
+    };
     
-    // First get current customer data with all addresses
-    const getCustomerQuery = `
-      query getCustomer($id: ID!) {
-        customer(id: $id) {
-          id
-          firstName
-          lastName
-          addresses(first: 50) {
-            edges {
-              node {
-                id
-                firstName
-                lastName
-                company
-                address1
-                address2
-                city
-                province
-                country
-                zip
-                phone
-              }
-            }
-          }
-        }
-      }
-    `;
+    let addressResult;
     
-    const customerResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: getCustomerQuery,
-        variables: { id: customerId }
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': config.adminToken,
-        }
-      }
-    );
-    
-    if (customerResponse.data.errors || !customerResponse.data.data?.customer) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
-    
-    const currentCustomer = customerResponse.data.data.customer;
-    
-    // Update customer basic info
-    const updateCustomerMutation = `
-      mutation updateCustomer($id: ID!, $firstName: String, $lastName: String) {
-        customerUpdate(
-          input: {
-            id: $id
-            firstName: $firstName
-            lastName: $lastName
-          }
-        ) {
-          customer {
-            id
-            firstName
-            lastName
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    const customerUpdateResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: updateCustomerMutation,
-        variables: {
-          id: customerId,
-          firstName: firstName || currentCustomer.firstName,
-          lastName: lastName || currentCustomer.lastName
-        }
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': config.adminToken,
-        }
-      }
-    );
-    
-    if (customerUpdateResponse.data.errors || customerUpdateResponse.data.data?.customerUpdate?.userErrors?.length > 0) {
-      return res.status(400).json({ 
-        error: 'Failed to update customer name',
-        details: customerUpdateResponse.data.errors || customerUpdateResponse.data.data.customerUpdate.userErrors
-      });
-    }
-    
-    // Update all addresses
-    if (currentCustomer.addresses?.edges?.length > 0) {
-      const updateAddressMutation = `
+    if (addressId && addressId !== 'undefined' && addressId !== 'null') {
+      // Update existing address
+      const mutation = `
         mutation updateAddress($addressId: ID!, $address: MailingAddressInput!) {
           customerAddressUpdate(
             customerAddressId: $addressId
@@ -1429,6 +1391,16 @@ app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
           ) {
             customerAddress {
               id
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              country
+              zip
+              phone
             }
             userErrors {
               field
@@ -1438,28 +1410,118 @@ app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
         }
       `;
       
-      const addressUpdatePromises = currentCustomer.addresses.edges.map(edge => {
-        const address = edge.node;
-        const addressInput = {
-          firstName: firstName || address.firstName || '',
-          lastName: lastName || address.lastName || '',
-          company: address.company || '',
-          address1: address.address1 || '',
-          address2: address.address2 || '',
-          city: address.city || '',
-          province: address.province || '',
-          country: address.country || '',
-          zip: address.zip || '',
-          phone: address.phone || ''
-        };
+      const response = await axios.post(
+        config.adminApiUrl,
+        {
+          query: mutation,
+          variables: {
+            addressId: addressId,
+            address: addressInput
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': config.adminToken,
+          }
+        }
+      );
+      
+      const data = response.data;
+      
+      if (data.errors || data.data?.customerAddressUpdate?.userErrors?.length > 0) {
+        console.error('Address update errors:', data.errors || data.data.customerAddressUpdate.userErrors);
+        return res.status(400).json({ 
+          error: 'Failed to update address',
+          details: data.errors || data.data.customerAddressUpdate.userErrors
+        });
+      }
+      
+      addressResult = data.data.customerAddressUpdate.customerAddress;
+    } else {
+      // Create new address
+      const mutation = `
+        mutation createAddress($customerId: ID!, $address: MailingAddressInput!) {
+          customerAddressCreate(
+            customerId: $customerId
+            address: $address
+          ) {
+            customerAddress {
+              id
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              country
+              zip
+              phone
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+      
+      const response = await axios.post(
+        config.adminApiUrl,
+        {
+          query: mutation,
+          variables: {
+            customerId: customerId,
+            address: addressInput
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': config.adminToken,
+          }
+        }
+      );
+      
+      const data = response.data;
+      
+      if (data.errors || data.data?.customerAddressCreate?.userErrors?.length > 0) {
+        console.error('Address creation errors:', data.errors || data.data.customerAddressCreate.userErrors);
+        return res.status(400).json({ 
+          error: 'Failed to create address',
+          details: data.errors || data.data.customerAddressCreate.userErrors
+        });
+      }
+      
+      addressResult = data.data.customerAddressCreate.customerAddress;
+      
+      // Set as default address if it's the first one
+      if (addressResult?.id) {
+        const setDefaultMutation = `
+          mutation setDefaultAddress($addressId: ID!, $customerId: ID!) {
+            customerDefaultAddressUpdate(
+              addressId: $addressId
+              customerId: $customerId
+            ) {
+              customer {
+                id
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `;
         
-        return axios.post(
+        await axios.post(
           config.adminApiUrl,
           {
-            query: updateAddressMutation,
+            query: setDefaultMutation,
             variables: {
-              addressId: address.id,
-              address: addressInput
+              addressId: addressResult.id,
+              customerId: customerId
             }
           },
           {
@@ -1469,65 +1531,58 @@ app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
             }
           }
         );
-      });
-      
-      await Promise.all(addressUpdatePromises);
+      }
     }
     
-    // Fetch and return updated customer data
-    const finalCustomerResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: `
-          query getUpdatedCustomer($id: ID!) {
-            customer(id: $id) {
+    // If phone was provided in address, also update customer phone
+    if (address.phone) {
+      console.log('Syncing phone to customer level...');
+      
+      const updateCustomerPhoneMutation = `
+        mutation updateCustomerPhone($id: ID!, $phone: String) {
+          customerUpdate(
+            input: {
+              id: $id
+              phone: $phone
+            }
+          ) {
+            customer {
               id
-              email
-              firstName
-              lastName
               phone
-              emailMarketingConsent {
-                marketingState
-              }
-              defaultAddress {
-                id
-                firstName
-                lastName
-                company
-                address1
-                address2
-                city
-                province
-                country
-                zip
-                phone
-              }
+            }
+            userErrors {
+              field
+              message
             }
           }
-        `,
-        variables: { id: customerId }
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': config.adminToken,
         }
-      }
-    );
-    
-    const updatedCustomer = finalCustomerResponse.data.data.customer;
-    const transformedCustomer = {
-      ...updatedCustomer,
-      acceptsMarketing: updatedCustomer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
-    };
+      `;
+      
+      await axios.post(
+        config.adminApiUrl,
+        {
+          query: updateCustomerPhoneMutation,
+          variables: {
+            id: customerId,
+            phone: address.phone
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': config.adminToken,
+          }
+        }
+      ).catch(error => {
+        console.error('Error syncing phone to customer:', error.response?.data || error.message);
+      });
+    }
     
     res.json({ 
-      customer: transformedCustomer,
-      message: 'Customer name updated across profile and all addresses'
+      address: addressResult 
     });
-    
   } catch (error) {
-    console.error('Error updating customer name:', error.response?.data || error.message);
+    console.error('Error managing address:', error.response?.data || error.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
