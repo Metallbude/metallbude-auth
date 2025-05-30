@@ -36,6 +36,8 @@ const config = {
   adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
   apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
   adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2024-10/graphql.json',
+  cleverpushChannelId: process.env.CLEVERPUSH_CHANNEL_ID,
+  cleverpushApiKey: process.env.CLEVERPUSH_API_KEY,
   mailerSendApiKey: process.env.MAILERSEND_API_KEY,
   privateKey,
   publicKey,
@@ -1562,4 +1564,743 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Customer endpoints ready at: ${config.issuer}/customer/*`);
   console.log(`Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
   console.log(`Storefront token configured: ${config.storefrontToken ? 'YES' : 'NO'}`);
+});
+
+// Add these to your existing index.js file
+
+// ===== NOTIFICATION ENDPOINTS =====
+
+// GET /api/products - Get all products for notification dashboard
+app.get('/api/products', async (req, res) => {
+  try {
+    const query = `
+      query {
+        products(first: 250, sortKey: CREATED_AT, reverse: true) {
+          edges {
+            node {
+              id
+              title
+              handle
+              description
+              vendor
+              productType
+              createdAt
+              images(first: 1) {
+                edges {
+                  node {
+                    url
+                  }
+                }
+              }
+              priceRange {
+                minVariantPrice {
+                  amount
+                  currencyCode
+                }
+              }
+              collections(first: 5) {
+                edges {
+                  node {
+                    id
+                    title
+                    handle
+                  }
+                }
+              }
+              compareAtPriceRange {
+                minVariantPrice {
+                  amount
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      { query },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (response.data.errors) {
+      console.error('GraphQL errors:', response.data.errors);
+      return res.status(500).json({ error: 'Failed to fetch products' });
+    }
+
+    const products = response.data.data.products.edges.map(edge => {
+      const node = edge.node;
+      const price = parseFloat(node.priceRange.minVariantPrice.amount);
+      const compareAtPrice = node.compareAtPriceRange?.minVariantPrice?.amount 
+        ? parseFloat(node.compareAtPriceRange.minVariantPrice.amount) 
+        : null;
+      
+      return {
+        id: node.id,
+        handle: node.handle,
+        title: node.title,
+        description: node.description?.substring(0, 200) || '',
+        price: price.toFixed(2),
+        image: node.images.edges[0]?.node.url || '',
+        collections: node.collections.edges.map(c => ({
+          id: c.node.id,
+          title: c.node.title,
+          handle: c.node.handle
+        })),
+        productType: node.productType,
+        vendor: node.vendor,
+        isOnSale: compareAtPrice && compareAtPrice > price,
+        createdAt: node.createdAt
+      };
+    });
+
+    res.json({ products });
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    res.status(500).json({ error: 'Failed to fetch products' });
+  }
+});
+
+// POST /api/send-notification - Send notification via CleverPush
+app.post('/api/send-notification', async (req, res) => {
+  try {
+    const { 
+      productHandles, // Array of product handles
+      title,
+      message,
+      segment = 'all',
+      campaign = 'manual'
+    } = req.body;
+
+    if (!config.cleverpushApiKey) {
+      return res.status(400).json({ 
+        error: 'CleverPush API key not configured. Add CLEVERPUSH_API_KEY to environment variables.' 
+      });
+    }
+
+    // Prepare notification data
+    const notificationData = {
+      channel: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+      title: title || 'Neue Produkte bei Metallbude',
+      text: message || 'Entdecken Sie unsere neuesten Produkte',
+      url: 'https://metallbude.com',
+    };
+
+    // If single product, add deep link
+    if (productHandles && productHandles.length === 1) {
+      notificationData.customData = {
+        type: 'product',
+        id: productHandles[0],
+        params: {
+          campaign,
+          source: 'push_notification'
+        }
+      };
+      notificationData.url = `https://metallbude.com/products/${productHandles[0]}`;
+    } 
+    // If multiple products, link to collection or general
+    else if (productHandles && productHandles.length > 1) {
+      notificationData.customData = {
+        type: 'collection',
+        id: 'neue-produkte',
+        params: {
+          campaign,
+          productCount: productHandles.length
+        }
+      };
+    }
+
+    // Add targeting
+    if (segment !== 'all') {
+      notificationData.segment = segment;
+    }
+
+    // Send via CleverPush API
+    const response = await axios.post(
+      'https://api.cleverpush.com/notification/send',
+      notificationData,
+      {
+        headers: {
+          'Authorization': config.cleverpushApiKey,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log('Notification sent successfully:', response.data);
+    res.json({
+      success: true,
+      notificationId: response.data.id || 'sent',
+      message: 'Notification sent successfully'
+    });
+
+  } catch (error) {
+    console.error('Error sending notification:', error.response?.data || error.message);
+    res.status(500).json({ 
+      error: 'Failed to send notification',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Serve notification dashboard
+app.get('/dashboard', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Metallbude Push Notification Dashboard</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            
+            body {
+                font-family: 'Karla', -apple-system, BlinkMacSystemFont, sans-serif;
+                background: #f5f5f5;
+                padding: 20px;
+            }
+            
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 12px;
+                padding: 30px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            
+            h1 {
+                margin-bottom: 30px;
+                color: #333;
+            }
+            
+            .loading {
+                text-align: center;
+                padding: 40px;
+                color: #666;
+            }
+            
+            .search-box {
+                width: 100%;
+                padding: 12px 20px;
+                font-size: 16px;
+                border: 2px solid #ddd;
+                border-radius: 8px;
+                margin-bottom: 20px;
+            }
+            
+            .filters {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 20px;
+                flex-wrap: wrap;
+            }
+            
+            .filter-btn {
+                padding: 8px 16px;
+                border: 1px solid #ddd;
+                background: white;
+                border-radius: 20px;
+                cursor: pointer;
+                transition: all 0.3s;
+            }
+            
+            .filter-btn:hover {
+                background: #f0f0f0;
+            }
+            
+            .filter-btn.active {
+                background: #333;
+                color: white;
+                border-color: #333;
+            }
+            
+            .product-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }
+            
+            .product-card {
+                border: 2px solid #eee;
+                border-radius: 8px;
+                overflow: hidden;
+                cursor: pointer;
+                transition: all 0.3s;
+            }
+            
+            .product-card:hover {
+                border-color: #333;
+                transform: translateY(-2px);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            }
+            
+            .product-card.selected {
+                border-color: #4CAF50;
+                background: #f0f9ff;
+            }
+            
+            .product-image {
+                width: 100%;
+                height: 150px;
+                object-fit: cover;
+            }
+            
+            .product-info {
+                padding: 12px;
+            }
+            
+            .product-title {
+                font-weight: 500;
+                margin-bottom: 4px;
+                font-size: 14px;
+                line-height: 1.4;
+            }
+            
+            .product-price {
+                color: #666;
+                font-size: 14px;
+            }
+            
+            .sale-badge {
+                background: #ff4444;
+                color: white;
+                padding: 2px 8px;
+                border-radius: 12px;
+                font-size: 12px;
+                display: inline-block;
+                margin-top: 4px;
+            }
+            
+            .notification-form {
+                background: #f9f9f9;
+                padding: 20px;
+                border-radius: 8px;
+                margin-top: 30px;
+            }
+            
+            .form-group {
+                margin-bottom: 20px;
+            }
+            
+            .form-group label {
+                display: block;
+                margin-bottom: 8px;
+                font-weight: 500;
+            }
+            
+            .form-group input, 
+            .form-group textarea,
+            .form-group select {
+                width: 100%;
+                padding: 10px;
+                border: 1px solid #ddd;
+                border-radius: 6px;
+                font-family: inherit;
+            }
+            
+            .form-group textarea {
+                resize: vertical;
+                min-height: 80px;
+            }
+            
+            .selected-products {
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-bottom: 20px;
+            }
+            
+            .selected-product-tag {
+                background: #e0f2fe;
+                padding: 6px 12px;
+                border-radius: 20px;
+                font-size: 14px;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            
+            .remove-btn {
+                cursor: pointer;
+                color: #666;
+                font-weight: bold;
+            }
+            
+            .send-btn {
+                background: #333;
+                color: white;
+                padding: 12px 30px;
+                border: none;
+                border-radius: 8px;
+                font-size: 16px;
+                cursor: pointer;
+                transition: background 0.3s;
+            }
+            
+            .send-btn:hover {
+                background: #555;
+            }
+            
+            .send-btn:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+            }
+            
+            .campaign-presets {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 10px;
+                margin-bottom: 20px;
+            }
+            
+            .preset-btn {
+                padding: 10px;
+                border: 1px solid #ddd;
+                background: white;
+                border-radius: 6px;
+                cursor: pointer;
+                text-align: center;
+                transition: all 0.3s;
+            }
+            
+            .preset-btn:hover {
+                background: #f0f0f0;
+            }
+            
+            .error {
+                background: #fee;
+                color: #c00;
+                padding: 10px;
+                border-radius: 6px;
+                margin-bottom: 20px;
+            }
+            
+            .success {
+                background: #efe;
+                color: #060;
+                padding: 10px;
+                border-radius: 6px;
+                margin-bottom: 20px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Push Notification Dashboard</h1>
+            
+            <div id="loading" class="loading">Loading products...</div>
+            
+            <div id="content" style="display: none;">
+                <!-- Product Selection -->
+                <div class="product-selection">
+                    <h2>1. Select Products</h2>
+                    <input type="text" class="search-box" placeholder="Search products..." id="searchBox">
+                    
+                    <div class="filters">
+                        <button class="filter-btn active" data-filter="all">All Products</button>
+                        <button class="filter-btn" data-filter="sale">On Sale</button>
+                        <button class="filter-btn" data-filter="recent">New Arrivals</button>
+                    </div>
+                    
+                    <div class="product-grid" id="productGrid">
+                        <!-- Products will be loaded here -->
+                    </div>
+                </div>
+                
+                <!-- Notification Form -->
+                <div class="notification-form">
+                    <h2>2. Create Notification</h2>
+                    
+                    <div id="message" style="display: none;"></div>
+                    
+                    <div class="selected-products" id="selectedProducts">
+                        <!-- Selected products will appear here -->
+                    </div>
+                    
+                    <div class="campaign-presets">
+                        <button class="preset-btn" onclick="applyPreset('new-arrival')">
+                            🆕 New Arrival
+                        </button>
+                        <button class="preset-btn" onclick="applyPreset('sale')">
+                            🏷️ Sale Alert
+                        </button>
+                        <button class="preset-btn" onclick="applyPreset('back-in-stock')">
+                            📦 Back in Stock
+                        </button>
+                        <button class="preset-btn" onclick="applyPreset('limited-time')">
+                            ⏰ Limited Time
+                        </button>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="title">Notification Title</label>
+                        <input type="text" id="title" placeholder="e.g., Neues Schuhregal eingetroffen!">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="message">Message</label>
+                        <textarea id="message" placeholder="e.g., Entdecken Sie unser neues Camo Schuhregal - perfekt für Ihren Flur!"></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="segment">Target Segment (Optional)</label>
+                        <input type="text" id="segment" placeholder="e.g., all, viewed_flur, has_items_in_cart">
+                    </div>
+                    
+                    <button class="send-btn" id="sendBtn" onclick="sendNotification()">Send Notification</button>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            let products = [];
+            let selectedProducts = [];
+            let allProducts = [];
+            
+            // Load products on page load
+            async function loadProducts() {
+                try {
+                    const response = await fetch('/api/products');
+                    const data = await response.json();
+                    
+                    if (data.products) {
+                        allProducts = data.products;
+                        products = data.products;
+                        document.getElementById('loading').style.display = 'none';
+                        document.getElementById('content').style.display = 'block';
+                        displayProducts();
+                        setupEventListeners();
+                    }
+                } catch (error) {
+                    console.error('Error loading products:', error);
+                    document.getElementById('loading').innerHTML = 'Error loading products. Please refresh.';
+                }
+            }
+            
+            function displayProducts(filter = 'all') {
+                const grid = document.getElementById('productGrid');
+                grid.innerHTML = '';
+                
+                let filteredProducts = products;
+                
+                if (filter === 'sale') {
+                    filteredProducts = products.filter(p => p.isOnSale);
+                } else if (filter === 'recent') {
+                    // Show products from last 30 days
+                    const thirtyDaysAgo = new Date();
+                    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                    filteredProducts = products.filter(p => 
+                        new Date(p.createdAt) > thirtyDaysAgo
+                    );
+                }
+                
+                filteredProducts.forEach(product => {
+                    const card = createProductCard(product);
+                    grid.appendChild(card);
+                });
+            }
+            
+            function createProductCard(product) {
+                const div = document.createElement('div');
+                div.className = 'product-card';
+                div.dataset.productHandle = product.handle;
+                
+                const isSelected = selectedProducts.some(p => p.handle === product.handle);
+                if (isSelected) {
+                    div.classList.add('selected');
+                }
+                
+                div.innerHTML = \`
+                    <img src="\${product.image}" alt="\${product.title}" class="product-image" onerror="this.src='https://via.placeholder.com/200'">
+                    <div class="product-info">
+                        <div class="product-title">\${product.title}</div>
+                        <div class="product-price">€\${product.price}</div>
+                        \${product.isOnSale ? '<span class="sale-badge">SALE</span>' : ''}
+                    </div>
+                \`;
+                
+                div.addEventListener('click', () => toggleProduct(product));
+                
+                return div;
+            }
+            
+            function toggleProduct(product) {
+                const index = selectedProducts.findIndex(p => p.handle === product.handle);
+                const card = document.querySelector(\`[data-product-handle="\${product.handle}"]\`);
+                
+                if (index > -1) {
+                    selectedProducts.splice(index, 1);
+                    card.classList.remove('selected');
+                } else {
+                    selectedProducts.push(product);
+                    card.classList.add('selected');
+                }
+                
+                updateSelectedProductsDisplay();
+            }
+            
+            function updateSelectedProductsDisplay() {
+                const container = document.getElementById('selectedProducts');
+                
+                if (selectedProducts.length === 0) {
+                    container.innerHTML = '<p style="color: #666;">No products selected</p>';
+                } else {
+                    container.innerHTML = selectedProducts.map(product => \`
+                        <div class="selected-product-tag">
+                            \${product.title}
+                            <span class="remove-btn" onclick="removeProduct('\${product.handle}')">×</span>
+                        </div>
+                    \`).join('');
+                }
+            }
+            
+            function removeProduct(productHandle) {
+                const product = selectedProducts.find(p => p.handle === productHandle);
+                if (product) {
+                    toggleProduct(product);
+                }
+            }
+            
+            function applyPreset(type) {
+                const presets = {
+                    'new-arrival': {
+                        title: '🆕 Neu eingetroffen!',
+                        message: 'Entdecken Sie unsere neuesten Produkte - frisch eingetroffen und bereit für Ihr Zuhause!'
+                    },
+                    'sale': {
+                        title: '🏷️ SALE - Bis zu 30% Rabatt!',
+                        message: 'Nur für kurze Zeit - sparen Sie bei ausgewählten Produkten!'
+                    },
+                    'back-in-stock': {
+                        title: '📦 Wieder verfügbar!',
+                        message: 'Ihre Lieblingsprodukte sind wieder auf Lager'
+                    },
+                    'limited-time': {
+                        title: '⏰ Nur noch heute!',
+                        message: 'Letzte Chance auf diese fantastischen Angebote'
+                    }
+                };
+                
+                const preset = presets[type];
+                document.getElementById('title').value = preset.title;
+                document.getElementById('message').value = preset.message;
+            }
+            
+            function setupEventListeners() {
+                // Search
+                document.getElementById('searchBox').addEventListener('input', (e) => {
+                    const search = e.target.value.toLowerCase();
+                    
+                    if (search === '') {
+                        products = allProducts;
+                    } else {
+                        products = allProducts.filter(product => 
+                            product.title.toLowerCase().includes(search) ||
+                            product.description.toLowerCase().includes(search)
+                        );
+                    }
+                    
+                    displayProducts();
+                });
+                
+                // Filters
+                document.querySelectorAll('.filter-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                        e.target.classList.add('active');
+                        displayProducts(e.target.dataset.filter);
+                    });
+                });
+                
+                // Initial display
+                updateSelectedProductsDisplay();
+            }
+            
+            async function sendNotification() {
+                const title = document.getElementById('title').value;
+                const message = document.getElementById('message').value;
+                const segment = document.getElementById('segment').value || 'all';
+                
+                if (!title || !message) {
+                    showMessage('Please enter title and message', 'error');
+                    return;
+                }
+                
+                if (selectedProducts.length === 0) {
+                    showMessage('Please select at least one product', 'error');
+                    return;
+                }
+                
+                const sendBtn = document.getElementById('sendBtn');
+                sendBtn.disabled = true;
+                sendBtn.textContent = 'Sending...';
+                
+                try {
+                    const response = await fetch('/api/send-notification', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            productHandles: selectedProducts.map(p => p.handle),
+                            title,
+                            message,
+                            segment,
+                            campaign: 'dashboard'
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        showMessage('Notification sent successfully!', 'success');
+                        // Reset form
+                        selectedProducts = [];
+                        updateSelectedProductsDisplay();
+                        document.querySelectorAll('.product-card').forEach(card => {
+                            card.classList.remove('selected');
+                        });
+                        document.getElementById('title').value = '';
+                        document.getElementById('message').value = '';
+                    } else {
+                        showMessage(result.error || 'Failed to send notification', 'error');
+                    }
+                } catch (error) {
+                    showMessage('Network error: ' + error.message, 'error');
+                } finally {
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Send Notification';
+                }
+            }
+            
+            function showMessage(text, type) {
+                const messageDiv = document.getElementById('message');
+                messageDiv.className = type;
+                messageDiv.textContent = text;
+                messageDiv.style.display = 'block';
+                
+                setTimeout(() => {
+                    messageDiv.style.display = 'none';
+                }, 5000);
+            }
+            
+            // Load products when page loads
+            loadProducts();
+        </script>
+    </body>
+    </html>
+  `);
 });
