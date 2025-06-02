@@ -1286,31 +1286,22 @@ app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
   try {
     const customerId = req.session.customerId;
     
-    console.log('Fetching addresses for customer:', customerId);
-    
     const query = `
-      query getCustomerAddresses($customerId: ID!) {
-        customer(id: $customerId) {
+      query getCustomer($id: ID!) {
+        customer(id: $id) {
           id
           defaultAddress {
             id
-          }
-          addresses(first: 10) {
-            edges {
-              node {
-                id
-                firstName
-                lastName
-                company
-                address1
-                address2
-                city
-                province
-                country
-                zip
-                phone
-              }
-            }
+            firstName
+            lastName
+            company
+            address1
+            address2
+            city
+            province
+            country
+            zip
+            phone
           }
         }
       }
@@ -1318,10 +1309,7 @@ app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
     
     const response = await axios.post(
       config.adminApiUrl,
-      {
-        query,
-        variables: { customerId }
-      },
+      { query, variables: { id: customerId } },
       {
         headers: {
           'Content-Type': 'application/json',
@@ -1330,27 +1318,12 @@ app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
       }
     );
     
-    console.log('Customer addresses query response:', JSON.stringify(response.data, null, 2));
-    
-    if (response.data.errors) {
-      console.error('GraphQL errors:', response.data.errors);
-      return res.json({ addresses: [] });
-    }
-    
     const customer = response.data.data?.customer;
-    const defaultAddressId = customer?.defaultAddress?.id;
-    const addressEdges = customer?.addresses?.edges || [];
+    const addresses = customer?.defaultAddress ? [{ ...customer.defaultAddress, isDefault: true }] : [];
     
-    const addresses = addressEdges.map(edge => ({
-      ...edge.node,
-      isDefault: edge.node.id === defaultAddressId
-    }));
-    
-    console.log(`Found ${addresses.length} addresses for customer`);
     res.json({ addresses });
-    
   } catch (error) {
-    console.error('Error fetching addresses:', error.response?.data || error.message);
+    console.error('Error fetching addresses:', error);
     res.json({ addresses: [] });
   }
 });
@@ -1362,25 +1335,26 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
     const { address } = req.body;
     const customerId = req.session.customerId;
     
-    console.log('Creating new address for customer:', customerId);
-    console.log('Address data:', JSON.stringify(address, null, 2));
+    console.log('Creating address by setting as default address');
     
-    // Use customerAddressCreate mutation for Admin API
     const mutation = `
-      mutation customerAddressCreate($customerId: ID!, $address: MailingAddressInput!) {
-        customerAddressCreate(customerId: $customerId, address: $address) {
-          customerAddress {
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
             id
-            firstName
-            lastName
-            company
-            address1
-            address2
-            city
-            province
-            country
-            zip
-            phone
+            defaultAddress {
+              id
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              country
+              zip
+              phone
+            }
           }
           userErrors {
             field
@@ -1390,26 +1364,26 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
       }
     `;
     
-    const addressInput = {
-      firstName: address.firstName || '',
-      lastName: address.lastName || '',
-      company: address.company || null,
-      address1: address.address1 || '',
-      address2: address.address2 || null,
-      city: address.city || '',
-      province: address.province || null,
-      country: address.country || 'DE',
-      zip: address.zip || '',
-      phone: address.phone || null
-    };
-    
     const response = await axios.post(
       config.adminApiUrl,
       {
         query: mutation,
-        variables: { 
-          customerId: customerId,
-          address: addressInput
+        variables: {
+          input: {
+            id: customerId,
+            defaultAddress: {
+              firstName: address.firstName || '',
+              lastName: address.lastName || '',
+              company: address.company || '',
+              address1: address.address1 || '',
+              address2: address.address2 || '',
+              city: address.city || '',
+              province: address.province || '',
+              country: address.country || 'DE',
+              zip: address.zip || '',
+              phone: address.phone || ''
+            }
+          }
         }
       },
       {
@@ -1420,37 +1394,28 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
       }
     );
     
-    console.log('Address create response:', JSON.stringify(response.data, null, 2));
-    
     if (response.data.errors) {
-      console.error('Address create GraphQL errors:', response.data.errors);
       return res.status(400).json({ error: 'Failed to create address', details: response.data.errors });
     }
     
-    const result = response.data.data?.customerAddressCreate;
+    const result = response.data.data?.customerUpdate;
     if (result?.userErrors?.length > 0) {
-      console.error('Address create user errors:', result.userErrors);
       return res.status(400).json({ error: 'Failed to create address', details: result.userErrors });
     }
     
-    if (result?.customerAddress) {
-      console.log('Address created successfully');
-      
-      // Set as default address
-      await setAsDefaultAddress(customerId, result.customerAddress.id);
-      
+    if (result?.customer?.defaultAddress) {
       res.json({ 
         address: {
-          ...result.customerAddress,
+          ...result.customer.defaultAddress,
           isDefault: true
         }
       });
     } else {
-      return res.status(400).json({ error: 'Failed to create address', details: 'No address returned' });
+      res.status(400).json({ error: 'Failed to create address' });
     }
     
   } catch (error) {
-    console.error('Error creating address:', error.response?.data || error.message);
+    console.error('Error creating address:', error);
     res.status(500).json({ error: 'Failed to create address' });
   }
 });
@@ -1458,30 +1423,29 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
 // POST /customer/address/:addressId - Update existing address (FIXED)
 app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) => {
   try {
-    const { addressId } = req.params;
     const { address } = req.body;
     const customerId = req.session.customerId;
     
-    console.log('Updating address:', addressId);
-    console.log('Customer ID:', customerId);
-    console.log('Address data:', JSON.stringify(address, null, 2));
+    console.log('Updating customer default address via customerUpdate');
     
-    // Use customerAddressUpdate mutation for Admin API
     const mutation = `
-      mutation customerAddressUpdate($customerAddressId: ID!, $address: MailingAddressInput!) {
-        customerAddressUpdate(customerAddressId: $customerAddressId, address: $address) {
-          customerAddress {
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
             id
-            firstName
-            lastName
-            company
-            address1
-            address2
-            city
-            province
-            country
-            zip
-            phone
+            defaultAddress {
+              id
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              province
+              country
+              zip
+              phone
+            }
           }
           userErrors {
             field
@@ -1491,26 +1455,26 @@ app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) 
       }
     `;
     
-    const addressInput = {
-      firstName: address.firstName || '',
-      lastName: address.lastName || '',
-      company: address.company || null,
-      address1: address.address1 || '',
-      address2: address.address2 || null,
-      city: address.city || '',
-      province: address.province || null,
-      country: address.country || 'DE',
-      zip: address.zip || '',
-      phone: address.phone || null
-    };
-    
     const response = await axios.post(
       config.adminApiUrl,
       {
         query: mutation,
-        variables: { 
-          customerAddressId: addressId,
-          address: addressInput
+        variables: {
+          input: {
+            id: customerId,
+            defaultAddress: {
+              firstName: address.firstName || '',
+              lastName: address.lastName || '',
+              company: address.company || '',
+              address1: address.address1 || '',
+              address2: address.address2 || '',
+              city: address.city || '',
+              province: address.province || '',
+              country: address.country || 'DE',
+              zip: address.zip || '',
+              phone: address.phone || ''
+            }
+          }
         }
       },
       {
@@ -1521,33 +1485,30 @@ app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) 
       }
     );
     
-    console.log('Address update response:', JSON.stringify(response.data, null, 2));
+    console.log('Customer update response:', JSON.stringify(response.data, null, 2));
     
     if (response.data.errors) {
-      console.error('Address update GraphQL errors:', response.data.errors);
       return res.status(400).json({ error: 'Failed to update address', details: response.data.errors });
     }
     
-    const result = response.data.data?.customerAddressUpdate;
+    const result = response.data.data?.customerUpdate;
     if (result?.userErrors?.length > 0) {
-      console.error('Address update user errors:', result.userErrors);
       return res.status(400).json({ error: 'Failed to update address', details: result.userErrors });
     }
     
-    if (result?.customerAddress) {
-      console.log('Address updated successfully');
+    if (result?.customer?.defaultAddress) {
       res.json({ 
         address: {
-          ...result.customerAddress,
-          isDefault: true // For now, assume it's the default
+          ...result.customer.defaultAddress,
+          isDefault: true
         }
       });
     } else {
-      return res.status(400).json({ error: 'Failed to update address', details: 'No address returned' });
+      res.status(400).json({ error: 'Failed to update address' });
     }
     
   } catch (error) {
-    console.error('Error updating address:', error.response?.data || error.message);
+    console.error('Error updating address:', error);
     res.status(500).json({ error: 'Failed to update address' });
   }
 });
