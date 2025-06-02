@@ -1325,6 +1325,69 @@ app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
   }
 });
 
+// POST /customer/address - Create new address via REST API
+app.post('/customer/address', authenticateAppToken, async (req, res) => {
+  try {
+    const { address } = req.body;
+    const customerId = req.session.customerId;
+    const customerNumericId = customerId.split('/').pop();
+    
+    console.log('Creating new address via REST for customer:', customerNumericId);
+    console.log('Address data:', JSON.stringify(address, null, 2));
+    
+    const response = await axios.post(
+      `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses.json`,
+      {
+        address: {
+          first_name: address.firstName || '',
+          last_name: address.lastName || '',
+          company: address.company || '',
+          address1: address.address1 || '',
+          address2: address.address2 || '',
+          city: address.city || '',
+          province: address.province || '',
+          country: address.country || 'DE',
+          zip: address.zip || '',
+          phone: address.phone || ''
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json',
+        }
+      }
+    );
+    
+    console.log('REST API create response:', response.status, response.data);
+    
+    if (response.status === 201 && response.data.customer_address) {
+      console.log('Address created successfully via REST');
+      res.json({ 
+        address: {
+          id: `gid://shopify/MailingAddress/${response.data.customer_address.id}`,
+          firstName: response.data.customer_address.first_name,
+          lastName: response.data.customer_address.last_name,
+          company: response.data.customer_address.company,
+          address1: response.data.customer_address.address1,
+          address2: response.data.customer_address.address2,
+          city: response.data.customer_address.city,
+          province: response.data.customer_address.province,
+          country: response.data.customer_address.country,
+          zip: response.data.customer_address.zip,
+          phone: response.data.customer_address.phone,
+          isDefault: response.data.customer_address.default
+        }
+      });
+    } else {
+      return res.status(400).json({ error: 'Failed to create address' });
+    }
+    
+  } catch (error) {
+    console.error('Error creating address:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to create address' });
+  }
+});
 
 // POST /customer/address - Create/Update address via customerAddressCreate/Update (ADMIN API APPROACH)
 app.post('/customer/address', authenticateAppToken, async (req, res) => {
