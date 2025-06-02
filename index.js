@@ -1109,8 +1109,7 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   }
 });
 
-// PUT /customer/update - SIMPLIFIED UPDATE WITHOUT MARKETING
-// PUT /customer/update - Updated to sync names to addresses
+// PUT /customer/update - FIXED VERSION WITHOUT THE GraphQL ERROR
 app.put('/customer/update', authenticateAppToken, async (req, res) => {
   try {
     const { updates } = req.body;
@@ -1142,6 +1141,7 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       variableDefinitions.push('$phone: String');
     }
     
+    // FIXED: Remove the problematic addresses.edges query
     const mutation = `
       mutation updateCustomer(${variableDefinitions.join(', ')}) {
         customerUpdate(
@@ -1169,23 +1169,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
               country
               zip
               phone
-            }
-            addresses(first: 10) {
-              edges {
-                node {
-                  id
-                  firstName
-                  lastName
-                  company
-                  address1
-                  address2
-                  city
-                  province
-                  country
-                  zip
-                  phone
-                }
-              }
             }
           }
           userErrors {
@@ -1233,70 +1216,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     
     const customer = data.data.customerUpdate.customer;
     
-    // If we updated the customer's name, update all their addresses too
-    if ((updates.firstName !== undefined || updates.lastName !== undefined) && customer.addresses?.edges?.length > 0) {
-      console.log('Updating names in customer addresses...');
-      
-      const addressUpdatePromises = customer.addresses.edges.map(edge => {
-        const address = edge.node;
-        
-        // Prepare the address update mutation
-        const addressMutation = `
-          mutation updateAddress($addressId: ID!, $address: MailingAddressInput!) {
-            customerAddressUpdate(
-              customerAddressId: $addressId
-              address: $address
-            ) {
-              customerAddress {
-                id
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }
-        `;
-        
-        const addressInput = {
-          firstName: updates.firstName !== undefined ? updates.firstName : address.firstName,
-          lastName: updates.lastName !== undefined ? updates.lastName : address.lastName,
-          company: address.company || '',
-          address1: address.address1 || '',
-          address2: address.address2 || '',
-          city: address.city || '',
-          province: address.province || '',
-          country: address.country || '',
-          zip: address.zip || '',
-          phone: address.phone || ''
-        };
-        
-        return axios.post(
-          config.adminApiUrl,
-          {
-            query: addressMutation,
-            variables: {
-              addressId: address.id,
-              address: addressInput
-            }
-          },
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Shopify-Access-Token': config.adminToken,
-            }
-          }
-        ).catch(error => {
-          console.error(`Error updating address ${address.id}:`, error.response?.data || error.message);
-          return null; // Don't fail the whole operation if one address update fails
-        });
-      });
-      
-      // Wait for all address updates to complete
-      await Promise.all(addressUpdatePromises);
-      console.log('Address names updated successfully');
-    }
-    
     // Transform the customer data for the response
     const transformedCustomer = {
       ...customer,
@@ -1310,6 +1229,307 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
   } catch (error) {
     console.error('Error updating customer:', error.response?.data || error.message);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /customer/addresses - Get all customer addresses
+app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
+  try {
+    const customerId = req.session.customerId;
+    
+    const query = `
+      query getCustomerAddresses($customerId: ID!) {
+        customer(id: $customerId) {
+          addresses(first: 50) {
+            edges {
+              node {
+                id
+                firstName
+                lastName
+                company
+                address1
+                address2
+                city
+                province
+                country
+                zip
+                phone
+              }
+            }
+          }
+        }
+      }
+    `;
+    
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query,
+        variables: { customerId }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    if (response.data.errors) {
+      console.error('GraphQL errors:', response.data.errors);
+      return res.json({ addresses: [] });
+    }
+    
+    const addresses = response.data.data?.customer?.addresses?.edges?.map(edge => ({
+      ...edge.node,
+      isDefault: false // You can implement default logic here
+    })) || [];
+    
+    res.json({ addresses });
+    
+  } catch (error) {
+    console.error('Error fetching addresses:', error.response?.data || error.message);
+    res.json({ addresses: [] });
+  }
+});
+
+// POST /customer/address - Create new address
+app.post('/customer/address', authenticateAppToken, async (req, res) => {
+  try {
+    const { address } = req.body;
+    const customerId = req.session.customerId;
+    
+    const mutation = `
+      mutation customerAddressCreate($customerId: ID!, $address: MailingAddressInput!) {
+        customerAddressCreate(customerId: $customerId, address: $address) {
+          customerAddress {
+            id
+            firstName
+            lastName
+            company
+            address1
+            address2
+            city
+            province
+            country
+            zip
+            phone
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: mutation,
+        variables: {
+          customerId,
+          address: {
+            firstName: address.firstName || '',
+            lastName: address.lastName || '',
+            company: address.company || null,
+            address1: address.address1 || '',
+            address2: address.address2 || null,
+            city: address.city || '',
+            province: address.province || null,
+            country: address.country || 'DE',
+            zip: address.zip || '',
+            phone: address.phone || null
+          }
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    if (response.data.errors || response.data.data?.customerAddressCreate?.userErrors?.length > 0) {
+      const errors = response.data.errors || response.data.data.customerAddressCreate.userErrors;
+      console.error('Address create errors:', errors);
+      return res.status(400).json({ error: 'Failed to create address', details: errors });
+    }
+    
+    res.json({ address: response.data.data.customerAddressCreate.customerAddress });
+    
+  } catch (error) {
+    console.error('Error creating address:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to create address' });
+  }
+});
+
+// PUT /customer/address/:addressId - Update existing address
+app.put('/customer/address/:addressId', authenticateAppToken, async (req, res) => {
+  try {
+    const { addressId } = req.params;
+    const { address } = req.body;
+    
+    const mutation = `
+      mutation customerAddressUpdate($customerAddressId: ID!, $address: MailingAddressInput!) {
+        customerAddressUpdate(customerAddressId: $customerAddressId, address: $address) {
+          customerAddress {
+            id
+            firstName
+            lastName
+            company
+            address1
+            address2
+            city
+            province
+            country
+            zip
+            phone
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: mutation,
+        variables: {
+          customerAddressId: addressId,
+          address: {
+            firstName: address.firstName || '',
+            lastName: address.lastName || '',
+            company: address.company || null,
+            address1: address.address1 || '',
+            address2: address.address2 || null,
+            city: address.city || '',
+            province: address.province || null,
+            country: address.country || 'DE',
+            zip: address.zip || '',
+            phone: address.phone || null
+          }
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    if (response.data.errors || response.data.data?.customerAddressUpdate?.userErrors?.length > 0) {
+      const errors = response.data.errors || response.data.data.customerAddressUpdate.userErrors;
+      console.error('Address update errors:', errors);
+      return res.status(400).json({ error: 'Failed to update address', details: errors });
+    }
+    
+    res.json({ address: response.data.data.customerAddressUpdate.customerAddress });
+    
+  } catch (error) {
+    console.error('Error updating address:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to update address' });
+  }
+});
+
+// DELETE /customer/address/:addressId - Delete address
+app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res) => {
+  try {
+    const { addressId } = req.params;
+    
+    const mutation = `
+      mutation customerAddressDelete($customerAddressId: ID!) {
+        customerAddressDelete(customerAddressId: $customerAddressId) {
+          deletedCustomerAddressId
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: mutation,
+        variables: { customerAddressId: addressId }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    if (response.data.errors || response.data.data?.customerAddressDelete?.userErrors?.length > 0) {
+      const errors = response.data.errors || response.data.data.customerAddressDelete.userErrors;
+      console.error('Address delete errors:', errors);
+      return res.status(400).json({ error: 'Failed to delete address', details: errors });
+    }
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('Error deleting address:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to delete address' });
+  }
+});
+
+// POST /customer/address/:addressId/default - Set default address
+app.post('/customer/address/:addressId/default', authenticateAppToken, async (req, res) => {
+  try {
+    const { addressId } = req.params;
+    const customerId = req.session.customerId;
+    
+    const mutation = `
+      mutation customerDefaultAddressUpdate($customerId: ID!, $addressId: ID!) {
+        customerDefaultAddressUpdate(customerId: $customerId, addressId: $addressId) {
+          customer {
+            id
+            defaultAddress {
+              id
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: mutation,
+        variables: { customerId, addressId }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+    
+    if (response.data.errors || response.data.data?.customerDefaultAddressUpdate?.userErrors?.length > 0) {
+      const errors = response.data.errors || response.data.data.customerDefaultAddressUpdate.userErrors;
+      console.error('Set default address errors:', errors);
+      return res.status(400).json({ error: 'Failed to set default address', details: errors });
+    }
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('Error setting default address:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to set default address' });
   }
 });
 
@@ -1543,30 +1763,6 @@ app.post('/auth/logout', authenticateAppToken, (req, res) => {
   
   res.json({ success: true });
 });
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok',
-    mode: 'combined',
-    oauth: true,
-    oneTimeCode: true,
-    customerEndpoints: true,
-    issuer: config.issuer
-  });
-});
-
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Combined Auth Server running on port ${PORT}`);
-  console.log(`OAuth endpoints ready at: ${config.issuer}`);
-  console.log(`Mobile endpoints ready at: ${config.issuer}/auth/*`);
-  console.log(`Customer endpoints ready at: ${config.issuer}/customer/*`);
-  console.log(`Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
-  console.log(`Storefront token configured: ${config.storefrontToken ? 'YES' : 'NO'}`);
-});
-
-// Add these to your existing index.js file
 
 // ===== NOTIFICATION ENDPOINTS =====
 
@@ -2303,4 +2499,26 @@ app.get('/dashboard', (req, res) => {
     </body>
     </html>
   `);
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    mode: 'combined',
+    oauth: true,
+    oneTimeCode: true,
+    customerEndpoints: true,
+    issuer: config.issuer
+  });
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Combined Auth Server running on port ${PORT}`);
+  console.log(`OAuth endpoints ready at: ${config.issuer}`);
+  console.log(`Mobile endpoints ready at: ${config.issuer}/auth/*`);
+  console.log(`Customer endpoints ready at: ${config.issuer}/customer/*`);
+  console.log(`Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
+  console.log(`Storefront token configured: ${config.storefrontToken ? 'YES' : 'NO'}`);
 });
