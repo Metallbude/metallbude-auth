@@ -1285,45 +1285,42 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
 app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
   try {
     const customerId = req.session.customerId;
+    const customerNumericId = customerId.split('/').pop();
     
-    const query = `
-      query getCustomer($id: ID!) {
-        customer(id: $id) {
-          id
-          defaultAddress {
-            id
-            firstName
-            lastName
-            company
-            address1
-            address2
-            city
-            province
-            country
-            zip
-            phone
-          }
-        }
-      }
-    `;
+    console.log('Fetching addresses via REST for customer:', customerNumericId);
     
-    const response = await axios.post(
-      config.adminApiUrl,
-      { query, variables: { id: customerId } },
+    const response = await axios.get(
+      `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses.json`,
       {
         headers: {
-          'Content-Type': 'application/json',
           'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json',
         }
       }
     );
     
-    const customer = response.data.data?.customer;
-    const addresses = customer?.defaultAddress ? [{ ...customer.defaultAddress, isDefault: true }] : [];
+    console.log('REST addresses response:', response.data);
     
-    res.json({ addresses });
+    const addresses = response.data.addresses || [];
+    const formattedAddresses = addresses.map(addr => ({
+      id: `gid://shopify/MailingAddress/${addr.id}`,
+      firstName: addr.first_name || '',
+      lastName: addr.last_name || '',
+      company: addr.company || '',
+      address1: addr.address1 || '',
+      address2: addr.address2 || '',
+      city: addr.city || '',
+      province: addr.province || '',
+      country: addr.country || '',
+      zip: addr.zip || '',
+      phone: addr.phone || '',
+      isDefault: addr.default || false
+    }));
+    
+    res.json({ addresses: formattedAddresses });
+    
   } catch (error) {
-    console.error('Error fetching addresses:', error);
+    console.error('Error fetching addresses:', error.response?.data || error.message);
     res.json({ addresses: [] });
   }
 });
@@ -1423,92 +1420,69 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
 // POST /customer/address/:addressId - Update existing address (FIXED)
 app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) => {
   try {
+    const { addressId } = req.params;
     const { address } = req.body;
     const customerId = req.session.customerId;
     
-    console.log('Updating customer default address via customerUpdate');
+    console.log('Updating address:', addressId);
+    console.log('Customer ID:', customerId);
+    console.log('Address data:', JSON.stringify(address, null, 2));
     
-    const mutation = `
-      mutation customerUpdate($input: CustomerInput!) {
-        customerUpdate(input: $input) {
-          customer {
-            id
-            defaultAddress {
-              id
-              firstName
-              lastName
-              company
-              address1
-              address2
-              city
-              province
-              country
-              zip
-              phone
-            }
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
+    // CRITICAL: Use REST API instead of GraphQL for address updates
+    const shopifyRestUrl = `https://${config.shopDomain}/admin/api/2024-10/customers/${customerId.split('/').pop()}/addresses/${addressId.split('/').pop()}.json`;
     
-    const response = await axios.post(
-      config.adminApiUrl,
+    console.log('Using REST API endpoint:', shopifyRestUrl);
+    
+    const response = await axios.put(
+      shopifyRestUrl,
       {
-        query: mutation,
-        variables: {
-          input: {
-            id: customerId,
-            defaultAddress: {
-              firstName: address.firstName || '',
-              lastName: address.lastName || '',
-              company: address.company || '',
-              address1: address.address1 || '',
-              address2: address.address2 || '',
-              city: address.city || '',
-              province: address.province || '',
-              country: address.country || 'DE',
-              zip: address.zip || '',
-              phone: address.phone || ''
-            }
-          }
+        address: {
+          first_name: address.firstName || '',
+          last_name: address.lastName || '',
+          company: address.company || '',
+          address1: address.address1 || '',
+          address2: address.address2 || '',
+          city: address.city || '',
+          province: address.province || '',
+          country: address.country || 'DE',
+          zip: address.zip || '',
+          phone: address.phone || ''
         }
       },
       {
         headers: {
-          'Content-Type': 'application/json',
           'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json',
         }
       }
     );
     
-    console.log('Customer update response:', JSON.stringify(response.data, null, 2));
+    console.log('REST API response:', response.status, response.data);
     
-    if (response.data.errors) {
-      return res.status(400).json({ error: 'Failed to update address', details: response.data.errors });
-    }
-    
-    const result = response.data.data?.customerUpdate;
-    if (result?.userErrors?.length > 0) {
-      return res.status(400).json({ error: 'Failed to update address', details: result.userErrors });
-    }
-    
-    if (result?.customer?.defaultAddress) {
+    if (response.status === 200 && response.data.address) {
+      console.log('Address updated successfully via REST');
       res.json({ 
         address: {
-          ...result.customer.defaultAddress,
-          isDefault: true
+          id: `gid://shopify/MailingAddress/${response.data.address.id}`,
+          firstName: response.data.address.first_name,
+          lastName: response.data.address.last_name,
+          company: response.data.address.company,
+          address1: response.data.address.address1,
+          address2: response.data.address.address2,
+          city: response.data.address.city,
+          province: response.data.address.province,
+          country: response.data.address.country,
+          zip: response.data.address.zip,
+          phone: response.data.address.phone,
+          isDefault: response.data.address.default
         }
       });
     } else {
-      res.status(400).json({ error: 'Failed to update address' });
+      return res.status(400).json({ error: 'Failed to update address' });
     }
     
   } catch (error) {
-    console.error('Error updating address:', error);
+    console.error('Error updating address:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to update address' });
   }
 });
