@@ -1365,8 +1365,8 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
   }
 });
 
-// PUT /customer/address/:addressId - Update existing address
-app.put('/customer/address/:addressId', authenticateAppToken, async (req, res) => {
+// POST /customer/address/:addressId - Update existing address (using POST as required by your Flutter app)
+app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) => {
   try {
     const { addressId } = req.params;
     const { address } = req.body;
