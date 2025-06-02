@@ -1556,7 +1556,14 @@ app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res
     const { addressId } = req.params;
     const customerId = req.session.customerId;
     const customerNumericId = customerId.split('/').pop();
-    const addressNumericId = addressId.split('/').pop();
+    
+    // Extract numeric ID from GID format
+    let addressNumericId;
+    if (addressId.includes('gid://shopify/MailingAddress/')) {
+      addressNumericId = addressId.split('/').pop().split('?')[0]; // Remove any query params
+    } else {
+      addressNumericId = addressId;
+    }
     
     console.log('Deleting address via REST:', addressNumericId, 'for customer:', customerNumericId);
     
@@ -1576,12 +1583,20 @@ app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res
       console.log('Address deleted successfully via REST');
       res.json({ success: true });
     } else {
+      console.log('Delete failed with status:', response.status);
       return res.status(400).json({ error: 'Failed to delete address' });
     }
     
   } catch (error) {
-    console.error('Error deleting address:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to delete address' });
+    console.error('Error deleting address:', error.response?.status, error.response?.data || error.message);
+    
+    if (error.response?.status === 404) {
+      // Address already deleted or doesn't exist
+      console.log('Address not found (404) - treating as success');
+      res.json({ success: true });
+    } else {
+      res.status(500).json({ error: 'Failed to delete address' });
+    }
   }
 });
 
