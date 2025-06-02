@@ -1550,56 +1550,30 @@ app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) 
   }
 });
 
-// DELETE /customer/address/:addressId - Delete address (SIMPLIFIED FOR ADMIN API)
+// DELETE /customer/address/:addressId - Delete address via REST API (FIXED)
 app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res) => {
   try {
     const { addressId } = req.params;
     const customerId = req.session.customerId;
+    const customerNumericId = customerId.split('/').pop();
+    const addressNumericId = addressId.split('/').pop();
     
-    console.log('Deleting address:', addressId);
-    console.log('Customer ID:', customerId);
+    console.log('Deleting address via REST:', addressNumericId, 'for customer:', customerNumericId);
     
-    const mutation = `
-      mutation customerAddressDelete($customerAddressId: ID!) {
-        customerAddressDelete(customerAddressId: $customerAddressId) {
-          deletedCustomerAddressId
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query: mutation,
-        variables: { customerAddressId: addressId }
-      },
+    const response = await axios.delete(
+      `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses/${addressNumericId}.json`,
       {
         headers: {
-          'Content-Type': 'application/json',
           'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json',
         }
       }
     );
     
-    console.log('Address delete response:', JSON.stringify(response.data, null, 2));
+    console.log('REST API delete response:', response.status);
     
-    if (response.data.errors) {
-      console.error('Address delete GraphQL errors:', response.data.errors);
-      return res.status(400).json({ error: 'Failed to delete address', details: response.data.errors });
-    }
-    
-    const result = response.data.data?.customerAddressDelete;
-    if (result?.userErrors?.length > 0) {
-      console.error('Address delete user errors:', result.userErrors);
-      return res.status(400).json({ error: 'Failed to delete address', details: result.userErrors });
-    }
-    
-    if (result?.deletedCustomerAddressId) {
-      console.log('Address deleted successfully');
+    if (response.status === 200) {
+      console.log('Address deleted successfully via REST');
       res.json({ success: true });
     } else {
       return res.status(400).json({ error: 'Failed to delete address' });
