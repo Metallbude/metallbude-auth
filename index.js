@@ -1051,6 +1051,58 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
   }
 });
 
+// POST /returns - Handle return requests
+app.post('/returns', authenticateAppToken, async (req, res) => {
+  try {
+    const { 
+      orderId, 
+      orderNumber, 
+      items, 
+      reason, 
+      additionalNotes, 
+      preferredResolution, 
+      exchangeProductId, 
+      exchangeOptions, 
+      customerEmail 
+    } = req.body;
+
+    console.log('📦 Return request received:', {
+      orderId,
+      orderNumber,
+      itemCount: items?.length,
+      reason,
+      resolution: preferredResolution,
+      customer: customerEmail || req.session.email
+    });
+
+    // For now, just log and return success
+    // Later you can integrate with your return management system
+    console.log('Return items:', JSON.stringify(items, null, 2));
+    if (additionalNotes) {
+      console.log('Additional notes:', additionalNotes);
+    }
+
+    // TODO: Add your actual return processing logic here
+    // - Create return request in your system
+    // - Send confirmation email
+    // - Update inventory if needed
+    // - Integrate with Shopify if required
+
+    res.json({
+      success: true,
+      returnId: `RET-${Date.now()}`,
+      message: 'Return request submitted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error processing return request:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process return request'
+    });
+  }
+});
+
 // GET /customer/store-credit - Get store credit
 app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   try {
