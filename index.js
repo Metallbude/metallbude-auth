@@ -1103,6 +1103,81 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
   }
 });
 
+// GET /returns - Get customer return history
+app.get('/returns', authenticateAppToken, async (req, res) => {
+  try {
+    const customerId = req.session.customerId;
+    const customerEmail = req.session.email;
+    
+    console.log('📋 Fetching return history for:', customerEmail);
+    
+    // For now, return mock data until you implement proper storage
+    // In production, you'd query your database here
+    const mockReturns = [
+      {
+        id: 'RET-1733578800000',
+        orderId: 'gid://shopify/Order/10339107733772',
+        orderNumber: '126931',
+        status: 'pending',
+        reason: 'size_dimensions',
+        preferredResolution: 'refund',
+        requestDate: new Date().toISOString(),
+        items: [
+          {
+            lineItemId: 'null',
+            productId: 'gid://shopify/Product/6627094528164',
+            title: 'UNTERSETZER KIVA (4er Set)',
+            imageUrl: 'https://cdn.shopify.com/s/files/1/0483/4374/4676/files/Untersetzer_Produkt_Bunt_Kiva-2.jpg?v=1747913034',
+            quantity: 1,
+            price: 0.9,
+            sku: null,
+            variantTitle: 'Mango Lassi / Organisch'
+          }
+        ],
+        additionalNotes: '',
+        trackingNumber: null
+      }
+    ];
+    
+    res.json({
+      success: true,
+      returns: mockReturns
+    });
+    
+  } catch (error) {
+    console.error('Error fetching return history:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch return history'
+    });
+  }
+});
+
+// POST /returns/:returnId/cancel - Cancel return request
+app.post('/returns/:returnId/cancel', authenticateAppToken, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const customerEmail = req.session.email;
+    
+    console.log('❌ Cancelling return:', returnId, 'for:', customerEmail);
+    
+    // In production, update the return status in your database
+    // For now, just simulate success
+    
+    res.json({
+      success: true,
+      message: 'Return request cancelled successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error cancelling return:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to cancel return request'
+    });
+  }
+});
+
 // GET /customer/store-credit - Get store credit
 app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
   try {
