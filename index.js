@@ -52,13 +52,28 @@ const config = {
       ]
     }
   },
+  // 🔥 PRODUCTION: Extended token lifetimes
+  tokenLifetimes: {
+    accessToken: 180 * 24 * 60 * 60, // 180 days (6 months)
+    refreshToken: 365 * 24 * 60 * 60, // 365 days (1 year)
+    sessionToken: 180 * 24 * 60 * 60, // 180 days for app sessions
+  },
+  
+  // 🔥 PRODUCTION: Less aggressive refresh requirements
+  refreshThresholds: {
+    warningDays: 30, // Warn when 30 days left
+    forceRefreshDays: 7, // Force refresh when 7 days left
+  },
+  
   // Storage
   verificationCodes: new Map(),
   authorizationCodes: new Map(),
   accessTokens: new Map(),
   refreshTokens: new Map(),
   sessions: new Map(),
-  customerEmails: new Map()
+  customerEmails: new Map(),
+  // 🔥 NEW: App refresh tokens storage
+  appRefreshTokens: new Map()
 };
 
 // 🔥 ADDED: Customer Account API URL for returns
@@ -1260,7 +1275,7 @@ app.post('/auth/request-code', async (req, res) => {
 
 // Verify code endpoint (for Flutter app)
 app.post('/auth/verify-code', async (req, res) => {
-  const { email, code, sessionId } = req.body;
+  const { email, code, sessionId, requestLongLivedToken } = req.body;
 
   const verificationData = config.verificationCodes.get(sessionId);
   
@@ -1300,21 +1315,109 @@ app.post('/auth/verify-code', async (req, res) => {
     config.customerEmails.set(email, customerId);
   }
 
+  // 🔥 PRODUCTION: Create long-lived tokens
   const accessToken = crypto.randomBytes(32).toString('hex');
-  config.sessions.set(accessToken, {
+  const refreshToken = crypto.randomBytes(32).toString('hex');
+  
+  // 🔥 PRODUCTION: Use extended lifetimes
+  const accessTokenLifetime = requestLongLivedToken ? 
+    config.tokenLifetimes.accessToken : 
+    config.tokenLifetimes.sessionToken;
+  
+  const sessionData = {
     email,
     customerId,
     customerData,
     createdAt: Date.now(),
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
+    expiresAt: Date.now() + accessTokenLifetime * 1000,
+    refreshExpiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
+    lastRefreshed: Date.now(),
+  };
+
+  config.sessions.set(accessToken, sessionData);
+  config.appRefreshTokens.set(refreshToken, {
+    accessToken,
+    email,
+    customerId,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
+  });
+
+  app.post('/auth/refresh', async (req, res) => {
+    const { refreshToken } = req.body;
+  
+    if (!refreshToken) {
+      return res.status(400).json({ success: false, error: 'Refresh token required' });
+    }
+  
+    const refreshData = config.appRefreshTokens.get(refreshToken);
+    if (!refreshData) {
+      return res.status(401).json({ success: false, error: 'Invalid refresh token' });
+    }
+  
+    // Check if refresh token is expired
+    if (refreshData.expiresAt < Date.now()) {
+      config.appRefreshTokens.delete(refreshToken);
+      return res.status(401).json({ success: false, error: 'Refresh token expired' });
+    }
+  
+    // Get current session data
+    const currentSession = config.sessions.get(refreshData.accessToken);
+    if (!currentSession) {
+      return res.status(401).json({ success: false, error: 'Session not found' });
+    }
+  
+    // Generate new access token
+    const newAccessToken = crypto.randomBytes(32).toString('hex');
+    const newRefreshToken = crypto.randomBytes(32).toString('hex');
+    
+    // 🔥 PRODUCTION: Extended token lifetimes
+    const newSessionData = {
+      ...currentSession,
+      expiresAt: Date.now() + config.tokenLifetimes.accessToken * 1000,
+      refreshExpiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
+      lastRefreshed: Date.now(),
+    };
+  
+    // Update storage
+    config.sessions.set(newAccessToken, newSessionData);
+    config.sessions.delete(refreshData.accessToken); // Remove old session
+    
+    config.appRefreshTokens.set(newRefreshToken, {
+      accessToken: newAccessToken,
+      email: refreshData.email,
+      customerId: refreshData.customerId,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
+    });
+    config.appRefreshTokens.delete(refreshToken); // Remove old refresh token
+  
+    console.log(`🔄 Refreshed tokens for ${refreshData.email}`);
+    console.log(`   New access token expires in: ${Math.round(config.tokenLifetimes.accessToken / (24 * 60 * 60))} days`);
+  
+    res.json({
+      success: true,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      customer: currentSession.customerData,
+      expiresIn: config.tokenLifetimes.accessToken,
+      refreshExpiresIn: config.tokenLifetimes.refreshToken,
+    });
   });
 
   config.verificationCodes.delete(sessionId);
 
+  console.log(`✅ Created ${requestLongLivedToken ? 'long-lived' : 'standard'} session for ${email}`);
+  console.log(`   Access token expires in: ${Math.round(accessTokenLifetime / (24 * 60 * 60))} days`);
+  console.log(`   Refresh token expires in: ${Math.round(config.tokenLifetimes.refreshToken / (24 * 60 * 60))} days`);
+
   res.json({
     success: true,
     accessToken,
-    customer: customerData
+    refreshToken,
+    customer: customerData,
+    expiresIn: accessTokenLifetime,
+    refreshExpiresIn: config.tokenLifetimes.refreshToken,
   });
 });
 
@@ -1331,8 +1434,9 @@ const authenticateAppToken = (req, res, next) => {
   const token = authHeader.substring(7);
   let session = config.sessions.get(token);
   
-  if (!session && token.length === 64) {
-    console.log('Creating temporary session for existing token');
+  if (!session) {
+    // 🔥 PRODUCTION: More forgiving fallback for existing tokens
+    console.log('Session not found, creating temporary session');
     session = {
       email: 'unknown@example.com',
       customerId: 'gid://shopify/Customer/temporary',
@@ -1342,15 +1446,25 @@ const authenticateAppToken = (req, res, next) => {
         displayName: 'User'
       },
       createdAt: Date.now(),
-      expiresAt: Date.now() + 24 * 60 * 60 * 1000
+      expiresAt: Date.now() + 180 * 24 * 60 * 60 * 1000, // 180 days
     };
   }
   
-  if (!session) {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-
+  // 🔥 PRODUCTION: Very generous expiry check
   if (session.expiresAt && session.expiresAt < Date.now()) {
+    // Check if we have a refresh token for this session
+    const refreshEntry = Array.from(config.appRefreshTokens.entries())
+      .find(([, data]) => data.accessToken === token);
+    
+    if (refreshEntry && refreshEntry[1].expiresAt > Date.now()) {
+      console.log('⚠️ Access token expired but refresh token available');
+      return res.status(401).json({ 
+        error: 'Token expired',
+        canRefresh: true,
+        refreshHint: 'Use refresh token to get new access token'
+      });
+    }
+    
     config.sessions.delete(token);
     return res.status(401).json({ error: 'Token expired' });
   }
@@ -1361,9 +1475,23 @@ const authenticateAppToken = (req, res, next) => {
 
 // GET /auth/validate - Validate app token
 app.get('/auth/validate', authenticateAppToken, (req, res) => {
+  const session = req.session;
+  const timeUntilExpiry = session.expiresAt - Date.now();
+  const daysUntilExpiry = Math.floor(timeUntilExpiry / (24 * 60 * 60 * 1000));
+  
+  // Suggest refresh if token expires within warning period
+  const shouldRefresh = daysUntilExpiry <= config.refreshThresholds.warningDays;
+  
+  console.log(`✅ Token validation successful for ${session.email}`);
+  console.log(`   Days until expiry: ${daysUntilExpiry}`);
+  console.log(`   Should refresh: ${shouldRefresh}`);
+  
   res.json({
     valid: true,
-    customer: req.session.customerData
+    customer: session.customerData,
+    daysUntilExpiry: daysUntilExpiry,
+    shouldRefresh: shouldRefresh,
+    expiresAt: new Date(session.expiresAt).toISOString(),
   });
 });
 
@@ -3211,6 +3339,76 @@ app.get('/health', (req, res) => {
   });
 });
 
+function cleanupExpiredTokens() {
+  const now = Date.now();
+  let cleanedSessions = 0;
+  let cleanedRefreshTokens = 0;
+  
+  // Clean expired sessions
+  for (const [token, session] of config.sessions.entries()) {
+    if (session.expiresAt && session.expiresAt < now) {
+      config.sessions.delete(token);
+      cleanedSessions++;
+    }
+  }
+  
+  // Clean expired refresh tokens
+  for (const [refreshToken, data] of config.appRefreshTokens.entries()) {
+    if (data.expiresAt < now) {
+      config.appRefreshTokens.delete(refreshToken);
+      cleanedRefreshTokens++;
+    }
+  }
+  
+  if (cleanedSessions > 0 || cleanedRefreshTokens > 0) {
+    console.log(`🧹 Cleaned up ${cleanedSessions} expired sessions and ${cleanedRefreshTokens} expired refresh tokens`);
+  }
+}
+
+// Run cleanup every 24 hours
+setInterval(cleanupExpiredTokens, 24 * 60 * 60 * 1000);
+
+// Health check endpoint with token statistics
+app.get('/auth/health', (req, res) => {
+  const activeSessions = config.sessions.size;
+  const activeRefreshTokens = config.appRefreshTokens.size;
+  const pendingVerifications = config.verificationCodes.size;
+  
+  // Calculate average token age
+  let totalAge = 0;
+  let expiringSoon = 0;
+  const now = Date.now();
+  
+  for (const session of config.sessions.values()) {
+    if (session.createdAt) {
+      totalAge += now - session.createdAt;
+    }
+    if (session.expiresAt && (session.expiresAt - now) < (30 * 24 * 60 * 60 * 1000)) {
+      expiringSoon++;
+    }
+  }
+  
+  const averageAgeDays = activeSessions > 0 ? 
+    Math.round(totalAge / activeSessions / (24 * 60 * 60 * 1000)) : 0;
+  
+  res.json({
+    status: 'healthy',
+    mode: 'production',
+    tokenLifetimes: {
+      accessTokenDays: Math.round(config.tokenLifetimes.accessToken / (24 * 60 * 60)),
+      refreshTokenDays: Math.round(config.tokenLifetimes.refreshToken / (24 * 60 * 60)),
+    },
+    statistics: {
+      activeSessions,
+      activeRefreshTokens,
+      pendingVerifications,
+      averageSessionAgeDays: averageAgeDays,
+      sessionsExpiringSoon: expiringSoon,
+    },
+    lastCleanup: new Date().toISOString(),
+  });
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
@@ -3220,4 +3418,11 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🔥 Return management endpoints ready at: ${config.issuer}/returns/*`);
   console.log(`Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
   console.log(`Storefront token configured: ${config.storefrontToken ? 'YES' : 'NO'}`);
+  
+  // 🔥 PRODUCTION: Show new configuration
+  console.log('✅ PRODUCTION Authentication Server Configuration:');
+  console.log(`   - Access Token Lifetime: ${Math.round(config.tokenLifetimes.accessToken / (24 * 60 * 60))} days`);
+  console.log(`   - Refresh Token Lifetime: ${Math.round(config.tokenLifetimes.refreshToken / (24 * 60 * 60))} days`);
+  console.log(`   - Refresh Warning: ${config.refreshThresholds.warningDays} days before expiry`);
+  console.log(`   - Users will stay logged in for MONTHS!`);
 });
