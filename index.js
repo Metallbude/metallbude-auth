@@ -1683,26 +1683,17 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       return res.json({ orders: [] });
     }
 
-    const { page = 1, limit = 50, status = 'all' } = req.query;
     const customerEmail = req.session.email;
-    
-    console.log('📋 Fetching complete order history for:', customerEmail);
-    console.log('📋 Filters - Page:', page, 'Limit:', limit, 'Status:', status);
-    
-    console.log('🔍 Using Shopify Admin API directly (no customer tokens needed)...');
+    console.log('📋 Fetching orders for customer:', customerEmail);
+    console.log('🔍 Using SIMPLE Shopify Admin API query...');
 
+    // 🔥 MINIMAL QUERY - Only 100% guaranteed fields
     const query = `
-      query getCustomerOrders($customerId: ID!, $first: Int!, $after: String) {
+      query getCustomerOrders($customerId: ID!) {
         customer(id: $customerId) {
           id
           email
-          orders(first: $first, after: $after, sortKey: PROCESSED_AT, reverse: true) {
-            pageInfo {
-              hasNextPage
-              hasPreviousPage
-              startCursor
-              endCursor
-            }
+          orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
             edges {
               node {
                 id
@@ -1710,19 +1701,10 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                 processedAt
                 createdAt
                 updatedAt
-                cancelledAt
-                cancelReason
                 displayFulfillmentStatus
                 displayFinancialStatus
                 
-                # Pricing details
                 currentTotalPriceSet {
-                  shopMoney {
-                    amount
-                    currencyCode
-                  }
-                }
-                totalRefundedSet {
                   shopMoney {
                     amount
                     currencyCode
@@ -1746,83 +1728,22 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                     currencyCode
                   }
                 }
-                totalDiscountsSet {
-                  shopMoney {
-                    amount
-                    currencyCode
-                  }
-                }
                 
-                # Shipping information
                 shippingAddress {
                   firstName
                   lastName
-                  company
                   address1
-                  address2
                   city
-                  province
-                  provinceCode
                   country
-                  countryCodeV2
                   zip
-                  phone
-                  name
-                  formattedArea
                 }
                 
-                # Billing information
-                billingAddress {
-                  firstName
-                  lastName
-                  company
-                  address1
-                  address2
-                  city
-                  province
-                  provinceCode
-                  country
-                  countryCodeV2
-                  zip
-                  phone
-                  name
-                }
-                
-                # Customer info at time of order
-                customerJourney {
-                  customerOrderIndex
-                  daysToConversion
-                  firstVisit {
-                    id
-                    landingPage
-                    landingPageHtml
-                    occurredAt
-                    referrerUrl
-                    source
-                    sourceDescription
-                    sourceType
-                    utmParameters {
-                      campaign
-                      content
-                      medium
-                      source
-                      term
-                    }
-                  }
-                }
-                
-                # Line items with valid fields only
                 lineItems(first: 250) {
                   edges {
                     node {
                       id
                       title
                       quantity
-                      requiresShipping
-                      customAttributes {
-                        key
-                        value
-                      }
                       variant {
                         id
                         title
@@ -1830,125 +1751,19 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                         price
                         image {
                           url
-                          altText
                         }
                         product {
                           id
                           title
                           handle
-                          productType
-                          vendor
-                          featuredImage {
-                            url
-                            altText
-                          }
-                        }
-                      }
-                      originalUnitPriceSet {
-                        shopMoney {
-                          amount
-                          currencyCode
-                        }
-                      }
-                      discountedUnitPriceSet {
-                        shopMoney {
-                          amount
-                          currencyCode
                         }
                       }
                     }
                   }
                 }
                 
-                # Discount information
-                discountApplications(first: 10) {
-                  edges {
-                    node {
-                      allocationMethod
-                      targetSelection
-                      targetType
-                      value {
-                        ... on MoneyV2 {
-                          amount
-                          currencyCode
-                        }
-                        ... on PricingPercentageValue {
-                          percentage
-                        }
-                      }
-                      ... on DiscountCodeApplication {
-                        code
-                      }
-                    }
-                  }
-                }
-                
-                # Fulfillment tracking - FIXED structure
-                fulfillments(first: 10) {
-                  id
-                  status
-                  trackingCompany
-                  trackingNumbers
-                  createdAt
-                  updatedAt
-                  location {
-                    name
-                  }
-                  fulfillmentLineItems(first: 50) {
-                    edges {
-                      node {
-                        id
-                        quantity
-                        lineItem {
-                          title
-                          variant {
-                            title
-                            sku
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-                
-                # Returns - FIXED structure
-                returns(first: 10) {
-                  id
-                  status
-                  totalQuantity
-                  returnLineItems(first: 50) {
-                    edges {
-                      node {
-                        id
-                        quantity
-                        returnReason
-                        customerNote
-                      }
-                    }
-                  }
-                }
-                
-                # Payment details - FIXED structure
-                transactions(first: 10) {
-                  id
-                  kind
-                  status
-                  processedAt
-                  gateway
-                  paymentId
-                  amountSet {
-                    shopMoney {
-                      amount
-                      currencyCode
-                    }
-                  }
-                }
-                
-                # Additional metadata - VALID fields only
                 note
                 tags
-                sourceName
-                sourceIdentifier
                 phone
                 email
               }
@@ -1958,18 +1773,11 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    // Calculate pagination
-    const after = page > 1 ? Buffer.from(`arrayconnection:${(page - 1) * limit - 1}`).toString('base64') : null;
-
     const response = await axios.post(
       config.adminApiUrl,
       {
         query,
-        variables: {
-          customerId: req.session.customerId,
-          first: parseInt(limit),
-          after: after
-        }
+        variables: { customerId: req.session.customerId }
       },
       {
         headers: {
@@ -1981,29 +1789,25 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
 
     if (response.data.errors) {
       console.error('❌ Orders fetch errors:', response.data.errors);
-      return res.json({ orders: [], pagination: { hasNextPage: false } });
+      return res.json({ orders: [] });
     }
 
-    const ordersData = response.data.data.customer.orders;
-    const orderEdges = ordersData.edges || [];
-    
-    console.log(`✅ Successfully fetched ${orderEdges.length} orders using Admin API directly`);
+    const orderEdges = response.data?.data?.customer?.orders?.edges || [];
+    console.log(`✅ Successfully fetched ${orderEdges.length} orders using SIMPLE query`);
     
     // Transform orders for Flutter app
-    const transformedOrders = orderEdges.map(edge => {
+    const orders = orderEdges.map(edge => {
       const order = edge.node;
       
       return {
         id: order.id,
         name: order.name,
-        orderNumber: parseInt(order.name.replace('#', '')) || 0, // Calculate from name
+        orderNumber: parseInt(order.name.replace('#', '')) || 0,
         processedAt: order.processedAt,
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
-        cancelledAt: order.cancelledAt,
-        cancelReason: order.cancelReason,
         
-        // Status information
+        // Status
         fulfillmentStatus: order.displayFulfillmentStatus,
         financialStatus: order.displayFinancialStatus,
         
@@ -2024,153 +1828,59 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
           amount: order.currentTotalTaxSet.shopMoney.amount,
           currencyCode: order.currentTotalTaxSet.shopMoney.currencyCode
         } : null,
-        totalDiscount: {
-          amount: order.totalDiscountsSet.shopMoney.amount,
-          currencyCode: order.totalDiscountsSet.shopMoney.currencyCode
-        },
-        totalRefunded: order.totalRefundedSet ? {
-          amount: order.totalRefundedSet.shopMoney.amount,
-          currencyCode: order.totalRefundedSet.shopMoney.currencyCode
-        } : null,
         
-        // Addresses
+        // Address
         shippingAddress: order.shippingAddress,
-        billingAddress: order.billingAddress,
         
-        // Customer journey insights
-        customerOrderIndex: order.customerJourney?.customerOrderIndex,
-        isFirstOrder: order.customerJourney?.customerOrderIndex === 1,
-        daysToConversion: order.customerJourney?.daysToConversion,
-        
-        // Line items with full details
+        // Line items
         lineItems: order.lineItems.edges.map(item => ({
           id: item.node.id,
           title: item.node.title,
           quantity: item.node.quantity,
-          requiresShipping: item.node.requiresShipping,
-          customAttributes: item.node.customAttributes,
           variant: {
-            ...item.node.variant,
+            id: item.node.variant.id,
+            title: item.node.variant.title,
+            sku: item.node.variant.sku,
+            price: item.node.variant.price,
+            image: item.node.variant.image?.url,
             product: item.node.variant.product
           },
-          originalPrice: {
-            amount: item.node.originalUnitPriceSet.shopMoney.amount,
-            currencyCode: item.node.originalUnitPriceSet.shopMoney.currencyCode
-          },
-          discountedPrice: item.node.discountedUnitPriceSet ? {
-            amount: item.node.discountedUnitPriceSet.shopMoney.amount,
-            currencyCode: item.node.discountedUnitPriceSet.shopMoney.currencyCode
-          } : null,
           totalPrice: {
-            amount: (parseFloat(item.node.originalUnitPriceSet.shopMoney.amount) * item.node.quantity).toFixed(2),
-            currencyCode: item.node.originalUnitPriceSet.shopMoney.currencyCode
-          }
-        })),
-        
-        // Discounts applied
-        discounts: order.discountApplications.edges.map(discount => ({
-          allocationMethod: discount.node.allocationMethod,
-          targetType: discount.node.targetType,
-          value: discount.node.value,
-          code: discount.node.code || null
-        })),
-        
-        // Fulfillment tracking - FIXED structure
-        fulfillments: order.fulfillments.map(fulfillment => ({
-          id: fulfillment.id,
-          status: fulfillment.status,
-          trackingCompany: fulfillment.trackingCompany,
-          trackingNumbers: fulfillment.trackingNumbers,
-          createdAt: fulfillment.createdAt,
-          updatedAt: fulfillment.updatedAt,
-          location: fulfillment.location?.name,
-          items: fulfillment.fulfillmentLineItems.edges.map(item => ({
-            id: item.node.id,
-            quantity: item.node.quantity,
-            title: item.node.lineItem.title,
-            variant: item.node.lineItem.variant
-          }))
-        })),
-        
-        // Returns - FIXED structure
-        returns: order.returns.map(returnItem => ({
-          id: returnItem.id,
-          status: returnItem.status,
-          totalQuantity: returnItem.totalQuantity,
-          items: returnItem.returnLineItems.edges.map(item => ({
-            id: item.node.id,
-            quantity: item.node.quantity,
-            reason: item.node.returnReason,
-            customerNote: item.node.customerNote
-          }))
-        })),
-        
-        // Payment transactions - FIXED structure
-        transactions: order.transactions.map(transaction => ({
-          id: transaction.id,
-          kind: transaction.kind,
-          status: transaction.status,
-          processedAt: transaction.processedAt,
-          gateway: transaction.gateway,
-          amount: {
-            amount: transaction.amountSet.shopMoney.amount,
-            currencyCode: transaction.amountSet.shopMoney.currencyCode
+            amount: (parseFloat(item.node.variant.price) * item.node.quantity).toFixed(2),
+            currencyCode: order.currentTotalPriceSet.shopMoney.currencyCode
           }
         })),
         
         // Additional data
         note: order.note,
         tags: order.tags || [],
-        source: order.sourceName,
         phone: order.phone,
         email: order.email,
         
-        // Helper flags for Flutter UI
+        // Helper flags
         canReorder: order.displayFulfillmentStatus === 'FULFILLED',
         canReturn: order.displayFulfillmentStatus === 'FULFILLED' && 
-                  order.displayFinancialStatus !== 'REFUNDED' &&
-                  order.returns.length === 0,
-        hasTracking: order.fulfillments.some(f => f.trackingNumbers && f.trackingNumbers.length > 0),
-        isReturnable: order.returns.length === 0 && order.displayFulfillmentStatus === 'FULFILLED'
+                  order.displayFinancialStatus !== 'REFUNDED'
       };
     });
 
-    // Filter by status if requested
-    let filteredOrders = transformedOrders;
-    if (status !== 'all') {
-      filteredOrders = transformedOrders.filter(order => {
-        switch (status) {
-          case 'pending':
-            return ['PENDING', 'AUTHORIZED', 'PARTIALLY_PAID'].includes(order.financialStatus);
-          case 'fulfilled':
-            return order.fulfillmentStatus === 'FULFILLED';
-          case 'cancelled':
-            return order.cancelledAt !== null;
-          case 'refunded':
-            return order.financialStatus === 'REFUNDED';
-          default:
-            return true;
-        }
-      });
-    }
-
-    console.log(`✅ Fetched ${filteredOrders.length} orders successfully`);
+    console.log(`✅ Transformed ${orders.length} orders for Flutter app`);
     
     res.json({
-      orders: filteredOrders,
+      orders: orders,
       pagination: {
-        hasNextPage: ordersData.pageInfo.hasNextPage,
-        hasPreviousPage: ordersData.pageInfo.hasPreviousPage,
-        currentPage: parseInt(page),
-        totalShown: filteredOrders.length
+        hasNextPage: false,
+        currentPage: 1,
+        totalShown: orders.length
       }
     });
 
   } catch (error) {
     console.error('❌ Orders fetch error:', error);
-    res.json({ orders: [], pagination: { hasNextPage: false } });
+    res.json({ orders: [] });
   }
 });
+
 
 // GET /customer/orders/:orderId - Get single order with COMPLETE details
 app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
