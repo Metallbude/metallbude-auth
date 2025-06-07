@@ -77,64 +77,7 @@ const config = {
 };
 
 // Shopify Customer Account API token management
-const shopifyCustomerTokens = new Map();
 
-async function ensureValidShopifyToken(customerEmail) {
-  const tokenData = shopifyCustomerTokens.get(customerEmail);
-  
-  if (!tokenData) {
-    console.log(`🔄 No Shopify token found for ${customerEmail}, creating mock token`);
-    return await createMockShopifyToken(customerEmail);
-  }
-  
-  const timeUntilExpiry = tokenData.expiresAt - Date.now();
-  if (timeUntilExpiry < (15 * 60 * 1000)) {
-    console.log(`🔄 Shopify token expiring soon for ${customerEmail}, refreshing...`);
-    return await createMockShopifyToken(customerEmail);
-  }
-  
-  console.log(`✅ Shopify token still valid for ${customerEmail}`);
-  return tokenData;
-}
-
-async function createMockShopifyToken(customerEmail) {
-  try {
-    const mockToken = {
-      accessToken: `shopify_customer_${Buffer.from(customerEmail + Date.now()).toString('base64')}`,
-      refreshToken: `refresh_${Buffer.from(customerEmail + Date.now() + 'refresh').toString('base64')}`,
-      expiresAt: Date.now() + (60 * 60 * 1000),
-      email: customerEmail,
-      createdAt: new Date().toISOString()
-    };
-    
-    shopifyCustomerTokens.set(customerEmail, mockToken);
-    
-    console.log(`✅ Created fresh Shopify token for ${customerEmail}, expires in 1 hour`);
-    return mockToken;
-    
-  } catch (error) {
-    console.error(`❌ Error creating Shopify token for ${customerEmail}:`, error);
-    throw error;
-  }
-}
-
-function cleanupExpiredShopifyTokens() {
-  const now = Date.now();
-  let cleanedCount = 0;
-  
-  for (const [email, tokenData] of shopifyCustomerTokens.entries()) {
-    if (tokenData.expiresAt < now) {
-      shopifyCustomerTokens.delete(email);
-      cleanedCount++;
-    }
-  }
-  
-  if (cleanedCount > 0) {
-    console.log(`🧹 Cleaned up ${cleanedCount} expired Shopify customer tokens`);
-  }
-}
-
-setInterval(cleanupExpiredShopifyTokens, 30 * 60 * 1000);
 
 // 🔥 ADDED: Customer Account API URL for returns
 const CUSTOMER_ACCOUNT_API_URL = 'https://shopify.com/48343744676/account/customer/api/2024-10/graphql';
@@ -1749,11 +1692,20 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
 // GET /customer/orders - Get customer orders
 app.get('/customer/orders', authenticateAppToken, async (req, res) => {
   try {
+    if (!config.adminToken) {
+      return res.json({ orders: [] });
+    }
+
     const { page = 1, limit = 50, status = 'all' } = req.query;
     const customerEmail = req.session.email;
     
     console.log('📋 Fetching complete order history for:', customerEmail);
     console.log('📋 Filters - Page:', page, 'Limit:', limit, 'Status:', status);
+
+    // 🔥 REMOVED: await ensureValidShopifyToken(customerEmail);
+    // ✅ We use Admin API directly - no Shopify customer tokens needed!
+    
+    console.log('🔍 Using Shopify Admin API directly (no customer tokens needed)...');
 
     const query = `
       query getCustomerOrders($customerId: ID!, $first: Int!, $after: String) {
@@ -2077,6 +2029,8 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
 
     const ordersData = response.data.data.customer.orders;
     const orderEdges = ordersData.edges || [];
+    
+    console.log(`✅ Successfully fetched ${orderEdges.length} orders using Admin API directly`);
     
     // Transform orders for Flutter app
     const transformedOrders = orderEdges.map(edge => {
@@ -7325,30 +7279,189 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 
     console.log('🔍 Checking return eligibility for order:', orderId);
     
-    await ensureValidShopifyToken(customerEmail);
-    
-    const mockEligibility = {
-      eligible: true,
-      reason: null,
-      returnableItems: [
-        {
-          id: 'mock_line_item_1',
-          fulfillmentLineItemId: 'mock_fulfillment_1',
-          title: 'Sample Product',
-          quantity: 1,
-          variant: {
-            id: 'mock_variant_1',
-            title: 'Default Title',
-            price: '29.99',
-            image: 'https://via.placeholder.com/150',
-          },
+    // 🔥 REMOVED: await ensureValidShopifyToken(customerEmail);
+    console.log('🔍 Using Shopify Admin API directly to check return eligibility...');
+
+    // Get real order data to check return eligibility
+    const query = `
+      query checkReturnEligibility($orderId: ID!) {
+        order(id: $orderId) {
+          id
+          name
+          processedAt
+          displayFulfillmentStatus
+          displayFinancialStatus
+          lineItems(first: 250) {
+            edges {
+              node {
+                id
+                title
+                quantity
+                fulfillableQuantity
+                variant {
+                  id
+                  title
+                  sku
+                  priceV2 {
+                    amount
+                    currencyCode
+                  }
+                  image {
+                    url
+                    altText
+                  }
+                  product {
+                    id
+                    title
+                    handle
+                  }
+                }
+              }
+            }
+          }
+          fulfillments(first: 10) {
+            edges {
+              node {
+                id
+                status
+                createdAt
+                fulfillmentLineItems(first: 250) {
+                  edges {
+                    node {
+                      id
+                      quantity
+                      lineItem {
+                        id
+                        title
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          returns(first: 10) {
+            edges {
+              node {
+                id
+                status
+                returnLineItems(first: 250) {
+                  edges {
+                    node {
+                      fulfillmentLineItem {
+                        lineItem {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
-      ],
-      existingReturns: 0,
+      }
+    `;
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query,
+        variables: { orderId }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (response.data.errors) {
+      console.error('❌ Return eligibility check errors:', response.data.errors);
+      return res.status(404).json({
+        eligible: false,
+        reason: 'Order not found',
+        returnableItems: []
+      });
+    }
+
+    const order = response.data.data.order;
+    if (!order) {
+      return res.status(404).json({
+        eligible: false,
+        reason: 'Order not found',
+        returnableItems: []
+      });
+    }
+
+    // Check basic return eligibility
+    const canReturn = order.displayFulfillmentStatus === 'FULFILLED' && 
+                     order.displayFinancialStatus !== 'REFUNDED';
+
+    if (!canReturn) {
+      return res.json({
+        eligible: false,
+        reason: order.displayFulfillmentStatus !== 'FULFILLED' ? 
+                'Order must be fulfilled to be returned' :
+                'Order has already been refunded',
+        returnableItems: []
+      });
+    }
+
+    // Get items already returned
+    const returnedLineItemIds = new Set();
+    order.returns.edges.forEach(returnEdge => {
+      returnEdge.node.returnLineItems.edges.forEach(returnLineItemEdge => {
+        const lineItemId = returnLineItemEdge.node.fulfillmentLineItem.lineItem.id;
+        returnedLineItemIds.add(lineItemId);
+      });
+    });
+
+    // Build returnable items list
+    const returnableItems = [];
+    order.lineItems.edges.forEach(lineItemEdge => {
+      const lineItem = lineItemEdge.node;
+      
+      // Skip if already returned
+      if (returnedLineItemIds.has(lineItem.id)) {
+        return;
+      }
+
+      // Add to returnable items
+      returnableItems.push({
+        id: lineItem.id,
+        lineItemId: lineItem.id,
+        fulfillmentLineItemId: `fulfillment_${lineItem.id}`,
+        title: lineItem.title,
+        quantity: lineItem.quantity,
+        variant: {
+          id: lineItem.variant.id,
+          title: lineItem.variant.title,
+          sku: lineItem.variant.sku,
+          price: lineItem.variant.priceV2.amount,
+          image: lineItem.variant.image?.url || 'https://via.placeholder.com/150',
+          product: lineItem.variant.product
+        }
+      });
+    });
+
+    const eligibility = {
+      eligible: returnableItems.length > 0,
+      reason: returnableItems.length === 0 ? 'No returnable items found' : null,
+      returnableItems: returnableItems,
+      existingReturns: order.returns.edges.length,
+      orderInfo: {
+        id: order.id,
+        name: order.name,
+        processedAt: order.processedAt,
+        fulfillmentStatus: order.displayFulfillmentStatus,
+        financialStatus: order.displayFinancialStatus
+      }
     };
     
-    console.log(`✅ Return eligibility checked with fresh Shopify token`);
-    res.json(mockEligibility);
+    console.log(`✅ Return eligibility checked using Admin API - ${returnableItems.length} returnable items`);
+    res.json(eligibility);
     
   } catch (error) {
     console.error('❌ Error checking return eligibility:', error);
