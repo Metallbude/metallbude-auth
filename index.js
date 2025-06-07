@@ -164,7 +164,7 @@ async function persistSessions() {
 }
 
 // Initialize persistence
-loadPersistedSessions();
+loadPersistedSessionsWithLogging();
 
 // Save every 2 minutes
 setInterval(async () => {
