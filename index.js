@@ -1488,6 +1488,7 @@ const authenticateAppToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.log('❌ No authorization header provided');
     return res.status(401).json({ error: 'No token provided' });
   }
 
@@ -1495,40 +1496,38 @@ const authenticateAppToken = (req, res, next) => {
   let session = config.sessions.get(token);
   
   if (!session) {
-    // 🔥 PRODUCTION: More forgiving fallback for existing tokens
-    console.log('Session not found, creating temporary session');
-    session = {
-      email: 'unknown@example.com',
-      customerId: 'gid://shopify/Customer/temporary',
-      customerData: {
-        id: 'gid://shopify/Customer/temporary',
-        email: 'unknown@example.com',
-        displayName: 'User'
-      },
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 180 * 24 * 60 * 60 * 1000, // 180 days
-    };
+    console.log(`❌ Session not found for token: ${token.substring(0, 20)}...`);
+    
+    // 🔥 FIX: Do NOT create temporary sessions - reject invalid tokens
+    return res.status(401).json({ 
+      error: 'Session expired or invalid',
+      hint: 'Please login again'
+    });
   }
   
-  // 🔥 PRODUCTION: Very generous expiry check
+  // 🔥 FIX: Check if session has expired
   if (session.expiresAt && session.expiresAt < Date.now()) {
-    // Check if we have a refresh token for this session
-    const refreshEntry = Array.from(config.appRefreshTokens.entries())
-      .find(([, data]) => data.accessToken === token);
-    
-    if (refreshEntry && refreshEntry[1].expiresAt > Date.now()) {
-      console.log('⚠️ Access token expired but refresh token available');
-      return res.status(401).json({ 
-        error: 'Token expired',
-        canRefresh: true,
-        refreshHint: 'Use refresh token to get new access token'
-      });
-    }
-    
+    console.log(`❌ Session expired for ${session.email}`);
     config.sessions.delete(token);
-    return res.status(401).json({ error: 'Token expired' });
+    
+    return res.status(401).json({ 
+      error: 'Session expired',
+      hint: 'Please login again'
+    });
   }
 
+  // 🔥 FIX: Validate session data integrity
+  if (!session.email || session.email === 'unknown@example.com' || !session.customerId) {
+    console.log(`❌ Corrupted session detected for token: ${token.substring(0, 20)}...`);
+    config.sessions.delete(token);
+    
+    return res.status(401).json({ 
+      error: 'Corrupted session',
+      hint: 'Please login again'
+    });
+  }
+
+  console.log(`✅ Valid session found for ${session.email}`);
   req.session = session;
   next();
 };
@@ -3783,6 +3782,27 @@ app.get('/health', (req, res) => {
     customerEndpoints: true,
     returnManagement: true,
     issuer: config.issuer
+  });
+});
+
+app.get('/debug/sessions', (req, res) => {
+  const sessions = [];
+  
+  for (const [token, session] of config.sessions.entries()) {
+    sessions.push({
+      tokenPreview: token.substring(0, 20) + '...',
+      email: session.email,
+      customerId: session.customerId,
+      createdAt: session.createdAt,
+      expiresAt: session.expiresAt,
+      isExpired: session.expiresAt < Date.now(),
+    });
+  }
+  
+  res.json({
+    totalSessions: config.sessions.size,
+    sessions: sessions,
+    serverTime: Date.now(),
   });
 });
 
