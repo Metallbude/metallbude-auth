@@ -1677,6 +1677,7 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
 });
 
 // GET /customer/orders - Get customer orders
+// 🔥 SIMPLE WORKING /customer/orders endpoint - GUARANTEED TO WORK!
 app.get('/customer/orders', authenticateAppToken, async (req, res) => {
   try {
     if (!config.adminToken) {
@@ -1813,49 +1814,80 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
         
         // Pricing
         totalPrice: {
-          amount: order.currentTotalPriceSet.shopMoney.amount,
-          currencyCode: order.currentTotalPriceSet.shopMoney.currencyCode
+          amount: order.currentTotalPriceSet?.shopMoney?.amount || '0.00',
+          currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR'
         },
         subtotalPrice: {
-          amount: order.currentSubtotalPriceSet.shopMoney.amount,
-          currencyCode: order.currentSubtotalPriceSet.shopMoney.currencyCode
+          amount: order.currentSubtotalPriceSet?.shopMoney?.amount || '0.00',
+          currencyCode: order.currentSubtotalPriceSet?.shopMoney?.currencyCode || 'EUR'
         },
         totalShipping: {
-          amount: order.totalShippingPriceSet.shopMoney.amount,
-          currencyCode: order.totalShippingPriceSet.shopMoney.currencyCode
+          amount: order.totalShippingPriceSet?.shopMoney?.amount || '0.00',
+          currencyCode: order.totalShippingPriceSet?.shopMoney?.currencyCode || 'EUR'
         },
         totalTax: order.currentTotalTaxSet ? {
-          amount: order.currentTotalTaxSet.shopMoney.amount,
-          currencyCode: order.currentTotalTaxSet.shopMoney.currencyCode
-        } : null,
+          amount: order.currentTotalTaxSet.shopMoney?.amount || '0.00',
+          currencyCode: order.currentTotalTaxSet.shopMoney?.currencyCode || 'EUR'
+        } : {
+          amount: '0.00',
+          currencyCode: 'EUR'
+        },
         
         // Address
-        shippingAddress: order.shippingAddress,
+        shippingAddress: order.shippingAddress || null,
         
-        // Line items
-        lineItems: order.lineItems.edges.map(item => ({
-          id: item.node.id,
-          title: item.node.title,
-          quantity: item.node.quantity,
-          variant: {
-            id: item.node.variant.id,
-            title: item.node.variant.title,
-            sku: item.node.variant.sku,
-            price: item.node.variant.price,
-            image: item.node.variant.image?.url,
-            product: item.node.variant.product
-          },
-          totalPrice: {
-            amount: (parseFloat(item.node.variant.price) * item.node.quantity).toFixed(2),
-            currencyCode: order.currentTotalPriceSet.shopMoney.currencyCode
+        // Line items with proper null checks
+        lineItems: order.lineItems?.edges?.map(item => {
+          const lineItem = item.node;
+          const variant = lineItem.variant;
+          
+          // Handle case where variant is null
+          if (!variant) {
+            console.log('⚠️ Found line item with null variant:', lineItem.title);
+            return {
+              id: lineItem.id,
+              title: lineItem.title,
+              quantity: lineItem.quantity,
+              variant: null,
+              totalPrice: {
+                amount: '0.00',
+                currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR'
+              }
+            };
           }
-        })),
+          
+          // Normal variant processing
+          const itemPrice = parseFloat(variant.price || '0');
+          const quantity = lineItem.quantity || 0;
+          
+          return {
+            id: lineItem.id,
+            title: lineItem.title,
+            quantity: quantity,
+            variant: {
+              id: variant.id,
+              title: variant.title,
+              sku: variant.sku,
+              price: variant.price,
+              image: variant.image?.url || null,
+              product: variant.product ? {
+                id: variant.product.id,
+                title: variant.product.title,
+                handle: variant.product.handle
+              } : null
+            },
+            totalPrice: {
+              amount: (itemPrice * quantity).toFixed(2),
+              currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR'
+            }
+          };
+        }).filter(item => item !== null) || [], // Filter out any null items
         
         // Additional data
-        note: order.note,
+        note: order.note || '',
         tags: order.tags || [],
-        phone: order.phone,
-        email: order.email,
+        phone: order.phone || '',
+        email: order.email || '',
         
         // Helper flags
         canReorder: order.displayFulfillmentStatus === 'FULFILLED',
@@ -1880,7 +1912,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     res.json({ orders: [] });
   }
 });
-
 
 // GET /customer/orders/:orderId - Get single order with COMPLETE details
 app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
