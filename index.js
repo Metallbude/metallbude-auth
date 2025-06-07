@@ -8886,25 +8886,175 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/debug/sessions', (req, res) => {
-  const sessions = [];
+  console.log('🔍 Debug endpoint called - checking session storage...');
+  console.log(`   Sessions in memory: ${sessions.size}`);
+  console.log(`   Refresh tokens in memory: ${appRefreshTokens.size}`);
+  
+  const sessionList = [];
   
   for (const [token, session] of sessions.entries()) {
-    sessions.push({
+    console.log(`   Found session: ${token.substring(0, 8)}... for ${session.email}`);
+    sessionList.push({
       tokenPreview: token.substring(0, 20) + '...',
       email: session.email,
       customerId: session.customerId,
-      createdAt: session.createdAt,
-      expiresAt: session.expiresAt,
+      createdAt: new Date(session.createdAt).toISOString(),
+      expiresAt: new Date(session.expiresAt).toISOString(),
       isExpired: session.expiresAt < Date.now(),
+      daysUntilExpiry: Math.round((session.expiresAt - Date.now()) / (24 * 60 * 60 * 1000))
+    });
+  }
+  
+  const refreshTokenList = [];
+  for (const [token, data] of appRefreshTokens.entries()) {
+    refreshTokenList.push({
+      tokenPreview: token.substring(0, 8) + '...',
+      email: data.email,
+      accessTokenPreview: data.accessToken.substring(0, 8) + '...',
+      expiresAt: new Date(data.expiresAt).toISOString(),
+      isExpired: data.expiresAt < Date.now()
     });
   }
   
   res.json({
     totalSessions: sessions.size,
-    sessions: sessions,
-    serverTime: Date.now(),
+    totalRefreshTokens: appRefreshTokens.size,
+    sessions: sessionList,
+    refreshTokens: refreshTokenList,
+    serverTime: new Date().toISOString(),
+    serverTimestamp: Date.now(),
+    persistenceEnabled: true,
+    sessionStorageType: 'Map with disk persistence',
+    diskFiles: {
+      sessionsFile: '/tmp/sessions.json',
+      refreshTokensFile: '/tmp/refresh_tokens.json'
+    }
   });
 });
+
+// 🔥 ADD this new endpoint to check disk storage
+app.get('/debug/disk-sessions', async (req, res) => {
+  try {
+    console.log('📂 Checking disk storage...');
+    
+    let diskSessions = [];
+    let diskRefreshTokens = [];
+    let sessionsFileExists = false;
+    let refreshTokensFileExists = false;
+    
+    // Check sessions file
+    try {
+      const sessionData = await fs.readFile('/tmp/sessions.json', 'utf8');
+      const sessionEntries = JSON.parse(sessionData);
+      diskSessions = sessionEntries;
+      sessionsFileExists = true;
+      console.log(`📂 Found ${sessionEntries.length} sessions on disk`);
+    } catch (error) {
+      console.log('📂 No sessions file found on disk');
+    }
+    
+    // Check refresh tokens file
+    try {
+      const refreshData = await fs.readFile('/tmp/refresh_tokens.json', 'utf8');
+      const refreshEntries = JSON.parse(refreshData);
+      diskRefreshTokens = refreshEntries;
+      refreshTokensFileExists = true;
+      console.log(`📂 Found ${refreshEntries.length} refresh tokens on disk`);
+    } catch (error) {
+      console.log('📂 No refresh tokens file found on disk');
+    }
+    
+    res.json({
+      diskStorage: {
+        sessionsFileExists,
+        refreshTokensFileExists,
+        diskSessions: diskSessions.length,
+        diskRefreshTokens: diskRefreshTokens.length
+      },
+      memoryStorage: {
+        memorySessions: sessions.size,
+        memoryRefreshTokens: appRefreshTokens.size
+      },
+      diskSessionsPreview: diskSessions.slice(0, 3).map(([token, session]) => ({
+        tokenPreview: token.substring(0, 8) + '...',
+        email: session.email,
+        expiresAt: new Date(session.expiresAt).toISOString()
+      })),
+      memorySessionsPreview: Array.from(sessions.entries()).slice(0, 3).map(([token, session]) => ({
+        tokenPreview: token.substring(0, 8) + '...',
+        email: session.email,
+        expiresAt: new Date(session.expiresAt).toISOString()
+      }))
+    });
+    
+  } catch (error) {
+    console.error('❌ Error checking disk storage:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔥 ADD better logging to your loadPersistedSessions function
+// FIND your loadPersistedSessions function and ADD these console.log lines:
+
+async function loadPersistedSessionsWithLogging() {
+  try {
+    console.log('📂 Loading persisted sessions...');
+    console.log(`📂 Sessions file: /tmp/sessions.json`);
+    console.log(`📂 Refresh tokens file: /tmp/refresh_tokens.json`);
+    
+    try {
+      const sessionData = await fs.readFile('/tmp/sessions.json', 'utf8');
+      const sessionEntries = JSON.parse(sessionData);
+      
+      console.log(`📂 Raw sessions data length: ${sessionEntries.length}`);
+      
+      let loadedSessions = 0;
+      let expiredSessions = 0;
+      const now = Date.now();
+      
+      for (const [token, session] of sessionEntries) {
+        console.log(`📂 Processing session: ${token.substring(0, 8)}... for ${session.email}`);
+        if (session.expiresAt && session.expiresAt > now) {
+          sessions.set(token, session);
+          loadedSessions++;
+          console.log(`📂 ✅ Restored session for ${session.email} - token: ${token.substring(0, 8)}...`);
+        } else {
+          expiredSessions++;
+          console.log(`📂 ❌ Session expired for ${session.email}`);
+        }
+      }
+      
+      console.log(`📂 FINAL: Loaded ${loadedSessions} sessions from disk (${expiredSessions} expired)`);
+      console.log(`📂 Sessions in memory after loading: ${sessions.size}`);
+    } catch (error) {
+      console.log('📂 No existing sessions file found - starting fresh');
+      console.log('📂 Error details:', error.message);
+    }
+    
+    // Similar for refresh tokens...
+    try {
+      const refreshData = await fs.readFile('/tmp/refresh_tokens.json', 'utf8');
+      const refreshEntries = JSON.parse(refreshData);
+      
+      let loadedRefreshTokens = 0;
+      const now = Date.now();
+      
+      for (const [token, data] of refreshEntries) {
+        if (data.expiresAt && data.expiresAt > now) {
+          appRefreshTokens.set(token, data);
+          loadedRefreshTokens++;
+        }
+      }
+      
+      console.log(`📂 Loaded ${loadedRefreshTokens} refresh tokens from disk`);
+    } catch (error) {
+      console.log('📂 No existing refresh tokens file found - starting fresh');
+    }
+    
+  } catch (error) {
+    console.error('❌ Error loading persisted sessions:', error);
+  }
+}
 
 async function cleanupExpiredTokens() {
   const now = Date.now();
