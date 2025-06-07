@@ -72,9 +72,110 @@ const config = {
   refreshTokens: new Map(),
   sessions: new Map(),
   customerEmails: new Map(),
-  // 🔥 NEW: App refresh tokens storage
-  appRefreshTokens: new Map()
 };
+
+// 🔥 PERSISTENT SESSION STORAGE - Add this RIGHT AFTER the config object
+const fs = require('fs').promises;
+const path = require('path');
+
+const SESSION_FILE = '/tmp/sessions.json';
+const REFRESH_TOKENS_FILE = '/tmp/refresh_tokens.json';
+
+// Persistent session storage
+const sessions = new Map();
+const appRefreshTokens = new Map();
+
+// Load sessions on startup
+async function loadPersistedSessions() {
+  try {
+    console.log('📂 Loading persisted sessions...');
+    
+    try {
+      const sessionData = await fs.readFile(SESSION_FILE, 'utf8');
+      const sessionEntries = JSON.parse(sessionData);
+      
+      let loadedSessions = 0;
+      let expiredSessions = 0;
+      const now = Date.now();
+      
+      for (const [token, session] of sessionEntries) {
+        if (session.expiresAt && session.expiresAt > now) {
+          sessions.set(token, session);
+          loadedSessions++;
+          console.log(`📂 Restored session for ${session.email} - token: ${token.substring(0, 8)}...`);
+        } else {
+          expiredSessions++;
+        }
+      }
+      
+      console.log(`📂 Loaded ${loadedSessions} sessions from disk (${expiredSessions} expired)`);
+    } catch (error) {
+      console.log('📂 No existing sessions file found - starting fresh');
+    }
+    
+    try {
+      const refreshData = await fs.readFile(REFRESH_TOKENS_FILE, 'utf8');
+      const refreshEntries = JSON.parse(refreshData);
+      
+      let loadedRefreshTokens = 0;
+      const now = Date.now();
+      
+      for (const [token, data] of refreshEntries) {
+        if (data.expiresAt && data.expiresAt > now) {
+          appRefreshTokens.set(token, data);
+          loadedRefreshTokens++;
+        }
+      }
+      
+      console.log(`📂 Loaded ${loadedRefreshTokens} refresh tokens from disk`);
+    } catch (error) {
+      console.log('📂 No existing refresh tokens file found - starting fresh');
+    }
+    
+  } catch (error) {
+    console.error('❌ Error loading persisted sessions:', error);
+  }
+}
+
+// Save sessions to disk
+async function persistSessions() {
+  try {
+    const sessionEntries = Array.from(sessions.entries());
+    const refreshEntries = Array.from(appRefreshTokens.entries());
+    
+    await Promise.all([
+      fs.writeFile(SESSION_FILE, JSON.stringify(sessionEntries), 'utf8'),
+      fs.writeFile(REFRESH_TOKENS_FILE, JSON.stringify(refreshEntries), 'utf8')
+    ]);
+    
+    console.log(`💾 Persisted ${sessions.size} sessions and ${appRefreshTokens.size} refresh tokens`);
+  } catch (error) {
+    console.error('❌ Error persisting sessions:', error);
+  }
+}
+
+// Initialize persistence
+loadPersistedSessions();
+
+// Save every 2 minutes
+setInterval(async () => {
+  if (sessions.size > 0 || appRefreshTokens.size > 0) {
+    await persistSessions();
+  }
+}, 2 * 60 * 1000);
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('🔄 Server shutting down - saving sessions...');
+  await persistSessions();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('🔄 Server shutting down - saving sessions...');
+  await persistSessions();
+  process.exit(0);
+});
 
 // Shopify Customer Account API token management
 
@@ -1337,14 +1438,15 @@ app.post('/auth/verify-code', async (req, res) => {
     lastRefreshed: Date.now(),
   };
 
-  config.sessions.set(accessToken, sessionData);
-  config.appRefreshTokens.set(refreshToken, {
+  sessions.set(accessToken, sessionData);
+  appRefreshTokens.set(refreshToken, {
     accessToken,
     email,
     customerId,
     createdAt: Date.now(),
     expiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
   });
+  await persistSessions();
 
   app.post('/auth/refresh', async (req, res) => {
     const { refreshToken } = req.body;
@@ -1365,7 +1467,7 @@ app.post('/auth/verify-code', async (req, res) => {
     }
   
     // Get current session data
-    const currentSession = config.sessions.get(refreshData.accessToken);
+    const currentSession = sessions.get(refreshData.accessToken);
     if (!currentSession) {
       return res.status(401).json({ success: false, error: 'Session not found' });
     }
@@ -1383,17 +1485,17 @@ app.post('/auth/verify-code', async (req, res) => {
     };
   
     // Update storage
-    config.sessions.set(newAccessToken, newSessionData);
-    config.sessions.delete(refreshData.accessToken); // Remove old session
-    
-    config.appRefreshTokens.set(newRefreshToken, {
+    sessions.set(newAccessToken, newSessionData);
+    sessions.delete(refreshData.accessToken);
+    appRefreshTokens.set(newRefreshToken, {
       accessToken: newAccessToken,
       email: refreshData.email,
       customerId: refreshData.customerId,
       createdAt: Date.now(),
       expiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
     });
-    config.appRefreshTokens.delete(refreshToken); // Remove old refresh token
+    appRefreshTokens.delete(refreshToken);
+    await persistSessions();
   
     console.log(`🔄 Refreshed tokens for ${refreshData.email}`);
     console.log(`   New access token expires in: ${Math.round(config.tokenLifetimes.accessToken / (24 * 60 * 60))} days`);
@@ -1427,7 +1529,7 @@ app.post('/auth/verify-code', async (req, res) => {
 // ===== CUSTOMER DATA ENDPOINTS FOR FLUTTER APP =====
 
 // Middleware to authenticate app tokens
-const authenticateAppToken = (req, res, next) => {
+const authenticateAppToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -1436,7 +1538,7 @@ const authenticateAppToken = (req, res, next) => {
   }
 
   const token = authHeader.substring(7);
-  let session = config.sessions.get(token);
+  let session = sessions.get(token);
   
   if (!session) {
     console.log(`❌ Session not found for token: ${token.substring(0, 20)}...`);
@@ -1451,7 +1553,9 @@ const authenticateAppToken = (req, res, next) => {
   // 🔥 FIX: Check if session has expired
   if (session.expiresAt && session.expiresAt < Date.now()) {
     console.log(`❌ Session expired for ${session.email}`);
-    config.sessions.delete(token);
+    sessions.delete(token);
+    await persistSessions();
+
     
     return res.status(401).json({ 
       error: 'Session expired',
@@ -1462,7 +1566,8 @@ const authenticateAppToken = (req, res, next) => {
   // 🔥 FIX: Validate session data integrity
   if (!session.email || session.email === 'unknown@example.com' || !session.customerId) {
     console.log(`❌ Corrupted session detected for token: ${token.substring(0, 20)}...`);
-    config.sessions.delete(token);
+    sessions.delete(token);
+    await persistSessions();
     
     return res.status(401).json({ 
       error: 'Corrupted session',
@@ -8020,11 +8125,12 @@ app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
 });
 
 // POST /auth/logout - Logout
-app.post('/auth/logout', authenticateAppToken, (req, res) => {
+app.post('/auth/logout', authenticateAppToken, async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader.substring(7);
   
-  config.sessions.delete(token);
+  sessions.delete(token);
+  await persistSessions();
   
   res.json({ success: true });
 });
@@ -8782,7 +8888,7 @@ app.get('/health', (req, res) => {
 app.get('/debug/sessions', (req, res) => {
   const sessions = [];
   
-  for (const [token, session] of config.sessions.entries()) {
+  for (const [token, session] of sessions.entries()) {
     sessions.push({
       tokenPreview: token.substring(0, 20) + '...',
       email: session.email,
@@ -8794,27 +8900,28 @@ app.get('/debug/sessions', (req, res) => {
   }
   
   res.json({
-    totalSessions: config.sessions.size,
+    totalSessions: sessions.size,
     sessions: sessions,
     serverTime: Date.now(),
   });
 });
 
-function cleanupExpiredTokens() {
+async function cleanupExpiredTokens() {
   const now = Date.now();
   let cleanedSessions = 0;
   let cleanedRefreshTokens = 0;
   
   // Clean expired sessions
-  for (const [token, session] of config.sessions.entries()) {
+  for (const [token, session] of sessions.entries()) {
     if (session.expiresAt && session.expiresAt < now) {
-      config.sessions.delete(token);
+      sessions.delete(token);
+      await persistSessions();
       cleanedSessions++;
     }
   }
   
   // Clean expired refresh tokens
-  for (const [refreshToken, data] of config.appRefreshTokens.entries()) {
+  for (const [refreshToken, data] of appRefreshTokens.entries()) {
     if (data.expiresAt < now) {
       config.appRefreshTokens.delete(refreshToken);
       cleanedRefreshTokens++;
@@ -8827,11 +8934,13 @@ function cleanupExpiredTokens() {
 }
 
 // Run cleanup every 24 hours
-setInterval(cleanupExpiredTokens, 24 * 60 * 60 * 1000);
+setInterval(async () => {
+  await cleanupExpiredTokens();
+}, 24 * 60 * 60 * 1000);
 
 // Health check endpoint with token statistics
 app.get('/auth/health', (req, res) => {
-  const activeSessions = config.sessions.size;
+  const activeSessions = sessions.size;
   const activeRefreshTokens = config.appRefreshTokens.size;
   const pendingVerifications = config.verificationCodes.size;
   
@@ -8848,7 +8957,7 @@ app.get('/auth/health', (req, res) => {
   let totalAge = 0;
   let expiringSoon = 0;
   
-  for (const session of config.sessions.values()) {
+  for (const session of sessions.values()) {
     if (session.createdAt) {
       totalAge += now - session.createdAt;
     }
