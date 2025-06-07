@@ -86,35 +86,44 @@ const sessions = new Map();
 const appRefreshTokens = new Map();
 
 // Load sessions on startup
-async function loadPersistedSessions() {
+async function loadPersistedSessionsWithLogging() {
   try {
     console.log('📂 Loading persisted sessions...');
+    console.log(`📂 Sessions file: /tmp/sessions.json`);
+    console.log(`📂 Refresh tokens file: /tmp/refresh_tokens.json`);
     
     try {
-      const sessionData = await fs.readFile(SESSION_FILE, 'utf8');
+      const sessionData = await fs.readFile('/tmp/sessions.json', 'utf8');
       const sessionEntries = JSON.parse(sessionData);
+      
+      console.log(`📂 Raw sessions data length: ${sessionEntries.length}`);
       
       let loadedSessions = 0;
       let expiredSessions = 0;
       const now = Date.now();
       
       for (const [token, session] of sessionEntries) {
+        console.log(`📂 Processing session: ${token.substring(0, 8)}... for ${session.email}`);
         if (session.expiresAt && session.expiresAt > now) {
           sessions.set(token, session);
           loadedSessions++;
-          console.log(`📂 Restored session for ${session.email} - token: ${token.substring(0, 8)}...`);
+          console.log(`📂 ✅ Restored session for ${session.email} - token: ${token.substring(0, 8)}...`);
         } else {
           expiredSessions++;
+          console.log(`📂 ❌ Session expired for ${session.email}`);
         }
       }
       
-      console.log(`📂 Loaded ${loadedSessions} sessions from disk (${expiredSessions} expired)`);
+      console.log(`📂 FINAL: Loaded ${loadedSessions} sessions from disk (${expiredSessions} expired)`);
+      console.log(`📂 Sessions in memory after loading: ${sessions.size}`);
     } catch (error) {
       console.log('📂 No existing sessions file found - starting fresh');
+      console.log('📂 Error details:', error.message);
     }
     
+    // Similar for refresh tokens...
     try {
-      const refreshData = await fs.readFile(REFRESH_TOKENS_FILE, 'utf8');
+      const refreshData = await fs.readFile('/tmp/refresh_tokens.json', 'utf8');
       const refreshEntries = JSON.parse(refreshData);
       
       let loadedRefreshTokens = 0;
@@ -8992,69 +9001,6 @@ app.get('/debug/disk-sessions', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// 🔥 ADD better logging to your loadPersistedSessions function
-// FIND your loadPersistedSessions function and ADD these console.log lines:
-
-async function loadPersistedSessionsWithLogging() {
-  try {
-    console.log('📂 Loading persisted sessions...');
-    console.log(`📂 Sessions file: /tmp/sessions.json`);
-    console.log(`📂 Refresh tokens file: /tmp/refresh_tokens.json`);
-    
-    try {
-      const sessionData = await fs.readFile('/tmp/sessions.json', 'utf8');
-      const sessionEntries = JSON.parse(sessionData);
-      
-      console.log(`📂 Raw sessions data length: ${sessionEntries.length}`);
-      
-      let loadedSessions = 0;
-      let expiredSessions = 0;
-      const now = Date.now();
-      
-      for (const [token, session] of sessionEntries) {
-        console.log(`📂 Processing session: ${token.substring(0, 8)}... for ${session.email}`);
-        if (session.expiresAt && session.expiresAt > now) {
-          sessions.set(token, session);
-          loadedSessions++;
-          console.log(`📂 ✅ Restored session for ${session.email} - token: ${token.substring(0, 8)}...`);
-        } else {
-          expiredSessions++;
-          console.log(`📂 ❌ Session expired for ${session.email}`);
-        }
-      }
-      
-      console.log(`📂 FINAL: Loaded ${loadedSessions} sessions from disk (${expiredSessions} expired)`);
-      console.log(`📂 Sessions in memory after loading: ${sessions.size}`);
-    } catch (error) {
-      console.log('📂 No existing sessions file found - starting fresh');
-      console.log('📂 Error details:', error.message);
-    }
-    
-    // Similar for refresh tokens...
-    try {
-      const refreshData = await fs.readFile('/tmp/refresh_tokens.json', 'utf8');
-      const refreshEntries = JSON.parse(refreshData);
-      
-      let loadedRefreshTokens = 0;
-      const now = Date.now();
-      
-      for (const [token, data] of refreshEntries) {
-        if (data.expiresAt && data.expiresAt > now) {
-          appRefreshTokens.set(token, data);
-          loadedRefreshTokens++;
-        }
-      }
-      
-      console.log(`📂 Loaded ${loadedRefreshTokens} refresh tokens from disk`);
-    } catch (error) {
-      console.log('📂 No existing refresh tokens file found - starting fresh');
-    }
-    
-  } catch (error) {
-    console.error('❌ Error loading persisted sessions:', error);
-  }
-}
 
 async function cleanupExpiredTokens() {
   const now = Date.now();
