@@ -1546,34 +1546,23 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
             formattedArea
           }
           addresses(first: 50) {
-            edges {
-              node {
-                id
-                firstName
-                lastName
-                company
-                address1
-                address2
-                city
-                province
-                provinceCode
-                country
-                countryCodeV2
-                zip
-                phone
-                name
-                formattedArea
-              }
-            }
+            id
+            firstName
+            lastName
+            company
+            address1
+            address2
+            city
+            province
+            provinceCode
+            country
+            countryCodeV2
+            zip
+            phone
+            name
+            formattedArea
           }
-          # Customer lifetime stats
-          totalSpent {
-            amount
-            currencyCode
-          }
-          # Tags for segmentation
           tags
-          # Store credit accounts
           storeCreditAccounts(first: 10) {
             edges {
               node {
@@ -1582,11 +1571,9 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
                   amount
                   currencyCode
                 }
-                creditType
               }
             }
           }
-          # Customer metafields for custom data
           metafields(first: 20) {
             edges {
               node {
@@ -1653,24 +1640,24 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       emailMarketingOptInLevel: customer.emailMarketingConsent?.marketingOptInLevel,
       smsMarketingOptInLevel: customer.smsMarketingConsent?.marketingOptInLevel,
       
-      // Financial data
+      // Financial data - Calculate from orders separately
       totalSpent: {
-        amount: customer.totalSpent?.amount || '0',
-        currencyCode: customer.totalSpent?.currencyCode || 'EUR'
+        amount: '0', // Will need separate query
+        currencyCode: 'EUR'
       },
       storeCredit: {
         amount: totalStoreCredit.toFixed(2),
         currencyCode: 'EUR'
       },
       
-      // Address data
+      // Address data - FIXED structure
       defaultAddress: customer.defaultAddress,
-      addresses: customer.addresses?.edges?.map(edge => edge.node) || [],
+      addresses: customer.addresses || [],
       
       // Additional data
       tags: customer.tags || [],
       accountStatus: customer.state || 'enabled',
-      isVip: customer.tags?.includes('VIP') || totalStoreCredit > 100 || parseFloat(customer.totalSpent?.amount || 0) > 1000,
+      isVip: customer.tags?.includes('VIP') || totalStoreCredit > 100,
       
       // Custom metafields
       customData: customer.metafields?.edges?.reduce((acc, edge) => {
@@ -1701,9 +1688,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     
     console.log('📋 Fetching complete order history for:', customerEmail);
     console.log('📋 Filters - Page:', page, 'Limit:', limit, 'Status:', status);
-
-    // 🔥 REMOVED: await ensureValidShopifyToken(customerEmail);
-    // ✅ We use Admin API directly - no Shopify customer tokens needed!
     
     console.log('🔍 Using Shopify Admin API directly (no customer tokens needed)...');
 
@@ -1723,7 +1707,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
               node {
                 id
                 name
-                orderNumber
                 processedAt
                 createdAt
                 updatedAt
@@ -1828,7 +1811,7 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                   }
                 }
                 
-                # Line items with full product details
+                # Line items with valid fields only
                 lineItems(first: 250) {
                   edges {
                     node {
@@ -1845,8 +1828,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                         title
                         sku
                         price
-                        weight
-                        weightUnit
                         image {
                           url
                           altText
@@ -1902,31 +1883,27 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                   }
                 }
                 
-                # Fulfillment tracking
+                # Fulfillment tracking - FIXED structure
                 fulfillments(first: 10) {
-                  edges {
-                    node {
-                      id
-                      status
-                      trackingCompany
-                      trackingNumbers
-                      createdAt
-                      updatedAt
-                      location {
-                        name
-                      }
-                      fulfillmentLineItems(first: 50) {
-                        edges {
-                          node {
-                            id
-                            quantity
-                            lineItem {
-                              title
-                              variant {
-                                title
-                                sku
-                              }
-                            }
+                  id
+                  status
+                  trackingCompany
+                  trackingNumbers
+                  createdAt
+                  updatedAt
+                  location {
+                    name
+                  }
+                  fulfillmentLineItems(first: 50) {
+                    edges {
+                      node {
+                        id
+                        quantity
+                        lineItem {
+                          title
+                          variant {
+                            title
+                            sku
                           }
                         }
                       }
@@ -1934,66 +1911,46 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                   }
                 }
                 
-                # Returns and refunds
+                # Returns - FIXED structure
                 returns(first: 10) {
-                  edges {
-                    node {
-                      id
-                      status
-                      totalQuantity
-                      createdAt
-                      returnLineItems(first: 50) {
-                        edges {
-                          node {
-                            id
-                            quantity
-                            returnReason
-                            customerNote
-                            fulfillmentLineItem {
-                              lineItem {
-                                title
-                                variant {
-                                  title
-                                  sku
-                                }
-                              }
-                            }
-                          }
-                        }
+                  id
+                  status
+                  totalQuantity
+                  returnLineItems(first: 50) {
+                    edges {
+                      node {
+                        id
+                        quantity
+                        returnReason
+                        customerNote
                       }
                     }
                   }
                 }
                 
-                # Payment details
+                # Payment details - FIXED structure
                 transactions(first: 10) {
-                  edges {
-                    node {
-                      id
-                      kind
-                      status
-                      processedAt
-                      gateway
-                      paymentId
-                      amountSet {
-                        shopMoney {
-                          amount
-                          currencyCode
-                        }
-                      }
+                  id
+                  kind
+                  status
+                  processedAt
+                  gateway
+                  paymentId
+                  amountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
                     }
                   }
                 }
                 
-                # Additional metadata
+                # Additional metadata - VALID fields only
                 note
                 tags
                 sourceName
                 sourceIdentifier
-                sourceUrl
                 phone
                 email
-                customerUrl
               }
             }
           }
@@ -2039,7 +1996,7 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       return {
         id: order.id,
         name: order.name,
-        orderNumber: order.orderNumber,
+        orderNumber: parseInt(order.name.replace('#', '')) || 0, // Calculate from name
         processedAt: order.processedAt,
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
@@ -2118,16 +2075,16 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
           code: discount.node.code || null
         })),
         
-        // Fulfillment tracking
-        fulfillments: order.fulfillments.edges.map(fulfillment => ({
-          id: fulfillment.node.id,
-          status: fulfillment.node.status,
-          trackingCompany: fulfillment.node.trackingCompany,
-          trackingNumbers: fulfillment.node.trackingNumbers,
-          createdAt: fulfillment.node.createdAt,
-          updatedAt: fulfillment.node.updatedAt,
-          location: fulfillment.node.location?.name,
-          items: fulfillment.node.fulfillmentLineItems.edges.map(item => ({
+        // Fulfillment tracking - FIXED structure
+        fulfillments: order.fulfillments.map(fulfillment => ({
+          id: fulfillment.id,
+          status: fulfillment.status,
+          trackingCompany: fulfillment.trackingCompany,
+          trackingNumbers: fulfillment.trackingNumbers,
+          createdAt: fulfillment.createdAt,
+          updatedAt: fulfillment.updatedAt,
+          location: fulfillment.location?.name,
+          items: fulfillment.fulfillmentLineItems.edges.map(item => ({
             id: item.node.id,
             quantity: item.node.quantity,
             title: item.node.lineItem.title,
@@ -2135,32 +2092,29 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
           }))
         })),
         
-        // Returns
-        returns: order.returns.edges.map(returnItem => ({
-          id: returnItem.node.id,
-          status: returnItem.node.status,
-          totalQuantity: returnItem.node.totalQuantity,
-          createdAt: returnItem.node.createdAt,
-          items: returnItem.node.returnLineItems.edges.map(item => ({
+        // Returns - FIXED structure
+        returns: order.returns.map(returnItem => ({
+          id: returnItem.id,
+          status: returnItem.status,
+          totalQuantity: returnItem.totalQuantity,
+          items: returnItem.returnLineItems.edges.map(item => ({
             id: item.node.id,
             quantity: item.node.quantity,
             reason: item.node.returnReason,
-            customerNote: item.node.customerNote,
-            title: item.node.fulfillmentLineItem.lineItem.title,
-            variant: item.node.fulfillmentLineItem.lineItem.variant
+            customerNote: item.node.customerNote
           }))
         })),
         
-        // Payment transactions
-        transactions: order.transactions.edges.map(transaction => ({
-          id: transaction.node.id,
-          kind: transaction.node.kind,
-          status: transaction.node.status,
-          processedAt: transaction.node.processedAt,
-          gateway: transaction.node.gateway,
+        // Payment transactions - FIXED structure
+        transactions: order.transactions.map(transaction => ({
+          id: transaction.id,
+          kind: transaction.kind,
+          status: transaction.status,
+          processedAt: transaction.processedAt,
+          gateway: transaction.gateway,
           amount: {
-            amount: transaction.node.amountSet.shopMoney.amount,
-            currencyCode: transaction.node.amountSet.shopMoney.currencyCode
+            amount: transaction.amountSet.shopMoney.amount,
+            currencyCode: transaction.amountSet.shopMoney.currencyCode
           }
         })),
         
@@ -2175,9 +2129,9 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
         canReorder: order.displayFulfillmentStatus === 'FULFILLED',
         canReturn: order.displayFulfillmentStatus === 'FULFILLED' && 
                   order.displayFinancialStatus !== 'REFUNDED' &&
-                  order.returns.edges.length === 0,
-        hasTracking: order.fulfillments.edges.some(f => f.node.trackingNumbers && f.node.trackingNumbers.length > 0),
-        isReturnable: order.returns.edges.length === 0 && order.displayFulfillmentStatus === 'FULFILLED'
+                  order.returns.length === 0,
+        hasTracking: order.fulfillments.some(f => f.trackingNumbers && f.trackingNumbers.length > 0),
+        isReturnable: order.returns.length === 0 && order.displayFulfillmentStatus === 'FULFILLED'
       };
     });
 
