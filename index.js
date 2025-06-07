@@ -78,8 +78,8 @@ const config = {
 const fs = require('fs').promises;
 const path = require('path');
 
-const SESSION_FILE = '/tmp/sessions.json';
-const REFRESH_TOKENS_FILE = '/tmp/refresh_tokens.json';
+const SESSION_FILE = '/opt/render/project/src/data/sessions.json';
+const REFRESH_TOKENS_FILE = '/opt/render/project/src/data/refresh_tokens.json';
 
 // Persistent session storage
 const sessions = new Map();
@@ -89,11 +89,11 @@ const appRefreshTokens = new Map();
 async function loadPersistedSessionsWithLogging() {
   try {
     console.log('📂 Loading persisted sessions...');
-    console.log(`📂 Sessions file: /tmp/sessions.json`);
-    console.log(`📂 Refresh tokens file: /tmp/refresh_tokens.json`);
+    console.log(`📂 Sessions file: ${SESSION_FILE}`);
+    console.log(`📂 Refresh tokens file: ${REFRESH_TOKENS_FILE}`);
     
     try {
-      const sessionData = await fs.readFile('/tmp/sessions.json', 'utf8');
+      const sessionData = await fs.readFile(SESSION_FILE, 'utf8');
       const sessionEntries = JSON.parse(sessionData);
       
       console.log(`📂 Raw sessions data length: ${sessionEntries.length}`);
@@ -8935,8 +8935,8 @@ app.get('/debug/sessions', (req, res) => {
     persistenceEnabled: true,
     sessionStorageType: 'Map with disk persistence',
     diskFiles: {
-      sessionsFile: '/tmp/sessions.json',
-      refreshTokensFile: '/tmp/refresh_tokens.json'
+      sessionsFile: SESSION_FILE,
+      refreshTokensFile: REFRESH_TOKENS_FILE
     }
   });
 });
