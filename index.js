@@ -9086,6 +9086,177 @@ app.get('/auth/health', (req, res) => {
   });
 });
 
+// WISHLIST API ENDPOINTS
+
+const fs = require('fs').promises;
+const path = require('path');
+
+// Load wishlist data from JSON file
+async function loadWishlistData() {
+    try {
+        const filePath = path.join(__dirname, 'wishlist_data.json');
+        const data = await fs.readFile(filePath, 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            return {}; // Return empty object if file doesn't exist
+        }
+        throw error;
+    }
+}
+
+// Save wishlist data to JSON file
+async function saveWishlistData(data) {
+    try {
+        const filePath = path.join(__dirname, 'wishlist_data.json');
+        await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+    } catch (error) {
+        console.error('Error saving wishlist data:', error);
+        throw error;
+    }
+}
+
+// Get wishlist items for a customer
+app.get('/api/wishlist/items', authenticateToken, async (req, res) => {
+    try {
+        const customerId = req.user.customerId;
+        
+        if (!customerId) {
+            return res.status(400).json({ error: 'Customer ID not found' });
+        }
+
+        const wishlistData = await loadWishlistData();
+        const customerWishlist = wishlistData[customerId] || [];
+
+        res.json({
+            success: true,
+            items: customerWishlist,
+            count: customerWishlist.length
+        });
+    } catch (error) {
+        console.error('Error getting wishlist:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Add item to wishlist
+app.post('/api/wishlist/add', authenticateToken, async (req, res) => {
+    try {
+        const customerId = req.user.customerId;
+        
+        if (!customerId) {
+            return res.status(400).json({ error: 'Customer ID not found' });
+        }
+
+        const {
+            productId,
+            variantId,
+            title,
+            imageUrl,
+            price,
+            compareAtPrice,
+            sku,
+            selectedOptions
+        } = req.body;
+
+        if (!productId || !title) {
+            return res.status(400).json({ error: 'Product ID and title are required' });
+        }
+
+        const wishlistData = await loadWishlistData();
+        
+        if (!wishlistData[customerId]) {
+            wishlistData[customerId] = [];
+        }
+
+        // Check if item already exists
+        const existingItemIndex = wishlistData[customerId].findIndex(item => 
+            item.productId === productId && 
+            item.variantId === (variantId || productId) &&
+            JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions || {})
+        );
+
+        if (existingItemIndex !== -1) {
+            return res.json({
+                success: true,
+                message: 'Item already in wishlist',
+                alreadyExists: true
+            });
+        }
+
+        // Add new item
+        const newItem = {
+            id: Date.now().toString(),
+            productId,
+            variantId: variantId || productId,
+            title,
+            imageUrl,
+            price: parseFloat(price) || 0,
+            compareAtPrice: compareAtPrice ? parseFloat(compareAtPrice) : null,
+            sku,
+            selectedOptions: selectedOptions || {},
+            createdAt: new Date().toISOString()
+        };
+
+        wishlistData[customerId].push(newItem);
+        await saveWishlistData(wishlistData);
+
+        res.json({
+            success: true,
+            message: 'Item added to wishlist',
+            item: newItem
+        });
+    } catch (error) {
+        console.error('Error adding to wishlist:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Remove item from wishlist
+app.delete('/api/wishlist/remove', authenticateToken, async (req, res) => {
+    try {
+        const customerId = req.user.customerId;
+        
+        if (!customerId) {
+            return res.status(400).json({ error: 'Customer ID not found' });
+        }
+
+        const { productId, variantId, selectedOptions } = req.body;
+
+        if (!productId) {
+            return res.status(400).json({ error: 'Product ID is required' });
+        }
+
+        const wishlistData = await loadWishlistData();
+        
+        if (!wishlistData[customerId]) {
+            return res.json({ success: true, message: 'Item not in wishlist' });
+        }
+
+        // Find and remove item
+        const itemIndex = wishlistData[customerId].findIndex(item => 
+            item.productId === productId && 
+            item.variantId === (variantId || productId) &&
+            JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions || {})
+        );
+
+        if (itemIndex === -1) {
+            return res.json({ success: true, message: 'Item not found in wishlist' });
+        }
+
+        wishlistData[customerId].splice(itemIndex, 1);
+        await saveWishlistData(wishlistData);
+
+        res.json({
+            success: true,
+            message: 'Item removed from wishlist'
+        });
+    } catch (error) {
+        console.error('Error removing from wishlist:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
