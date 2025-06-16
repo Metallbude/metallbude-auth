@@ -9116,7 +9116,7 @@ async function saveWishlistData(data) {
 // Get wishlist items for a customer
 app.get('/api/wishlist/items', authenticateAppToken, async (req, res) => {
     try {
-        const customerId = req.user.customerId;
+        const customerId = req.session.customerId;
         
         if (!customerId) {
             return res.status(400).json({ error: 'Customer ID not found' });
@@ -9139,7 +9139,7 @@ app.get('/api/wishlist/items', authenticateAppToken, async (req, res) => {
 // Add item to wishlist
 app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
     try {
-        const customerId = req.user.customerId;
+        const customerId = req.session.customerId;
         
         if (!customerId) {
             return res.status(400).json({ error: 'Customer ID not found' });
@@ -9212,7 +9212,7 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
 // Remove item from wishlist
 app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
     try {
-        const customerId = req.user.customerId;
+        const customerId = req.session.customerId;
         
         if (!customerId) {
             return res.status(400).json({ error: 'Customer ID not found' });
