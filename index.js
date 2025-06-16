@@ -9088,6 +9088,72 @@ app.get('/auth/health', (req, res) => {
 
 // WISHLIST API ENDPOINTS
 
+// Sync wishlist to Shopify customer metafields
+async function syncWishlistToShopify(customerId, wishlistItems) {
+    try {
+        console.log('🔄 Syncing wishlist to Shopify metafields for customer:', customerId);
+        
+        // Convert wishlist items to simple product IDs for Shopify
+        const productIds = wishlistItems.map(item => item.productId);
+        
+        const mutation = `
+            mutation customerUpdate($input: CustomerInput!) {
+                customerUpdate(input: $input) {
+                    customer {
+                        id
+                        metafields(first: 1, namespace: "customer", keys: ["wishlist"]) {
+                            edges {
+                                node {
+                                    id
+                                    value
+                                }
+                            }
+                        }
+                    }
+                    userErrors {
+                        field
+                        message
+                    }
+                }
+            }
+        `;
+
+        const variables = {
+            input: {
+                id: customerId,
+                metafields: [
+                    {
+                        namespace: "customer",
+                        key: "wishlist",
+                        value: JSON.stringify(productIds),
+                        type: "json"
+                    }
+                ]
+            }
+        };
+
+        const response = await axios.post(
+            config.adminApiUrl,
+            { query: mutation, variables },
+            {
+                headers: {
+                    'X-Shopify-Access-Token': config.adminToken,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        if (response.data.data?.customerUpdate?.userErrors?.length > 0) {
+            console.error('❌ Shopify sync errors:', response.data.data.customerUpdate.userErrors);
+        } else {
+            console.log('✅ Successfully synced wishlist to Shopify metafields');
+        }
+    } catch (error) {
+        console.error('❌ Error syncing wishlist to Shopify:', error.message);
+        // Don't throw error - wishlist should still work even if sync fails
+    }
+}
+
 // Load wishlist data from JSON file
 async function loadWishlistData() {
     try {
@@ -9198,6 +9264,9 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
         wishlistData[customerId].push(newItem);
         await saveWishlistData(wishlistData);
 
+        // Sync to Shopify metafields
+        await syncWishlistToShopify(customerId, wishlistData[customerId]);
+
         res.json({
             success: true,
             message: 'Item added to wishlist',
@@ -9243,6 +9312,9 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
 
         wishlistData[customerId].splice(itemIndex, 1);
         await saveWishlistData(wishlistData);
+
+        // Sync to Shopify metafields
+        await syncWishlistToShopify(customerId, wishlistData[customerId]);
 
         res.json({
             success: true,
