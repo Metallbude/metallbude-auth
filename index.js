@@ -9088,7 +9088,6 @@ app.get('/auth/health', (req, res) => {
 
 // WISHLIST API ENDPOINTS
 
-const fs = require('fs').promises;
 const path = require('path');
 
 // Load wishlist data from JSON file
