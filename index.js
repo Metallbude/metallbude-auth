@@ -9114,7 +9114,7 @@ async function saveWishlistData(data) {
 }
 
 // Get wishlist items for a customer
-app.get('/api/wishlist/items', authenticateToken, async (req, res) => {
+app.get('/api/wishlist/items', authenticateAppToken, async (req, res) => {
     try {
         const customerId = req.user.customerId;
         
@@ -9137,7 +9137,7 @@ app.get('/api/wishlist/items', authenticateToken, async (req, res) => {
 });
 
 // Add item to wishlist
-app.post('/api/wishlist/add', authenticateToken, async (req, res) => {
+app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
     try {
         const customerId = req.user.customerId;
         
@@ -9210,7 +9210,7 @@ app.post('/api/wishlist/add', authenticateToken, async (req, res) => {
 });
 
 // Remove item from wishlist
-app.delete('/api/wishlist/remove', authenticateToken, async (req, res) => {
+app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
     try {
         const customerId = req.user.customerId;
         
