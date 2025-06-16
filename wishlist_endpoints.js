@@ -55,6 +55,58 @@ function extractCustomerIdFromToken(token) {
     }
 }
 
+// Shopify integration for syncing wishlist to customer metafields
+async function syncToShopifyCustomerMetafields(customerId, wishlistItems) {
+    try {
+        const shopifyAccessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+        const shopifyDomain = process.env.SHOPIFY_DOMAIN || 'metallbude.myshopify.com';
+        
+        if (!shopifyAccessToken) {
+            console.log('No Shopify access token - skipping sync');
+            return;
+        }
+
+        // Extract just the customer ID number from the GID format
+        const customerIdNumber = customerId.includes('Customer/') 
+            ? customerId.split('Customer/')[1] 
+            : customerId;
+
+        // Prepare wishlist data for Shopify metafield
+        const wishlistData = {
+            metafield: {
+                namespace: 'custom',
+                key: 'wishlist_items',
+                value: JSON.stringify(wishlistItems.map(item => ({
+                    productId: item.productId,
+                    variantId: item.variantId,
+                    title: item.title,
+                    selectedOptions: item.selectedOptions,
+                    addedAt: item.createdAt
+                }))),
+                type: 'json'
+            }
+        };
+
+        // Update customer metafield in Shopify
+        const response = await fetch(`https://${shopifyDomain}/admin/api/2023-10/customers/${customerIdNumber}/metafields.json`, {
+            method: 'POST',
+            headers: {
+                'X-Shopify-Access-Token': shopifyAccessToken,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(wishlistData)
+        });
+
+        if (response.ok) {
+            console.log('✅ Wishlist synced to Shopify customer metafields');
+        } else {
+            console.log('⚠️ Failed to sync wishlist to Shopify:', response.status);
+        }
+    } catch (error) {
+        console.error('Error syncing to Shopify metafields:', error);
+    }
+}
+
 // WISHLIST API ENDPOINTS
 
 // Get wishlist items for a customer
@@ -141,6 +193,7 @@ app.post('/api/wishlist/add', authenticateToken, async (req, res) => {
 
         wishlistData[customerId].push(newItem);
         await saveWishlistData(wishlistData);
+        await syncToShopifyCustomerMetafields(customerId, wishlistData[customerId]); // Sync to Shopify
 
         res.json({
             success: true,
@@ -187,6 +240,7 @@ app.delete('/api/wishlist/remove', authenticateToken, async (req, res) => {
 
         wishlistData[customerId].splice(itemIndex, 1);
         await saveWishlistData(wishlistData);
+        await syncToShopifyCustomerMetafields(customerId, wishlistData[customerId]); // Sync to Shopify
 
         res.json({
             success: true,
@@ -210,6 +264,7 @@ app.delete('/api/wishlist/clear', authenticateToken, async (req, res) => {
         const wishlistData = await loadWishlistData();
         wishlistData[customerId] = [];
         await saveWishlistData(wishlistData);
+        await syncToShopifyCustomerMetafields(customerId, wishlistData[customerId]); // Sync to Shopify
 
         res.json({
             success: true,
