@@ -6,6 +6,24 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const axios = require('axios');
 
+// Firebase services
+const { initializeFirebase } = require('./services/firebase');
+const WishlistService = require('./services/wishlist');
+
+// Initialize Firebase before Express app
+let wishlistService = null;
+let firebaseEnabled = false;
+
+try {
+  initializeFirebase();
+  wishlistService = new WishlistService();
+  firebaseEnabled = true;
+  console.log('🔥 Firebase initialized successfully');
+} catch (error) {
+  console.error('❌ Firebase initialization failed:', error.message);
+  console.log('⚠️ Server will continue without Firebase - wishlist features will use Shopify fallback');
+}
+
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -3704,44 +3722,78 @@ app.get('/customer/analytics', authenticateAppToken, async (req, res) => {
 
 // ===== WISHLIST & FAVORITES =====
 
-// GET /customer/wishlist - Customer wishlist/favorites
+// GET /customer/wishlist - Customer wishlist/favorites (Firebase + Shopify hybrid)
 app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
   try {
     console.log('❤️ Fetching wishlist for:', req.session.email);
 
-    // Get customer metafield containing wishlist
-    const query = `
-      query getCustomerWishlist($customerId: ID!) {
-        customer(id: $customerId) {
-          id
-          metafield(namespace: "customer", key: "wishlist") {
-            value
+    let wishlistProductIds = [];
+    let useFirebase = firebaseEnabled && wishlistService;
+
+    if (useFirebase) {
+      try {
+        // Try Firebase first
+        wishlistProductIds = await wishlistService.getWishlistProductIds(
+          req.session.customerId, 
+          req.session.email
+        );
+        console.log(`🔥 Firebase returned ${wishlistProductIds.length} wishlist items`);
+      } catch (firebaseError) {
+        console.error('❌ Firebase wishlist fetch failed, falling back to Shopify:', firebaseError.message);
+        useFirebase = false;
+      }
+    }
+
+    // Fallback to Shopify if Firebase fails or is not enabled
+    if (!useFirebase || wishlistProductIds.length === 0) {
+      console.log('📦 Using Shopify metafield for wishlist');
+      
+      const query = `
+        query getCustomerWishlist($customerId: ID!) {
+          customer(id: $customerId) {
+            id
+            metafield(namespace: "customer", key: "wishlist") {
+              value
+            }
           }
         }
-      }
-    `;
+      `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: { customerId: req.session.customerId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
+      const response = await axios.post(
+        config.adminApiUrl,
+        {
+          query,
+          variables: { customerId: req.session.customerId }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          }
         }
-      }
-    );
+      );
 
-    let wishlistProductIds = [];
-    const metafield = response.data.data?.customer?.metafield;
-    if (metafield?.value) {
-      try {
-        wishlistProductIds = JSON.parse(metafield.value);
-      } catch (e) {
-        wishlistProductIds = metafield.value.split(',').filter(id => id.trim());
+      const metafield = response.data.data?.customer?.metafield;
+      if (metafield?.value) {
+        try {
+          wishlistProductIds = JSON.parse(metafield.value);
+        } catch (e) {
+          wishlistProductIds = metafield.value.split(',').filter(id => id.trim());
+        }
+
+        // If we found Shopify data and Firebase is working, sync it
+        if (wishlistProductIds.length > 0 && useFirebase && wishlistService) {
+          try {
+            await wishlistService.syncFromShopify(
+              req.session.customerId,
+              req.session.email,
+              wishlistProductIds
+            );
+            console.log('🔄 Successfully synced Shopify wishlist to Firebase');
+          } catch (syncError) {
+            console.error('❌ Failed to sync Shopify wishlist to Firebase:', syncError.message);
+          }
+        }
       }
     }
 
@@ -3868,124 +3920,158 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
   }
 });
 
-// POST /customer/wishlist - Add/remove from wishlist
+// POST /customer/wishlist - Add/remove from wishlist (Firebase + Shopify hybrid)
 app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
   try {
     const { productId, action = 'add' } = req.body; // action: 'add' or 'remove'
     console.log(`❤️ ${action === 'add' ? 'Adding to' : 'Removing from'} wishlist:`, productId);
 
-    // Get current wishlist
-    const getQuery = `
-      query getCustomerWishlist($customerId: ID!) {
-        customer(id: $customerId) {
-          id
-          metafield(namespace: "customer", key: "wishlist") {
-            id
-            value
-          }
-        }
-      }
-    `;
+    let result;
+    let useFirebase = firebaseEnabled && wishlistService;
 
-    const getResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: getQuery,
-        variables: { customerId: req.session.customerId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    let currentWishlist = [];
-    const existingMetafield = getResponse.data.data?.customer?.metafield;
-    
-    if (existingMetafield?.value) {
+    if (useFirebase) {
       try {
-        currentWishlist = JSON.parse(existingMetafield.value);
-      } catch (e) {
-        currentWishlist = existingMetafield.value.split(',').filter(id => id.trim());
+        // Try Firebase first
+        if (action === 'add') {
+          result = await wishlistService.addToWishlist(
+            req.session.customerId,
+            req.session.email,
+            productId
+          );
+        } else if (action === 'remove') {
+          result = await wishlistService.removeFromWishlist(
+            req.session.customerId,
+            req.session.email,
+            productId
+          );
+        }
+        console.log('🔥 Firebase wishlist operation successful');
+      } catch (firebaseError) {
+        console.error('❌ Firebase wishlist operation failed, falling back to Shopify:', firebaseError.message);
+        useFirebase = false;
       }
     }
 
-    // Update wishlist
-    if (action === 'add' && !currentWishlist.includes(productId)) {
-      currentWishlist.push(productId);
-    } else if (action === 'remove') {
-      currentWishlist = currentWishlist.filter(id => id !== productId);
+    // Fallback to Shopify if Firebase fails or is not enabled
+    if (!useFirebase) {
+      console.log('📦 Using Shopify metafield for wishlist operation');
+      
+      // Get current wishlist from Shopify
+      const getQuery = `
+        query getCustomerWishlist($customerId: ID!) {
+          customer(id: $customerId) {
+            id
+            metafield(namespace: "customer", key: "wishlist") {
+              id
+              value
+            }
+          }
+        }
+      `;
+
+      const getResponse = await axios.post(
+        config.adminApiUrl,
+        {
+          query: getQuery,
+          variables: { customerId: req.session.customerId }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      let currentWishlist = [];
+      const existingMetafield = getResponse.data.data?.customer?.metafield;
+      
+      if (existingMetafield?.value) {
+        try {
+          currentWishlist = JSON.parse(existingMetafield.value);
+        } catch (e) {
+          currentWishlist = existingMetafield.value.split(',').filter(id => id.trim());
+        }
+      }
+
+      // Update wishlist
+      if (action === 'add' && !currentWishlist.includes(productId)) {
+        currentWishlist.push(productId);
+      } else if (action === 'remove') {
+        currentWishlist = currentWishlist.filter(id => id !== productId);
+      }
+
+      // Save updated wishlist to Shopify
+      const updateMutation = existingMetafield?.id ? `
+        mutation updateCustomerMetafield($metafieldId: ID!, $value: String!) {
+          metafieldUpdate(metafield: {id: $metafieldId, value: $value}) {
+            metafield {
+              id
+              value
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      ` : `
+        mutation createCustomerMetafield($customerId: ID!, $value: String!) {
+          customerUpdate(
+            input: {
+              id: $customerId,
+              metafields: [{
+                namespace: "customer",
+                key: "wishlist",
+                value: $value,
+                type: "json"
+              }]
+            }
+          ) {
+            customer {
+              id
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const updateVariables = existingMetafield?.id ? {
+        metafieldId: existingMetafield.id,
+        value: JSON.stringify(currentWishlist)
+      } : {
+        customerId: req.session.customerId,
+        value: JSON.stringify(currentWishlist)
+      };
+
+      await axios.post(
+        config.adminApiUrl,
+        {
+          query: updateMutation,
+          variables: updateVariables
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      result = { 
+        success: true, 
+        action,
+        productId,
+        wishlistCount: currentWishlist.length,
+        source: 'shopify_fallback'
+      };
     }
-
-    // Save updated wishlist
-    const updateMutation = existingMetafield?.id ? `
-      mutation updateCustomerMetafield($metafieldId: ID!, $value: String!) {
-        metafieldUpdate(metafield: {id: $metafieldId, value: $value}) {
-          metafield {
-            id
-            value
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    ` : `
-      mutation createCustomerMetafield($customerId: ID!, $value: String!) {
-        customerUpdate(
-          input: {
-            id: $customerId,
-            metafields: [{
-              namespace: "customer",
-              key: "wishlist",
-              value: $value,
-              type: "json"
-            }]
-          }
-        ) {
-          customer {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const updateVariables = existingMetafield?.id ? {
-      metafieldId: existingMetafield.id,
-      value: JSON.stringify(currentWishlist)
-    } : {
-      customerId: req.session.customerId,
-      value: JSON.stringify(currentWishlist)
-    };
-
-    const updateResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: updateMutation,
-        variables: updateVariables
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
 
     console.log(`✅ Wishlist updated successfully - ${action}ed product ${productId}`);
-    res.json({ 
-      success: true, 
-      action,
-      productId,
-      wishlistCount: currentWishlist.length 
-    });
+    res.json(result);
 
   } catch (error) {
     console.error('❌ Wishlist update error:', error);
@@ -8882,16 +8968,43 @@ app.get('/dashboard', (req, res) => {
 });
 
 // Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok',
-    mode: 'combined',
-    oauth: true,
-    oneTimeCode: true,
-    customerEndpoints: true,
-    returnManagement: true,
-    issuer: config.issuer
-  });
+app.get('/health', async (req, res) => {
+  try {
+    let firebaseHealth = { status: 'disabled', message: 'Firebase not initialized' };
+    
+    // Check Firebase connectivity if enabled
+    if (firebaseEnabled && wishlistService) {
+      try {
+        firebaseHealth = await wishlistService.healthCheck();
+      } catch (error) {
+        firebaseHealth = { status: 'error', error: error.message };
+      }
+    }
+    
+    res.json({ 
+      status: 'ok',
+      mode: 'combined',
+      oauth: true,
+      oneTimeCode: true,
+      customerEndpoints: true,
+      returnManagement: true,
+      issuer: config.issuer,
+      firebase: firebaseHealth,
+      firebaseEnabled
+    });
+  } catch (error) {
+    res.json({ 
+      status: 'ok',
+      mode: 'combined',
+      oauth: true,
+      oneTimeCode: true,
+      customerEndpoints: true,
+      returnManagement: true,
+      issuer: config.issuer,
+      firebase: { status: 'error', error: error.message },
+      firebaseEnabled
+    });
+  }
 });
 
 app.get('/debug/sessions', (req, res) => {
