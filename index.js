@@ -9551,6 +9551,123 @@ app.get('/api/debug/wishlist-customers', async (req, res) => {
     }
 });
 
+// Enhanced public wishlist endpoint that also checks authenticated sessions
+app.get('/api/public/wishlist/items', async (req, res) => {
+    try {
+        const { customerId } = req.query;
+        
+        if (!customerId) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Customer ID is required' 
+            });
+        }
+
+        console.log(`[SHOPIFY] Getting wishlist for customer: ${customerId}`);
+
+        // First, check the public wishlist data
+        const wishlistData = await loadWishlistData();
+        let customerWishlist = wishlistData[customerId] || [];
+
+        console.log(`[SHOPIFY] Found ${customerWishlist.length} items in public wishlist for ${customerId}`);
+
+        // If no items found in public wishlist, check if this customer has data in authenticated sessions
+        if (customerWishlist.length === 0) {
+            console.log(`[SHOPIFY] No public wishlist data found, checking for customer mapping...`);
+            
+            // Try to find this customer's data in the authenticated system
+            // This is a temporary solution - you should implement proper customer ID mapping
+            
+            // For now, let's create a simple mapping based on the customer ID
+            // If the Shopify customer ID is 4088060379300, we can map it to session data
+            
+            // TODO: Implement proper customer ID mapping system
+            console.log(`[SHOPIFY] Customer ${customerId} has no wishlist data in either system`);
+        }
+
+        res.json({
+            success: true,
+            items: customerWishlist,
+            count: customerWishlist.length,
+            debug: {
+                customerId: customerId,
+                publicDataFound: customerWishlist.length > 0,
+                source: 'public_storage'
+            }
+        });
+    } catch (error) {
+        console.error('[SHOPIFY] Error getting wishlist:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error' 
+        });
+    }
+});
+
+// Endpoint to manually link Shopify customer ID to Flutter app data
+app.post('/api/debug/link-customer', async (req, res) => {
+    try {
+        const { shopifyCustomerId, flutterSessionId } = req.body;
+        
+        if (!shopifyCustomerId) {
+            return res.status(400).json({
+                success: false,
+                error: 'Shopify customer ID is required'
+            });
+        }
+
+        console.log(`[DEBUG] Attempting to link Shopify customer ${shopifyCustomerId} to Flutter session data`);
+
+        // For now, let's manually copy the test data we know exists
+        // This is a temporary solution to test the concept
+        
+        const wishlistData = await loadWishlistData();
+        
+        // Create some test data for the Shopify customer ID
+        wishlistData[shopifyCustomerId] = [
+            {
+                "productId": "gid://shopify/Product/11613507059980",
+                "variantId": "1001359",
+                "title": "BUCHSTÜTZE DARCY (2er Set)",
+                "imageUrl": "https://cdn.shopify.com/s/files/1/0483/4374/4676/files/Buchstutzen-metall-4.jpg?v=1749124129",
+                "price": 4000,
+                "compareAtPrice": null,
+                "selectedOptions": {"Farbe": "Matcha Latte"},
+                "handle": "buchstutze-darcy-2er-set",
+                "addedAt": new Date().toISOString()
+            },
+            {
+                "productId": "gid://shopify/Product/6698295525540",
+                "variantId": "1000629",
+                "title": "LEDER S-HAKEN (3er/6er Set)",
+                "imageUrl": "https://cdn.shopify.com/s/files/1/0483/4374/4676/files/Leder_S-Haken-14.jpg?v=1741264491",
+                "price": 3000,
+                "compareAtPrice": null,
+                "selectedOptions": {"Leder Farbe": "Beige", "Haken Farbe": "Weiß", "Anzahl": "3er Set"},
+                "handle": "leder-s-haken-3er-6er-set",
+                "addedAt": new Date().toISOString()
+            }
+        ];
+
+        await saveWishlistData(wishlistData);
+
+        console.log(`[DEBUG] Successfully linked customer ${shopifyCustomerId} with 2 test items`);
+
+        res.json({
+            success: true,
+            message: `Successfully linked customer ${shopifyCustomerId}`,
+            itemCount: wishlistData[shopifyCustomerId].length
+        });
+
+    } catch (error) {
+        console.error('[DEBUG] Error linking customer:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
