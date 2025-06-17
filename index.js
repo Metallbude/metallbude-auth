@@ -9528,6 +9528,29 @@ app.delete('/api/public/wishlist/remove', async (req, res) => {
     }
 });
 
+// Debug endpoint to see all customer IDs in wishlist (temporary)
+app.get('/api/debug/wishlist-customers', async (req, res) => {
+    try {
+        const wishlistData = await loadWishlistData();
+        const customerIds = Object.keys(wishlistData);
+        
+        res.json({
+            success: true,
+            customerIds: customerIds,
+            totalCustomers: customerIds.length,
+            dataSnapshot: Object.fromEntries(
+                customerIds.map(id => [id, wishlistData[id].length])
+            )
+        });
+    } catch (error) {
+        console.error('Debug endpoint error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
