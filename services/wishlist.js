@@ -5,6 +5,13 @@ class WishlistService {
     this.db = getFirestore();
   }
 
+  // Sanitize customer ID for Firestore (remove invalid characters)
+  _sanitizeCustomerId(customerId) {
+    // Convert Shopify GID to valid Firestore document ID
+    // gid://shopify/Customer/4088060379300 -> shopify_Customer_4088060379300
+    return customerId.replace(/[\/\:]/g, '_').replace(/^gid_+/, '');
+  }
+
   // Get customer's wishlist
   async getWishlist(customerId, customerEmail) {
     try {
@@ -15,7 +22,11 @@ class WishlistService {
         throw new Error('Firebase Firestore not initialized');
       }
 
-      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(customerId);
+      // Sanitize customer ID for Firestore document path
+      const sanitizedCustomerId = this._sanitizeCustomerId(customerId);
+      console.log(`🔥 [FIREBASE] Using sanitized document ID: ${sanitizedCustomerId}`);
+
+      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(sanitizedCustomerId);
       const wishlistDoc = await wishlistRef.get();
 
       if (!wishlistDoc.exists) {
@@ -50,7 +61,11 @@ class WishlistService {
         throw new Error('Firebase Firestore not initialized');
       }
 
-      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(customerId);
+      // Sanitize customer ID for Firestore document path
+      const sanitizedCustomerId = this._sanitizeCustomerId(customerId);
+      console.log(`🔥 [FIREBASE] Using sanitized document ID: ${sanitizedCustomerId}`);
+
+      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(sanitizedCustomerId);
       const wishlistDoc = await wishlistRef.get();
 
       let items = [];
@@ -104,7 +119,11 @@ class WishlistService {
         throw new Error('Firebase Firestore not initialized');
       }
 
-      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(customerId);
+      // Sanitize customer ID for Firestore document path
+      const sanitizedCustomerId = this._sanitizeCustomerId(customerId);
+      console.log(`🔥 [FIREBASE] Using sanitized document ID: ${sanitizedCustomerId}`);
+
+      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(sanitizedCustomerId);
       const wishlistDoc = await wishlistRef.get();
 
       if (!wishlistDoc.exists) {
@@ -147,7 +166,11 @@ class WishlistService {
       console.log(`🔄 Syncing Shopify wishlist to Firebase for ${customerEmail}`);
       console.log(`📊 Shopify items to sync: ${shopifyWishlistItems.length}`);
 
-      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(customerId);
+      // Sanitize customer ID for Firestore document path
+      const sanitizedCustomerId = this._sanitizeCustomerId(customerId);
+      console.log(`🔥 [FIREBASE] Using sanitized document ID: ${sanitizedCustomerId}`);
+
+      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(sanitizedCustomerId);
       
       // Convert Shopify items to Firebase format
       const firebaseItems = shopifyWishlistItems.map(productId => ({
