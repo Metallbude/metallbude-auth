@@ -7,7 +7,7 @@ const cors = require('cors');
 const axios = require('axios');
 
 // Firebase services
-const { initializeFirebase } = require('./services/firebase');
+const { initializeFirebase, isFirebaseReady } = require('./services/firebase');
 const WishlistService = require('./services/wishlist');
 
 // Initialize Firebase before Express app
@@ -28,10 +28,59 @@ try {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+// Security middleware - Add security headers
+app.use((req, res, next) => {
+  // Security headers
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  
+  // HTTPS enforcement in production
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  
+  next();
+});
+
+// CORS configuration with environment-specific origins
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = process.env.NODE_ENV === 'production' 
+      ? [
+          'https://metallbude.com',
+          'https://www.metallbude.com',
+          'https://metallbude-de.myshopify.com'
+        ]
+      : [
+          'http://localhost:3000',
+          'http://127.0.0.1:3000',
+          'http://localhost:8080',
+          'https://metallbude-de.myshopify.com' // Allow Shopify in development too
+        ];
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log(`🚫 CORS blocked origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+};
+
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Body parsing middleware with size limits
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
 // Generate RSA key pair for signing tokens
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
@@ -8981,8 +9030,9 @@ app.get('/health', async (req, res) => {
       }
     }
     
-    res.json({ 
+    const healthInfo = {
       status: 'ok',
+      timestamp: new Date().toISOString(),
       mode: 'combined',
       oauth: true,
       oneTimeCode: true,
@@ -8990,17 +9040,25 @@ app.get('/health', async (req, res) => {
       returnManagement: true,
       issuer: config.issuer,
       firebase: firebaseHealth,
-      firebaseEnabled
-    });
+      firebaseEnabled,
+      environment: process.env.NODE_ENV || 'development',
+      version: '2.0.0'
+    };
+    
+    // Don't expose sensitive information in production
+    if (process.env.NODE_ENV !== 'production') {
+      healthInfo.memoryUsage = process.memoryUsage();
+      healthInfo.uptime = Math.floor(process.uptime());
+      healthInfo.nodeVersion = process.version;
+    }
+    
+    res.json(healthInfo);
   } catch (error) {
-    res.json({ 
-      status: 'ok',
-      mode: 'combined',
-      oauth: true,
-      oneTimeCode: true,
-      customerEndpoints: true,
-      returnManagement: true,
-      issuer: config.issuer,
+    console.error('❌ Health check error:', error.message);
+    res.status(500).json({ 
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      error: process.env.NODE_ENV === 'production' ? 'Internal server error' : error.message,
       firebase: { status: 'error', error: error.message },
       firebaseEnabled
     });
