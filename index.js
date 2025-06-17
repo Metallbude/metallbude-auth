@@ -9652,7 +9652,10 @@ app.get('/api/public/wishlist/items', async (req, res) => {
         if (firebaseEnabled && wishlistService) {
             try {
                 console.log(`[SHOPIFY] Trying Firebase for customer: ${customerId}`);
-                const firebaseItems = await wishlistService.getWishlistProductIds(customerId, 'anonymous@shopify.com');
+                
+                // Convert simple customer ID to full Shopify format for Firebase lookup
+                const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+                const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, 'anonymous@shopify.com');
                 
                 if (firebaseItems.length > 0) {
                     console.log(`[SHOPIFY] Found ${firebaseItems.length} items in Firebase`);
