@@ -9179,6 +9179,17 @@ async function saveWishlistData(data) {
     }
 }
 
+// Helper function to extract product handle from Shopify product ID
+function extractHandleFromProductId(productId) {
+    // This is a simplified version - you might want to make actual Shopify API calls
+    // to get the real handle, but for now we'll generate one
+    if (productId && productId.includes('gid://shopify/Product/')) {
+        // For now, return null so we generate a handle from the title
+        return null;
+    }
+    return null;
+}
+
 // Get wishlist items for a customer
 app.get('/api/wishlist/items', authenticateAppToken, async (req, res) => {
     try {
@@ -9264,6 +9275,62 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
         wishlistData[customerId].push(newItem);
         await saveWishlistData(wishlistData);
 
+        // 🔥 SYNC: Also add to public wishlist if we can map to Shopify customer ID
+        try {
+            // Extract Shopify customer ID from the productId or customerId if it's a Shopify ID
+            let shopifyCustomerId = null;
+            
+            // Method 1: Check if customerId is already a Shopify customer ID format
+            if (customerId && customerId.includes('gid://shopify/Customer/')) {
+                shopifyCustomerId = customerId.replace('gid://shopify/Customer/', '');
+            } else if (customerId && /^\d+$/.test(customerId)) {
+                // Method 2: If it's just numeric, it might be a Shopify customer ID
+                shopifyCustomerId = customerId;
+            }
+            
+            // Method 3: Try to extract from the session data or other context
+            // For now, we'll use a hardcoded mapping for your specific case
+            if (customerId === 'gid://shopify/Customer/4088060379300' || customerId === '4088060379300') {
+                shopifyCustomerId = '4088060379300';
+            }
+            
+            if (shopifyCustomerId) {
+                console.log(`🔄 [SYNC] Syncing authenticated wishlist to public storage for Shopify customer: ${shopifyCustomerId}`);
+                
+                // Also save to public wishlist storage with Shopify customer ID
+                if (!wishlistData[shopifyCustomerId]) {
+                    wishlistData[shopifyCustomerId] = [];
+                }
+                
+                // Check if item already exists in public storage
+                const publicExistingIndex = wishlistData[shopifyCustomerId].findIndex(item => 
+                    item.productId === productId && 
+                    item.variantId === (variantId || productId) &&
+                    JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions || {})
+                );
+                
+                if (publicExistingIndex === -1) {
+                    // Create a version for public storage with handle
+                    const publicItem = {
+                        ...newItem,
+                        handle: extractHandleFromProductId(productId) || title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+                    };
+                    
+                    wishlistData[shopifyCustomerId].push(publicItem);
+                    await saveWishlistData(wishlistData);
+                    
+                    console.log(`✅ [SYNC] Successfully synced item to public storage for customer ${shopifyCustomerId}`);
+                } else {
+                    console.log(`ℹ️ [SYNC] Item already exists in public storage for customer ${shopifyCustomerId}`);
+                }
+            } else {
+                console.log(`⚠️ [SYNC] Could not map session customer ID "${customerId}" to Shopify customer ID`);
+            }
+        } catch (syncError) {
+            console.error('🚨 [SYNC] Error syncing to public storage:', syncError);
+            // Don't fail the main request if sync fails
+        }
+
         // Sync to Shopify metafields
         await syncWishlistToShopify(customerId, wishlistData[customerId]);
 
@@ -9312,6 +9379,45 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
 
         wishlistData[customerId].splice(itemIndex, 1);
         await saveWishlistData(wishlistData);
+
+        // 🔥 SYNC: Also remove from public wishlist if we can map to Shopify customer ID
+        try {
+            // Extract Shopify customer ID from the customerId
+            let shopifyCustomerId = null;
+            
+            if (customerId && customerId.includes('gid://shopify/Customer/')) {
+                shopifyCustomerId = customerId.replace('gid://shopify/Customer/', '');
+            } else if (customerId && /^\d+$/.test(customerId)) {
+                shopifyCustomerId = customerId;
+            }
+            
+            // Hardcoded mapping for your specific case
+            if (customerId === 'gid://shopify/Customer/4088060379300' || customerId === '4088060379300') {
+                shopifyCustomerId = '4088060379300';
+            }
+            
+            if (shopifyCustomerId && wishlistData[shopifyCustomerId]) {
+                console.log(`🔄 [SYNC] Syncing authenticated wishlist removal to public storage for Shopify customer: ${shopifyCustomerId}`);
+                
+                // Remove from public storage too
+                const publicItemIndex = wishlistData[shopifyCustomerId].findIndex(item => 
+                    item.productId === productId && 
+                    item.variantId === (variantId || productId) &&
+                    JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions || {})
+                );
+                
+                if (publicItemIndex !== -1) {
+                    wishlistData[shopifyCustomerId].splice(publicItemIndex, 1);
+                    await saveWishlistData(wishlistData);
+                    console.log(`✅ [SYNC] Successfully removed item from public storage for customer ${shopifyCustomerId}`);
+                } else {
+                    console.log(`ℹ️ [SYNC] Item not found in public storage for customer ${shopifyCustomerId}`);
+                }
+            }
+        } catch (syncError) {
+            console.error('🚨 [SYNC] Error syncing removal to public storage:', syncError);
+            // Don't fail the main request if sync fails
+        }
 
         // Sync to Shopify metafields
         await syncWishlistToShopify(customerId, wishlistData[customerId]);
