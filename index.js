@@ -9326,6 +9326,208 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
     }
 });
 
+// 🔥 SHOPIFY PUBLIC WISHLIST ENDPOINTS (no authentication required)
+// These endpoints are specifically for Shopify frontend integration
+
+// Get wishlist items for a customer (public endpoint for Shopify)
+app.get('/api/public/wishlist/items', async (req, res) => {
+    try {
+        const { customerId } = req.query;
+        
+        if (!customerId) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Customer ID is required' 
+            });
+        }
+
+        console.log(`[SHOPIFY] Getting wishlist for customer: ${customerId}`);
+
+        const wishlistData = await loadWishlistData();
+        const customerWishlist = wishlistData[customerId] || [];
+
+        console.log(`[SHOPIFY] Found ${customerWishlist.length} items in wishlist`);
+
+        res.json({
+            success: true,
+            items: customerWishlist,
+            count: customerWishlist.length
+        });
+    } catch (error) {
+        console.error('[SHOPIFY] Error getting wishlist:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error' 
+        });
+    }
+});
+
+// Add item to wishlist (public endpoint for Shopify)
+app.post('/api/public/wishlist/add', async (req, res) => {
+    try {
+        const {
+            customerId,
+            productId,
+            variantId,
+            title,
+            imageUrl,
+            price,
+            compareAtPrice,
+            sku,
+            selectedOptions,
+            handle
+        } = req.body;
+
+        if (!customerId) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Customer ID is required' 
+            });
+        }
+
+        if (!productId || !title) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Product ID and title are required' 
+            });
+        }
+
+        console.log(`[SHOPIFY] Adding item to wishlist for customer: ${customerId}`);
+
+        const wishlistData = await loadWishlistData();
+        
+        if (!wishlistData[customerId]) {
+            wishlistData[customerId] = [];
+        }
+
+        // Check if item already exists
+        const existingItemIndex = wishlistData[customerId].findIndex(item => 
+            item.productId === productId && 
+            item.variantId === (variantId || productId) &&
+            JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions || {})
+        );
+
+        if (existingItemIndex !== -1) {
+            console.log(`[SHOPIFY] Item already exists in wishlist`);
+            return res.json({
+                success: true,
+                message: 'Item already in wishlist',
+                alreadyExists: true
+            });
+        }
+
+        // Add new item
+        const newItem = {
+            productId,
+            variantId: variantId || productId,
+            title,
+            imageUrl: imageUrl || '',
+            price: price || 0,
+            compareAtPrice: compareAtPrice || 0,
+            sku: sku || '',
+            selectedOptions: selectedOptions || {},
+            handle: handle || '',
+            addedAt: new Date().toISOString()
+        };
+
+        wishlistData[customerId].push(newItem);
+        await saveWishlistData(wishlistData);
+
+        console.log(`[SHOPIFY] Item added to wishlist successfully`);
+
+        // Sync to Shopify customer metafields
+        try {
+            await syncWishlistToShopify(customerId, wishlistData[customerId]);
+        } catch (syncError) {
+            console.error('[SHOPIFY] Error syncing to Shopify metafields:', syncError);
+            // Don't fail the request if sync fails
+        }
+
+        res.json({
+            success: true,
+            message: 'Item added to wishlist successfully',
+            item: newItem,
+            count: wishlistData[customerId].length
+        });
+
+    } catch (error) {
+        console.error('[SHOPIFY] Error adding to wishlist:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error' 
+        });
+    }
+});
+
+// Remove item from wishlist (public endpoint for Shopify)
+app.delete('/api/public/wishlist/remove', async (req, res) => {
+    try {
+        const { customerId, variantId, productId } = req.body;
+
+        if (!customerId) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Customer ID is required' 
+            });
+        }
+
+        if (!variantId && !productId) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Variant ID or Product ID is required' 
+            });
+        }
+
+        console.log(`[SHOPIFY] Removing item from wishlist for customer: ${customerId}`);
+
+        const wishlistData = await loadWishlistData();
+        
+        if (!wishlistData[customerId]) {
+            return res.json({
+                success: true,
+                message: 'Item not found in wishlist'
+            });
+        }
+
+        const initialLength = wishlistData[customerId].length;
+        
+        // Remove item by variantId or productId
+        wishlistData[customerId] = wishlistData[customerId].filter(item => 
+            item.variantId !== (variantId || productId) && 
+            item.productId !== (productId || variantId)
+        );
+
+        const finalLength = wishlistData[customerId].length;
+        const itemRemoved = initialLength > finalLength;
+
+        if (itemRemoved) {
+            await saveWishlistData(wishlistData);
+            console.log(`[SHOPIFY] Item removed from wishlist successfully`);
+
+            // Sync to Shopify customer metafields
+            try {
+                await syncWishlistToShopify(customerId, wishlistData[customerId]);
+            } catch (syncError) {
+                console.error('[SHOPIFY] Error syncing to Shopify metafields:', syncError);
+                // Don't fail the request if sync fails
+            }
+        }
+
+        res.json({
+            success: true,
+            message: itemRemoved ? 'Item removed from wishlist' : 'Item not found in wishlist',
+            count: wishlistData[customerId].length
+        });
+
+    } catch (error) {
+        console.error('[SHOPIFY] Error removing from wishlist:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error' 
+        });
+    }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
