@@ -9668,6 +9668,43 @@ app.post('/api/debug/link-customer', async (req, res) => {
     }
 });
 
+// Clear wishlist for a customer (debug endpoint)
+app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
+    try {
+        const { customerId } = req.body;
+        
+        if (!customerId) {
+            return res.status(400).json({
+                success: false,
+                error: 'Customer ID is required'
+            });
+        }
+
+        console.log(`[DEBUG] Clearing wishlist for customer: ${customerId}`);
+
+        const wishlistData = await loadWishlistData();
+        
+        if (wishlistData[customerId]) {
+            wishlistData[customerId] = [];
+            await saveWishlistData(wishlistData);
+            console.log(`[DEBUG] Successfully cleared wishlist for customer ${customerId}`);
+        }
+
+        res.json({
+            success: true,
+            message: `Wishlist cleared for customer ${customerId}`,
+            itemCount: 0
+        });
+
+    } catch (error) {
+        console.error('[DEBUG] Error clearing wishlist:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
