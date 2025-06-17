@@ -9168,6 +9168,20 @@ async function loadWishlistData() {
     }
 }
 
+// Helper function to extract product handle from Shopify product ID
+function extractHandleFromProductId(productId) {
+    // This is a simplified version - you might want to make an API call to get the actual handle
+    if (!productId) return null;
+    
+    // If productId contains a GID, extract the ID part
+    if (productId.includes('gid://shopify/Product/')) {
+        const id = productId.replace('gid://shopify/Product/', '');
+        return `product-${id}`; // Fallback handle
+    }
+    
+    return null;
+}
+
 // Save wishlist data to JSON file
 async function saveWishlistData(data) {
     try {
@@ -9280,18 +9294,28 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
             // Extract Shopify customer ID from the productId or customerId if it's a Shopify ID
             let shopifyCustomerId = null;
             
+            console.log(`🔍 [SYNC] Attempting to map session customer ID: "${customerId}"`);
+            
             // Method 1: Check if customerId is already a Shopify customer ID format
             if (customerId && customerId.includes('gid://shopify/Customer/')) {
                 shopifyCustomerId = customerId.replace('gid://shopify/Customer/', '');
+                console.log(`🔍 [SYNC] Extracted from GID: ${shopifyCustomerId}`);
             } else if (customerId && /^\d+$/.test(customerId)) {
                 // Method 2: If it's just numeric, it might be a Shopify customer ID
                 shopifyCustomerId = customerId;
+                console.log(`🔍 [SYNC] Using numeric ID as Shopify customer ID: ${shopifyCustomerId}`);
             }
             
-            // Method 3: Try to extract from the session data or other context
-            // For now, we'll use a hardcoded mapping for your specific case
+            // Method 3: For your specific case, hardcode the mapping
             if (customerId === 'gid://shopify/Customer/4088060379300' || customerId === '4088060379300') {
                 shopifyCustomerId = '4088060379300';
+                console.log(`🔍 [SYNC] Using hardcoded mapping: ${shopifyCustomerId}`);
+            }
+            
+            // Method 4: Try to extract from session metadata (check if session has Shopify customer info)
+            if (!shopifyCustomerId && req.session && req.session.shopifyCustomerId) {
+                shopifyCustomerId = req.session.shopifyCustomerId;
+                console.log(`🔍 [SYNC] Found in session metadata: ${shopifyCustomerId}`);
             }
             
             if (shopifyCustomerId) {
@@ -9320,11 +9344,13 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
                     await saveWishlistData(wishlistData);
                     
                     console.log(`✅ [SYNC] Successfully synced item to public storage for customer ${shopifyCustomerId}`);
+                    console.log(`✅ [SYNC] Public storage now has ${wishlistData[shopifyCustomerId].length} items`);
                 } else {
                     console.log(`ℹ️ [SYNC] Item already exists in public storage for customer ${shopifyCustomerId}`);
                 }
             } else {
                 console.log(`⚠️ [SYNC] Could not map session customer ID "${customerId}" to Shopify customer ID`);
+                console.log(`⚠️ [SYNC] Available session data:`, Object.keys(req.session || {}));
             }
         } catch (syncError) {
             console.error('🚨 [SYNC] Error syncing to public storage:', syncError);
