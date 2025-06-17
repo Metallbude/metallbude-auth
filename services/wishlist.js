@@ -178,12 +178,9 @@ class WishlistService {
   // Health check - test Firebase connection
   async healthCheck() {
     try {
-      const testRef = this.db.collection('health_check').doc('test');
-      await testRef.set({ 
-        status: 'ok', 
-        timestamp: new Date().toISOString() 
-      });
-      await testRef.delete();
+      // Simple connectivity test - just check if we can access Firestore
+      const testRef = this.db.collection('health_check');
+      await testRef.limit(1).get(); // Just try to query, don't write
       return { status: 'healthy', firebase: 'connected' };
     } catch (error) {
       console.error('❌ Firebase health check failed:', error);
