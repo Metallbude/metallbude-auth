@@ -9646,8 +9646,37 @@ app.get('/api/public/wishlist/items', async (req, res) => {
 
         console.log(`[SHOPIFY] Getting wishlist for customer: ${customerId}`);
 
-        const wishlistData = await loadWishlistData();
-        const customerWishlist = wishlistData[customerId] || [];
+        let customerWishlist = [];
+
+        // Try Firebase first if available
+        if (firebaseEnabled && wishlistService) {
+            try {
+                console.log(`[SHOPIFY] Trying Firebase for customer: ${customerId}`);
+                const firebaseItems = await wishlistService.getWishlistProductIds(customerId, 'anonymous@shopify.com');
+                
+                if (firebaseItems.length > 0) {
+                    console.log(`[SHOPIFY] Found ${firebaseItems.length} items in Firebase`);
+                    // For public endpoint, we just return the product IDs
+                    // The frontend will handle fetching product details from Shopify
+                    customerWishlist = firebaseItems.map(productId => ({ productId }));
+                } else {
+                    console.log(`[SHOPIFY] No items found in Firebase, trying file fallback`);
+                    // Fallback to file storage
+                    const wishlistData = await loadWishlistData();
+                    customerWishlist = wishlistData[customerId] || [];
+                }
+            } catch (firebaseError) {
+                console.error('[SHOPIFY] Firebase error, using file fallback:', firebaseError.message);
+                // Fallback to file storage
+                const wishlistData = await loadWishlistData();
+                customerWishlist = wishlistData[customerId] || [];
+            }
+        } else {
+            console.log(`[SHOPIFY] Firebase not available, using file storage`);
+            // Fallback to file storage
+            const wishlistData = await loadWishlistData();
+            customerWishlist = wishlistData[customerId] || [];
+        }
 
         console.log(`[SHOPIFY] Found ${customerWishlist.length} items in wishlist`);
 
