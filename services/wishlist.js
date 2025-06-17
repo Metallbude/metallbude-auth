@@ -8,20 +8,25 @@ class WishlistService {
   // Get customer's wishlist
   async getWishlist(customerId, customerEmail) {
     try {
-      console.log(`❤️ Fetching Firebase wishlist for customer: ${customerEmail} (${customerId})`);
+      console.log(`🔥 [FIREBASE] Fetching wishlist for customer: ${customerEmail} (${customerId})`);
+
+      // Ensure Firebase is properly initialized
+      if (!this.db) {
+        throw new Error('Firebase Firestore not initialized');
+      }
 
       const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(customerId);
       const wishlistDoc = await wishlistRef.get();
 
       if (!wishlistDoc.exists) {
-        console.log(`📝 No wishlist found for customer ${customerId}, returning empty list`);
+        console.log(`� [FIREBASE] No wishlist document found for customer ${customerId}, returning empty list`);
         return [];
       }
 
       const wishlistData = wishlistDoc.data();
       const items = wishlistData.items || [];
 
-      console.log(`✅ Found ${items.length} items in Firebase wishlist`);
+      console.log(`🔥 [FIREBASE] Found ${items.length} items in Firebase wishlist for ${customerEmail}`);
       return items.map(item => ({
         productId: item.productId,
         addedAt: item.addedAt,
@@ -30,7 +35,7 @@ class WishlistService {
       }));
 
     } catch (error) {
-      console.error('❌ Firebase wishlist fetch error:', error);
+      console.error('🔥 [FIREBASE] Wishlist fetch error:', error.message, error.stack);
       throw error;
     }
   }
@@ -38,7 +43,12 @@ class WishlistService {
   // Add product to wishlist
   async addToWishlist(customerId, customerEmail, productId) {
     try {
-      console.log(`❤️ Adding product ${productId} to Firebase wishlist for ${customerEmail}`);
+      console.log(`🔥 [FIREBASE] Adding product ${productId} to wishlist for ${customerEmail} (${customerId})`);
+
+      // Ensure Firebase is properly initialized
+      if (!this.db) {
+        throw new Error('Firebase Firestore not initialized');
+      }
 
       const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(customerId);
       const wishlistDoc = await wishlistRef.get();
@@ -52,7 +62,7 @@ class WishlistService {
       // Check if item already exists
       const existingItemIndex = items.findIndex(item => item.productId === productId);
       if (existingItemIndex !== -1) {
-        console.log(`⚠️ Product ${productId} already in wishlist`);
+        console.log(`🔥 [FIREBASE] Product ${productId} already in wishlist for ${customerEmail}`);
         return { success: true, action: 'add', productId, wishlistCount: items.length, alreadyExists: true };
       }
 
@@ -75,11 +85,11 @@ class WishlistService {
         createdAt: wishlistDoc.exists ? (wishlistDoc.data().createdAt || new Date().toISOString()) : new Date().toISOString()
       });
 
-      console.log(`✅ Added product ${productId} to Firebase wishlist. Total items: ${items.length}`);
+      console.log(`🔥 [FIREBASE] Successfully added product ${productId} to wishlist for ${customerEmail}. Total items: ${items.length}`);
       return { success: true, action: 'add', productId, wishlistCount: items.length };
 
     } catch (error) {
-      console.error('❌ Firebase add to wishlist error:', error);
+      console.error('🔥 [FIREBASE] Add to wishlist error:', error.message, error.stack);
       throw error;
     }
   }
@@ -87,42 +97,46 @@ class WishlistService {
   // Remove product from wishlist
   async removeFromWishlist(customerId, customerEmail, productId) {
     try {
-      console.log(`❤️ Removing product ${productId} from Firebase wishlist for ${customerEmail}`);
+      console.log(`🔥 [FIREBASE] Removing product ${productId} from wishlist for ${customerEmail} (${customerId})`);
+
+      // Ensure Firebase is properly initialized
+      if (!this.db) {
+        throw new Error('Firebase Firestore not initialized');
+      }
 
       const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(customerId);
       const wishlistDoc = await wishlistRef.get();
 
       if (!wishlistDoc.exists) {
-        console.log(`⚠️ No wishlist found for customer ${customerId}`);
+        console.log(`🔥 [FIREBASE] No wishlist found for customer ${customerId}, nothing to remove`);
         return { success: true, action: 'remove', productId, wishlistCount: 0, notFound: true };
       }
 
       const data = wishlistDoc.data();
       let items = data.items || [];
 
-      // Remove item
-      const originalLength = items.length;
+      // Find and remove the item
+      const initialCount = items.length;
       items = items.filter(item => item.productId !== productId);
+      const finalCount = items.length;
 
-      if (items.length === originalLength) {
-        console.log(`⚠️ Product ${productId} not found in wishlist`);
-        return { success: true, action: 'remove', productId, wishlistCount: items.length, notFound: true };
+      if (initialCount === finalCount) {
+        console.log(`🔥 [FIREBASE] Product ${productId} was not in wishlist for ${customerEmail}`);
+        return { success: true, action: 'remove', productId, wishlistCount: finalCount, notFound: true };
       }
 
       // Update Firestore
       await wishlistRef.set({
-        customerId,
-        customerEmail,
+        ...data,
         items,
-        updatedAt: new Date().toISOString(),
-        createdAt: data.createdAt || new Date().toISOString()
+        updatedAt: new Date().toISOString()
       });
 
-      console.log(`✅ Removed product ${productId} from Firebase wishlist. Total items: ${items.length}`);
-      return { success: true, action: 'remove', productId, wishlistCount: items.length };
+      console.log(`🔥 [FIREBASE] Successfully removed product ${productId} from wishlist for ${customerEmail}. Remaining items: ${finalCount}`);
+      return { success: true, action: 'remove', productId, wishlistCount: finalCount };
 
     } catch (error) {
-      console.error('❌ Firebase remove from wishlist error:', error);
+      console.error('🔥 [FIREBASE] Remove from wishlist error:', error.message, error.stack);
       throw error;
     }
   }
