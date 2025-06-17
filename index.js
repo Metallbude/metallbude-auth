@@ -9644,20 +9644,38 @@ app.get('/api/public/wishlist/items', async (req, res) => {
             });
         }
 
-        console.log(`[SHOPIFY] Getting wishlist for customer: ${customerId}`);
+        console.log(`🔥 [PUBLIC] Getting wishlist for customer: ${customerId}`);
 
-        const wishlistData = await loadWishlistData();
-        const customerWishlist = wishlistData[customerId] || [];
+        let wishlistItems = [];
 
-        console.log(`[SHOPIFY] Found ${customerWishlist.length} items in wishlist`);
+        // Try Firebase first if available
+        if (firebaseEnabled && wishlistService) {
+            try {
+                console.log(`🔥 [PUBLIC] Using Firebase for customer: ${customerId}`);
+                const fullCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+                wishlistItems = await wishlistService.getWishlistProductIds(fullCustomerId, 'public@shopify.com');
+                console.log(`🔥 [PUBLIC] Firebase returned ${wishlistItems.length} wishlist items`);
+            } catch (firebaseError) {
+                console.error('❌ [PUBLIC] Firebase wishlist fetch failed, falling back to file storage:', firebaseError.message);
+                firebaseEnabled = false;
+            }
+        }
+
+        // Fallback to file-based storage if Firebase fails or is not enabled
+        if (!firebaseEnabled || wishlistItems.length === 0) {
+            console.log(`📂 [PUBLIC] Using file storage for customer: ${customerId}`);
+            const wishlistData = await loadWishlistData();
+            wishlistItems = wishlistData[customerId] || [];
+            console.log(`📂 [PUBLIC] File storage returned ${wishlistItems.length} items`);
+        }
 
         res.json({
             success: true,
-            items: customerWishlist,
-            count: customerWishlist.length
+            items: wishlistItems,
+            count: wishlistItems.length
         });
     } catch (error) {
-        console.error('[SHOPIFY] Error getting wishlist:', error);
+        console.error('❌ [PUBLIC] Error getting wishlist:', error);
         res.status(500).json({ 
             success: false,
             error: 'Internal server error' 
@@ -9695,8 +9713,32 @@ app.post('/api/public/wishlist/add', async (req, res) => {
             });
         }
 
-        console.log(`[SHOPIFY] Adding item to wishlist for customer: ${customerId}`);
+        console.log(`🔥 [PUBLIC] Adding item to wishlist for customer: ${customerId}`);
 
+        let result;
+
+        // Try Firebase first if available
+        if (firebaseEnabled && wishlistService) {
+            try {
+                console.log(`🔥 [PUBLIC] Using Firebase for add operation`);
+                const fullCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+                result = await wishlistService.addToWishlist(fullCustomerId, 'public@shopify.com', productId);
+                console.log(`🔥 [PUBLIC] Firebase add operation successful`);
+                
+                return res.json({
+                    success: true,
+                    action: 'add',
+                    productId,
+                    wishlistCount: result.wishlistCount,
+                    source: 'firebase'
+                });
+            } catch (firebaseError) {
+                console.error('❌ [PUBLIC] Firebase add operation failed, falling back to file storage:', firebaseError.message);
+            }
+        }
+
+        // Fallback to file-based storage
+        console.log(`📂 [PUBLIC] Using file storage for add operation`);
         const wishlistData = await loadWishlistData();
         
         if (!wishlistData[customerId]) {
@@ -9781,8 +9823,33 @@ app.delete('/api/public/wishlist/remove', async (req, res) => {
             });
         }
 
-        console.log(`[SHOPIFY] Removing item from wishlist for customer: ${customerId}`);
+        const itemIdToRemove = productId || variantId;
+        console.log(`🔥 [PUBLIC] Removing item ${itemIdToRemove} from wishlist for customer: ${customerId}`);
 
+        let result;
+
+        // Try Firebase first if available
+        if (firebaseEnabled && wishlistService) {
+            try {
+                console.log(`🔥 [PUBLIC] Using Firebase for remove operation`);
+                const fullCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+                result = await wishlistService.removeFromWishlist(fullCustomerId, 'public@shopify.com', itemIdToRemove);
+                console.log(`🔥 [PUBLIC] Firebase remove operation successful`);
+                
+                return res.json({
+                    success: true,
+                    action: 'remove',
+                    productId: itemIdToRemove,
+                    wishlistCount: result.wishlistCount,
+                    source: 'firebase'
+                });
+            } catch (firebaseError) {
+                console.error('❌ [PUBLIC] Firebase remove operation failed, falling back to file storage:', firebaseError.message);
+            }
+        }
+
+        // Fallback to file-based storage
+        console.log(`📂 [PUBLIC] Using file storage for remove operation`);
         const wishlistData = await loadWishlistData();
         
         if (!wishlistData[customerId]) {
