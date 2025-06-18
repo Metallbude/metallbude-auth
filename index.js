@@ -3879,11 +3879,11 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
               }
             }
             compareAtPriceRange {
-              maxVariantPrice {
+              maxVariantCompareAtPrice {
                 amount
                 currencyCode
               }
-              minVariantPrice {
+              minVariantCompareAtPrice {
                 amount
                 currencyCode
               }
@@ -3953,9 +3953,9 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         amount: product.priceRange.minVariantPrice.amount,
         currencyCode: product.priceRange.minVariantPrice.currencyCode
       },
-      compareAtPrice: product.compareAtPriceRange?.minVariantPrice ? {
-        amount: product.compareAtPriceRange.minVariantPrice.amount,
-        currencyCode: product.compareAtPriceRange.minVariantPrice.currencyCode
+      compareAtPrice: product.compareAtPriceRange?.minVariantCompareAtPrice ? {
+        amount: product.compareAtPriceRange.minVariantCompareAtPrice.amount,
+        currencyCode: product.compareAtPriceRange.minVariantCompareAtPrice.currencyCode
       } : null,
       image: product.featuredImage?.url,
       images: product.images.edges.map(edge => edge.node),
@@ -3972,8 +3972,8 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       productType: product.productType,
       vendor: product.vendor,
       tags: product.tags,
-      isOnSale: product.compareAtPriceRange?.minVariantPrice ? 
-        parseFloat(product.compareAtPriceRange.minVariantPrice.amount) > parseFloat(product.priceRange.minVariantPrice.amount) : false,
+      isOnSale: product.compareAtPriceRange?.minVariantCompareAtPrice ? 
+        parseFloat(product.compareAtPriceRange.minVariantCompareAtPrice.amount) > parseFloat(product.priceRange.minVariantPrice.amount) : false,
       addedToWishlistAt: new Date().toISOString() // You might want to track this separately
     }));
 
@@ -4984,7 +4984,7 @@ app.get('/customer/recommendations', authenticateAppToken, async (req, res) => {
                 }
               }
               compareAtPriceRange {
-                minVariantPrice {
+                minVariantCompareAtPrice {
                   amount
                   currencyCode
                 }
@@ -4998,7 +4998,7 @@ app.get('/customer/recommendations', authenticateAppToken, async (req, res) => {
                   node {
                     id
                     availableForSale
-                    priceV2 {
+                    price {
                       amount
                       currencyCode
                     }
@@ -5065,8 +5065,8 @@ app.get('/customer/recommendations', authenticateAppToken, async (req, res) => {
     const recommendations = filteredRecommendations.map(product => {
       const node = product.node;
       const price = parseFloat(node.priceRange.minVariantPrice.amount);
-      const compareAtPrice = node.compareAtPriceRange?.minVariantPrice?.amount 
-        ? parseFloat(node.compareAtPriceRange.minVariantPrice.amount) 
+      const compareAtPrice = node.compareAtPriceRange?.minVariantCompareAtPrice?.amount 
+        ? parseFloat(node.compareAtPriceRange.minVariantCompareAtPrice.amount) 
         : null;
 
       return {
@@ -6686,7 +6686,7 @@ app.post('/customer/orders/:orderId/reorder', authenticateAppToken, async (req, 
                   title
                   sku
                   availableForSale
-                  priceV2 {
+                  price {
                     amount
                     currencyCode
                   }
@@ -7265,7 +7265,7 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
                   id
                   title
                   sku
-                  priceV2 {
+                  price {
                     amount
                     currencyCode
                   }
@@ -7402,7 +7402,7 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
           id: lineItem.variant.id,
           title: lineItem.variant.title,
           sku: lineItem.variant.sku,
-          price: lineItem.variant.priceV2.amount,
+          price: lineItem.variant.price.amount,
           image: lineItem.variant.image?.url || 'https://via.placeholder.com/150',
           product: lineItem.variant.product
         }
@@ -8338,7 +8338,7 @@ app.get('/api/products', async (req, res) => {
                 }
               }
               compareAtPriceRange {
-                minVariantPrice {
+                minVariantCompareAtPrice {
                   amount
                 }
               }
@@ -8367,8 +8367,8 @@ app.get('/api/products', async (req, res) => {
     const products = response.data.data.products.edges.map(edge => {
       const node = edge.node;
       const price = parseFloat(node.priceRange.minVariantPrice.amount);
-      const compareAtPrice = node.compareAtPriceRange?.minVariantPrice?.amount 
-        ? parseFloat(node.compareAtPriceRange.minVariantPrice.amount) 
+      const compareAtPrice = node.compareAtPriceRange?.minVariantCompareAtPrice?.amount 
+        ? parseFloat(node.compareAtPriceRange.minVariantCompareAtPrice.amount) 
         : null;
       
       return {
