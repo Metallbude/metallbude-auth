@@ -42,7 +42,9 @@ class WishlistService {
         productId: item.productId,
         addedAt: item.addedAt,
         customerEmail: customerEmail,
-        customerId: customerId
+        customerId: customerId,
+        variantId: item.variantId || null,
+        selectedOptions: item.selectedOptions || null
       }));
 
     } catch (error) {
@@ -52,9 +54,10 @@ class WishlistService {
   }
 
   // Add product to wishlist
-  async addToWishlist(customerId, customerEmail, productId) {
+  async addToWishlist(customerId, customerEmail, productId, variantId = null, selectedOptions = null) {
     try {
       console.log(`🔥 [FIREBASE] Adding product ${productId} to wishlist for ${customerEmail} (${customerId})`);
+      console.log(`🔥 [FIREBASE] Variant ID: ${variantId}, Selected Options:`, selectedOptions);
 
       // Ensure Firebase is properly initialized
       if (!this.db) {
@@ -74,20 +77,44 @@ class WishlistService {
         items = data.items || [];
       }
 
-      // Check if item already exists
-      const existingItemIndex = items.findIndex(item => item.productId === productId);
+      // Check if item already exists with same variant/options
+      const existingItemIndex = items.findIndex(item => {
+        if (item.productId !== productId) return false;
+        
+        // If we have variant information, match by variant
+        if (variantId && item.variantId) {
+          return item.variantId === variantId;
+        }
+        
+        // If we have selected options, match by options
+        if (selectedOptions && item.selectedOptions) {
+          return JSON.stringify(item.selectedOptions) === JSON.stringify(selectedOptions);
+        }
+        
+        // Otherwise match by product ID only (backward compatibility)
+        return !item.variantId && !item.selectedOptions;
+      });
+      
       if (existingItemIndex !== -1) {
-        console.log(`🔥 [FIREBASE] Product ${productId} already in wishlist for ${customerEmail}`);
+        console.log(`🔥 [FIREBASE] Product ${productId} with variant/options already in wishlist for ${customerEmail}`);
         return { success: true, action: 'add', productId, wishlistCount: items.length, alreadyExists: true };
       }
 
-      // Add new item
+      // Add new item with variant information
       const newItem = {
         productId,
         addedAt: new Date().toISOString(),
         customerEmail,
         customerId
       };
+      
+      // Add variant information if available
+      if (variantId) {
+        newItem.variantId = variantId;
+      }
+      if (selectedOptions && Object.keys(selectedOptions).length > 0) {
+        newItem.selectedOptions = selectedOptions;
+      }
 
       items.push(newItem);
 
@@ -110,9 +137,10 @@ class WishlistService {
   }
 
   // Remove product from wishlist
-  async removeFromWishlist(customerId, customerEmail, productId) {
+  async removeFromWishlist(customerId, customerEmail, productId, variantId = null, selectedOptions = null) {
     try {
       console.log(`🔥 [FIREBASE] Removing product ${productId} from wishlist for ${customerEmail} (${customerId})`);
+      console.log(`🔥 [FIREBASE] Variant ID: ${variantId}, Selected Options:`, selectedOptions);
 
       // Ensure Firebase is properly initialized
       if (!this.db) {
@@ -134,9 +162,24 @@ class WishlistService {
       const data = wishlistDoc.data();
       let items = data.items || [];
 
-      // Find and remove the item
+      // Find and remove the matching item with variant/options
       const initialCount = items.length;
-      items = items.filter(item => item.productId !== productId);
+      items = items.filter(item => {
+        if (item.productId !== productId) return true;
+        
+        // If we have variant information, match by variant
+        if (variantId && item.variantId) {
+          return item.variantId !== variantId;
+        }
+        
+        // If we have selected options, match by options
+        if (selectedOptions && item.selectedOptions) {
+          return JSON.stringify(item.selectedOptions) !== JSON.stringify(selectedOptions);
+        }
+        
+        // Otherwise remove by product ID only (backward compatibility)
+        return item.variantId || item.selectedOptions;
+      });
       const finalCount = items.length;
 
       if (initialCount === finalCount) {

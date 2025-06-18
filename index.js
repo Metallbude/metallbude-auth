@@ -4014,13 +4014,17 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
           result = await wishlistService.addToWishlist(
             req.session.customerId,
             req.session.email,
-            productId
+            productId,
+            variantId,
+            selectedOptions
           );
         } else if (action === 'remove') {
           result = await wishlistService.removeFromWishlist(
             req.session.customerId,
             req.session.email,
-            productId
+            productId,
+            variantId,
+            selectedOptions
           );
         }
         console.log('🔥 Firebase wishlist operation successful');
@@ -9415,13 +9419,13 @@ async function syncFirebaseToPublicStorage(customerId) {
         // Convert Firebase items to public storage format
         const publicItems = firebaseItems.map(item => ({
             productId: item.productId,
-            variantId: item.productId, // Default to productId if no variantId
+            variantId: item.variantId || item.productId, // Use actual variantId if available
             title: `Product ${item.productId}`, // We'll let frontend fetch actual product details
             imageUrl: '',
             price: 0,
             compareAtPrice: 0,
             sku: '',
-            selectedOptions: {},
+            selectedOptions: item.selectedOptions || {}, // ✅ CRITICAL: Preserve selectedOptions from Firebase
             handle: '',
             addedAt: item.addedAt,
             syncedFromFirebase: true
@@ -9933,7 +9937,9 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                 const firebaseResult = await wishlistService.addToWishlist(
                     shopifyCustomerId, 
                     customerEmail, 
-                    productId
+                    productId,
+                    variantId,
+                    selectedOptions
                 );
                 console.log(`✅ [SYNC] Item also added to Firebase successfully:`, firebaseResult);
             } catch (firebaseError) {
@@ -10042,7 +10048,7 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             if (firebaseEnabled && wishlistService) {
                 try {
                     const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                    const firebaseResult = await wishlistService.removeFromWishlist(fullCustomerId, 'anonymous@shopify.com', productId);
+                    const firebaseResult = await wishlistService.removeFromWishlist(fullCustomerId, 'anonymous@shopify.com', productId, variantId, selectedOptions);
                     console.log(`[SHOPIFY] Item also removed from Firebase:`, firebaseResult);
                 } catch (firebaseError) {
                     console.error('[SHOPIFY] Error removing from Firebase (non-critical):', firebaseError);
