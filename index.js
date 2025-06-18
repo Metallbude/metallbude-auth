@@ -3972,8 +3972,10 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
 // POST /customer/wishlist - Add/remove from wishlist (Firebase + Shopify hybrid)
 app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
   try {
-    const { productId, action = 'add' } = req.body; // action: 'add' or 'remove'
+    const { productId, action = 'add', variantId, selectedOptions } = req.body; // action: 'add' or 'remove'
     console.log(`❤️ ${action === 'add' ? 'Adding to' : 'Removing from'} wishlist:`, productId);
+    console.log('   Variant ID:', variantId);
+    console.log('   Selected Options:', selectedOptions);
 
     let result;
     let useFirebase = firebaseEnabled && wishlistService;
@@ -9795,9 +9797,9 @@ app.post('/api/public/wishlist/add', async (req, res) => {
 });
 
 // Remove item from wishlist (public endpoint for Shopify)
-app.delete('/api/public/wishlist/remove', async (req, res) => {
+app.post('/api/public/wishlist/remove', async (req, res) => {
     try {
-        const { customerId, variantId, productId } = req.body;
+        const { customerId, variantId, productId, selectedOptions } = req.body;
 
         if (!customerId) {
             return res.status(400).json({ 
@@ -9814,6 +9816,7 @@ app.delete('/api/public/wishlist/remove', async (req, res) => {
         }
 
         console.log(`[SHOPIFY] Removing item from wishlist for customer: ${customerId}`);
+        console.log(`[SHOPIFY] ProductId: ${productId}, VariantId: ${variantId}, SelectedOptions:`, selectedOptions);
 
         const wishlistData = await loadWishlistData();
         
@@ -9826,18 +9829,33 @@ app.delete('/api/public/wishlist/remove', async (req, res) => {
 
         const initialLength = wishlistData[customerId].length;
         
-        // Remove item by variantId or productId
-        wishlistData[customerId] = wishlistData[customerId].filter(item => 
-            item.variantId !== (variantId || productId) && 
-            item.productId !== (productId || variantId)
-        );
+        // Remove item by productId, variantId AND selectedOptions for exact match
+        wishlistData[customerId] = wishlistData[customerId].filter(item => {
+            // Check product match
+            const productMatch = item.productId === productId || 
+                                item.variantId === productId ||
+                                item.productId === (productId || variantId);
+            
+            // Check variant match if provided
+            const variantMatch = !variantId || 
+                               item.variantId === variantId || 
+                               item.variantId === (variantId || productId);
+            
+            // Check selected options match if provided
+            const optionsMatch = !selectedOptions || 
+                               Object.keys(selectedOptions).length === 0 ||
+                               JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions);
+            
+            // Keep item if it doesn't match all criteria
+            return !(productMatch && variantMatch && optionsMatch);
+        });
 
         const finalLength = wishlistData[customerId].length;
         const itemRemoved = initialLength > finalLength;
 
         if (itemRemoved) {
             await saveWishlistData(wishlistData);
-            console.log(`[SHOPIFY] Item removed from wishlist successfully`);
+            console.log(`[SHOPIFY] Item removed from wishlist successfully (removed ${initialLength - finalLength} items)`);
 
             // Sync to Shopify customer metafields
             try {
