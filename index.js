@@ -3978,6 +3978,17 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       // Find the matching wishlist item with variant information
       const wishlistItem = wishlistItems.find(item => item.productId === product.id);
       
+      // Process variants first
+      const processedVariants = product.variants.edges.map(edge => ({
+        id: edge.node.id,
+        title: edge.node.title,
+        sku: edge.node.sku,
+        price: edge.node.price,
+        compareAtPrice: edge.node.compareAtPrice,
+        selectedOptions: edge.node.selectedOptions,
+        image: edge.node.image
+      }));
+      
       let selectedVariant = null;
       let selectedOptions = {};
       let selectedSku = null;
@@ -3994,12 +4005,13 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         
         // Find the matching variant by ID first
         if (wishlistItem.variantId) {
-          selectedVariant = product.variants.find(v => v.id === wishlistItem.variantId);
+          selectedVariant = processedVariants.find(v => v.id === wishlistItem.variantId);
+          console.log(`🔍 [VARIANT] Searching for variant ID ${wishlistItem.variantId} in:`, processedVariants.map(v => v.id));
         }
         
         // If no variant ID match, try to match by selectedOptions
         if (!selectedVariant && wishlistItem.selectedOptions) {
-          selectedVariant = product.variants.find(variant => {
+          selectedVariant = processedVariants.find(variant => {
             const variantOptions = {};
             variant.selectedOptions.forEach(opt => {
               variantOptions[opt.name] = opt.value;
@@ -4010,13 +4022,15 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
               variantOptions[key] === value
             );
           });
+          console.log(`🔍 [VARIANT] Searching by selectedOptions:`, wishlistItem.selectedOptions);
         }
         
         if (selectedVariant) {
           console.log(`✅ [VARIANT] Found matching variant:`, {
             variantId: selectedVariant.id,
             title: selectedVariant.title,
-            selectedOptions: selectedVariant.selectedOptions
+            selectedOptions: selectedVariant.selectedOptions,
+            image: selectedVariant.image?.url
           });
           
           selectedOptions = {};
@@ -4030,6 +4044,21 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         } else {
           console.log(`⚠️ [VARIANT] No matching variant found, using stored options:`, wishlistItem.selectedOptions);
           selectedOptions = wishlistItem.selectedOptions || {};
+          // For fallback, try to find any variant with similar color
+          if (wishlistItem.selectedOptions?.Farbe) {
+            const colorValue = wishlistItem.selectedOptions.Farbe.toLowerCase();
+            const fallbackVariant = processedVariants.find(variant => 
+              variant.selectedOptions.some(opt => 
+                opt.name === 'Farbe' && opt.value.toLowerCase().includes(colorValue.split(' ')[0])
+              )
+            );
+            if (fallbackVariant) {
+              console.log(`🔄 [VARIANT] Using fallback variant for color match:`, fallbackVariant.id);
+              selectedImage = fallbackVariant.image?.url || product.featuredImage?.url;
+              selectedPrice = fallbackVariant.price;
+              selectedCompareAtPrice = fallbackVariant.compareAtPrice;
+            }
+          }
         }
       }
       
@@ -4051,15 +4080,7 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         } : null),
         image: selectedImage || product.featuredImage?.url,
         images: product.images.edges.map(edge => edge.node),
-        variants: product.variants.edges.map(edge => ({
-          id: edge.node.id,
-          title: edge.node.title,
-          sku: edge.node.sku,
-          price: edge.node.price,
-          compareAtPrice: edge.node.compareAtPrice,
-          selectedOptions: edge.node.selectedOptions,
-          image: edge.node.image
-        })),
+        variants: processedVariants,
         selectedVariant: selectedVariant,
         selectedOptions: selectedOptions, // ✅ CRITICAL: Include selected options
         sku: selectedSku,
