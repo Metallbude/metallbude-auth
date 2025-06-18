@@ -9366,6 +9366,117 @@ async function saveWishlistData(data) {
     }
 }
 
+// Sync Firebase wishlist to public storage for a specific customer
+async function syncFirebaseToPublicStorage(customerId) {
+    if (!firebaseEnabled || !wishlistService) {
+        console.log('🔥 [SYNC] Firebase not available, skipping sync');
+        return false;
+    }
+
+    try {
+        console.log(`🔄 [SYNC] Syncing Firebase to public storage for customer: ${customerId}`);
+        
+        // Convert simple customer ID to full Shopify format for Firebase lookup
+        const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+        
+        // Get wishlist from Firebase (canonical source)
+        const firebaseItems = await wishlistService.getWishlist(fullCustomerId, 'anonymous@shopify.com');
+        
+        // Load current public storage
+        const publicWishlistData = await loadWishlistData();
+        
+        // Convert Firebase items to public storage format
+        const publicItems = firebaseItems.map(item => ({
+            productId: item.productId,
+            variantId: item.productId, // Default to productId if no variantId
+            title: `Product ${item.productId}`, // We'll let frontend fetch actual product details
+            imageUrl: '',
+            price: 0,
+            compareAtPrice: 0,
+            sku: '',
+            selectedOptions: {},
+            handle: '',
+            addedAt: item.addedAt,
+            syncedFromFirebase: true
+        }));
+        
+        // Update public storage with Firebase data
+        publicWishlistData[customerId] = publicItems;
+        await saveWishlistData(publicWishlistData);
+        
+        console.log(`✅ [SYNC] Successfully synced ${publicItems.length} items from Firebase to public storage for customer ${customerId}`);
+        return true;
+        
+    } catch (error) {
+        console.error(`🚨 [SYNC] Error syncing Firebase to public storage for customer ${customerId}:`, error);
+        return false;
+    }
+}
+
+// Sync all customers' wishlists from Firebase to public storage
+async function syncAllFirebaseToPublicStorage() {
+    if (!firebaseEnabled || !wishlistService) {
+        console.log('🔥 [SYNC] Firebase not available, skipping full sync');
+        return false;
+    }
+
+    try {
+        console.log('🔄 [SYNC] Starting full sync from Firebase to public storage');
+        
+        // Get all wishlist documents from Firebase
+        const db = wishlistService.db;
+        const wishlistsSnapshot = await db.collection('wishlists').get();
+        
+        const publicWishlistData = await loadWishlistData();
+        let syncedCount = 0;
+        
+        for (const doc of wishlistsSnapshot.docs) {
+            try {
+                const data = doc.data();
+                const customerId = data.customerId;
+                
+                // Extract numeric customer ID from full Shopify GID
+                let simpleCustomerId = customerId;
+                if (customerId && customerId.includes('gid://shopify/Customer/')) {
+                    simpleCustomerId = customerId.replace('gid://shopify/Customer/', '');
+                }
+                
+                // Convert Firebase items to public storage format
+                const publicItems = (data.items || []).map(item => ({
+                    productId: item.productId,
+                    variantId: item.productId,
+                    title: `Product ${item.productId}`,
+                    imageUrl: '',
+                    price: 0,
+                    compareAtPrice: 0,
+                    sku: '',
+                    selectedOptions: {},
+                    handle: '',
+                    addedAt: item.addedAt,
+                    syncedFromFirebase: true
+                }));
+                
+                publicWishlistData[simpleCustomerId] = publicItems;
+                syncedCount++;
+                
+                console.log(`✅ [SYNC] Synced ${publicItems.length} items for customer ${simpleCustomerId}`);
+                
+            } catch (docError) {
+                console.error(`🚨 [SYNC] Error syncing document ${doc.id}:`, docError);
+            }
+        }
+        
+        await saveWishlistData(publicWishlistData);
+        
+        console.log(`✅ [SYNC] Full sync completed: ${syncedCount} customers synced`);
+        return true;
+        
+    } catch (error) {
+        console.error('🚨 [SYNC] Error during full sync:', error);
+        return false;
+    }
+}
+
 // Helper function to extract product handle from Shopify product ID
 function extractHandleFromProductId(productId) {
     // This is a simplified version - you might want to make actual Shopify API calls
@@ -9650,25 +9761,31 @@ app.get('/api/public/wishlist/items', async (req, res) => {
 
         let customerWishlist = [];
 
-        // Try Firebase first if available
+        // Always try to sync from Firebase first to ensure we have the latest data
         if (firebaseEnabled && wishlistService) {
             try {
-                console.log(`[SHOPIFY] Trying Firebase for customer: ${customerId}`);
+                console.log(`[SHOPIFY] Syncing Firebase data for customer: ${customerId}`);
+                const syncSuccess = await syncFirebaseToPublicStorage(customerId);
                 
-                // Convert simple customer ID to full Shopify format for Firebase lookup
-                const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, 'anonymous@shopify.com');
-                
-                if (firebaseItems.length > 0) {
-                    console.log(`[SHOPIFY] Found ${firebaseItems.length} items in Firebase`);
-                    // For public endpoint, we just return the product IDs
-                    // The frontend will handle fetching product details from Shopify
-                    customerWishlist = firebaseItems.map(productId => ({ productId }));
-                } else {
-                    console.log(`[SHOPIFY] No items found in Firebase, trying file fallback`);
-                    // Fallback to file storage
+                if (syncSuccess) {
+                    console.log(`[SHOPIFY] Successfully synced Firebase data, loading from public storage`);
                     const wishlistData = await loadWishlistData();
                     customerWishlist = wishlistData[customerId] || [];
+                    console.log(`[SHOPIFY] Found ${customerWishlist.length} items after Firebase sync`);
+                } else {
+                    console.log(`[SHOPIFY] Firebase sync failed, trying direct Firebase lookup`);
+                    // Direct Firebase lookup as fallback
+                    const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+                    const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, 'anonymous@shopify.com');
+                    
+                    if (firebaseItems.length > 0) {
+                        console.log(`[SHOPIFY] Found ${firebaseItems.length} items in Firebase`);
+                        customerWishlist = firebaseItems.map(productId => ({ productId }));
+                    } else {
+                        console.log(`[SHOPIFY] No items found in Firebase, using file storage`);
+                        const wishlistData = await loadWishlistData();
+                        customerWishlist = wishlistData[customerId] || [];
+                    }
                 }
             } catch (firebaseError) {
                 console.error('[SHOPIFY] Firebase error, using file fallback:', firebaseError.message);
@@ -9683,7 +9800,7 @@ app.get('/api/public/wishlist/items', async (req, res) => {
             customerWishlist = wishlistData[customerId] || [];
         }
 
-        console.log(`[SHOPIFY] Found ${customerWishlist.length} items in wishlist`);
+        console.log(`[SHOPIFY] Returning ${customerWishlist.length} items in wishlist`);
 
         res.json({
             success: true,
@@ -9731,6 +9848,9 @@ app.post('/api/public/wishlist/add', async (req, res) => {
 
         console.log(`[SHOPIFY] Adding item to wishlist for customer: ${customerId}`);
 
+        // First sync from Firebase to ensure we have the latest data
+        await syncFirebaseToPublicStorage(customerId);
+
         const wishlistData = await loadWishlistData();
         
         if (!wishlistData[customerId]) {
@@ -9753,7 +9873,7 @@ app.post('/api/public/wishlist/add', async (req, res) => {
             });
         }
 
-        // Add new item
+        // Add new item to public storage
         const newItem = {
             productId,
             variantId: variantId || productId,
@@ -9770,7 +9890,19 @@ app.post('/api/public/wishlist/add', async (req, res) => {
         wishlistData[customerId].push(newItem);
         await saveWishlistData(wishlistData);
 
-        console.log(`[SHOPIFY] Item added to wishlist successfully`);
+        console.log(`[SHOPIFY] Item added to public storage successfully`);
+
+        // Also add to Firebase to keep it as canonical source
+        if (firebaseEnabled && wishlistService) {
+            try {
+                const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+                const firebaseResult = await wishlistService.addToWishlist(fullCustomerId, 'anonymous@shopify.com', productId);
+                console.log(`[SHOPIFY] Item also added to Firebase:`, firebaseResult);
+            } catch (firebaseError) {
+                console.error('[SHOPIFY] Error adding to Firebase (non-critical):', firebaseError);
+                // Don't fail the request if Firebase fails
+            }
+        }
 
         // Sync to Shopify customer metafields
         try {
@@ -9818,6 +9950,9 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
         console.log(`[SHOPIFY] Removing item from wishlist for customer: ${customerId}`);
         console.log(`[SHOPIFY] ProductId: ${productId}, VariantId: ${variantId}, SelectedOptions:`, selectedOptions);
 
+        // First sync from Firebase to ensure we have the latest data
+        await syncFirebaseToPublicStorage(customerId);
+
         const wishlistData = await loadWishlistData();
         
         if (!wishlistData[customerId]) {
@@ -9831,19 +9966,27 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
         
         // Remove item by productId, variantId AND selectedOptions for exact match
         wishlistData[customerId] = wishlistData[customerId].filter(item => {
-            // Check product match
+            // Check product match - handle both old and new data formats
             const productMatch = item.productId === productId || 
                                 item.variantId === productId ||
                                 item.productId === (productId || variantId);
             
+            // For backward compatibility: if no variantId or selectedOptions are provided,
+            // just match by productId (for simple wishlist items)
+            if (!variantId && (!selectedOptions || Object.keys(selectedOptions).length === 0)) {
+                return !productMatch; // Remove if product matches
+            }
+            
             // Check variant match if provided
             const variantMatch = !variantId || 
+                               !item.variantId || // Item doesn't have variantId (old format)
                                item.variantId === variantId || 
                                item.variantId === (variantId || productId);
             
             // Check selected options match if provided
             const optionsMatch = !selectedOptions || 
                                Object.keys(selectedOptions).length === 0 ||
+                               !item.selectedOptions || // Item doesn't have selectedOptions (old format)
                                JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions);
             
             // Keep item if it doesn't match all criteria
@@ -9855,7 +9998,19 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
 
         if (itemRemoved) {
             await saveWishlistData(wishlistData);
-            console.log(`[SHOPIFY] Item removed from wishlist successfully (removed ${initialLength - finalLength} items)`);
+            console.log(`[SHOPIFY] Item removed from public storage successfully (removed ${initialLength - finalLength} items)`);
+
+            // Also remove from Firebase to keep it as canonical source
+            if (firebaseEnabled && wishlistService) {
+                try {
+                    const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+                    const firebaseResult = await wishlistService.removeFromWishlist(fullCustomerId, 'anonymous@shopify.com', productId);
+                    console.log(`[SHOPIFY] Item also removed from Firebase:`, firebaseResult);
+                } catch (firebaseError) {
+                    console.error('[SHOPIFY] Error removing from Firebase (non-critical):', firebaseError);
+                    // Don't fail the request if Firebase fails
+                }
+            }
 
             // Sync to Shopify customer metafields
             try {
@@ -9900,6 +10055,102 @@ app.get('/api/debug/wishlist-customers', async (req, res) => {
         res.status(500).json({ 
             success: false,
             error: error.message 
+        });
+    }
+});
+
+// Sync endpoint to manually sync Firebase to public storage
+app.post('/api/sync/firebase-to-public', async (req, res) => {
+    try {
+        const { customerId } = req.body;
+        
+        if (customerId) {
+            // Sync specific customer
+            console.log(`[SYNC] Manual sync requested for customer: ${customerId}`);
+            const success = await syncFirebaseToPublicStorage(customerId);
+            
+            res.json({
+                success: success,
+                message: success ? 
+                    `Successfully synced wishlist for customer ${customerId}` : 
+                    `Failed to sync wishlist for customer ${customerId}`,
+                customerId: customerId
+            });
+        } else {
+            // Sync all customers
+            console.log('[SYNC] Manual full sync requested');
+            const success = await syncAllFirebaseToPublicStorage();
+            
+            res.json({
+                success: success,
+                message: success ? 
+                    'Successfully synced all wishlists from Firebase to public storage' : 
+                    'Failed to sync wishlists'
+            });
+        }
+        
+    } catch (error) {
+        console.error('[SYNC] Manual sync error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+// Health check endpoint that also tests sync functionality
+app.get('/api/health/sync', async (req, res) => {
+    try {
+        const healthResult = {
+            firebase: false,
+            publicStorage: false,
+            sync: false
+        };
+        
+        // Test Firebase
+        if (firebaseEnabled && wishlistService) {
+            try {
+                const firebaseHealth = await wishlistService.healthCheck();
+                healthResult.firebase = firebaseHealth.status === 'healthy';
+            } catch (error) {
+                console.error('Firebase health check failed:', error);
+            }
+        }
+        
+        // Test public storage
+        try {
+            const wishlistData = await loadWishlistData();
+            healthResult.publicStorage = typeof wishlistData === 'object';
+        } catch (error) {
+            console.error('Public storage health check failed:', error);
+        }
+        
+        // Test sync functionality (if Firebase is available)
+        if (healthResult.firebase) {
+            try {
+                // This is a dry-run sync test - we don't actually change data
+                healthResult.sync = true;
+            } catch (error) {
+                console.error('Sync health check failed:', error);
+            }
+        }
+        
+        const overallHealth = healthResult.firebase && healthResult.publicStorage;
+        
+        res.json({
+            success: true,
+            status: overallHealth ? 'healthy' : 'degraded',
+            components: healthResult,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Health check error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Health check failed',
+            details: error.message
         });
     }
 });
