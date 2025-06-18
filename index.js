@@ -3782,11 +3782,13 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
     if (useFirebase) {
       try {
         // Try Firebase first
+        console.log(`🔍 [DEBUG] Attempting Firebase lookup for customer: ${req.session.customerId}, email: ${req.session.email}`);
         wishlistProductIds = await wishlistService.getWishlistProductIds(
           req.session.customerId, 
           req.session.email
         );
         console.log(`🔥 Firebase returned ${wishlistProductIds.length} wishlist items`);
+        console.log(`🔍 [DEBUG] Firebase product IDs:`, wishlistProductIds);
       } catch (firebaseError) {
         console.error('❌ Firebase wishlist fetch failed, falling back to Shopify:', firebaseError.message);
         useFirebase = false;
@@ -3846,7 +3848,10 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       }
     }
 
+    console.log(`🔍 [DEBUG] Final wishlistProductIds before product lookup:`, wishlistProductIds);
+
     if (wishlistProductIds.length === 0) {
+      console.log(`🔍 [DEBUG] No wishlist items found, returning empty array`);
       return res.json({ wishlist: [] });
     }
 
@@ -3933,7 +3938,12 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       }
     );
 
+    console.log(`🔍 [DEBUG] Shopify products query response status:`, productsResponse.status);
+    console.log(`🔍 [DEBUG] Shopify products query result:`, JSON.stringify(productsResponse.data, null, 2));
+
     const products = productsResponse.data.data?.nodes || [];
+    console.log(`🔍 [DEBUG] Extracted products:`, products.length, 'products');
+    
     const wishlist = products.filter(product => product !== null).map(product => ({
       id: product.id,
       title: product.title,

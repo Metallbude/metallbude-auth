@@ -1,0 +1,1123 @@
+{% comment %}
+  Metallbude Wishlist Page - Exact Collection Style Match
+  - Clean minimalist design matching Metallbude's aesthetic
+  - Three-column grid layout like their collections
+  - Square product cards with minimal hover effects
+  - Consistent typography using system fonts
+  - Black, white, beige color scheme
+{% endcomment %}
+
+<div class="wishlist-page">
+  <div class="container">
+    <div class="wishlist-header">
+      <h1 class="wishlist-title">
+        <svg class="heart-icon" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5c0-3.08 2.42-5.5 5.5-5.5 1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+        </svg>
+        MEINE WUNSCHLISTE
+      </h1>
+      <p class="wishlist-subtitle">Deine gespeicherten Lieblingsprodukte</p>
+    </div>
+
+    <div class="wishlist-content">
+      <!-- Loading State -->
+      <div id="wishlist-loading" class="loading-state">
+        <div class="loading-spinner"></div>
+        <p>Lade deine Wunschliste...</p>
+      </div>
+
+      <!-- Empty State -->
+      <div id="wishlist-empty" class="empty-state" style="display: none;">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+          </svg>
+        </div>
+        <h3>DEINE WUNSCHLISTE IST LEER</h3>
+        <p>Entdecke unsere Produkte und füge deine Favoriten hinzu!</p>
+        <a href="/collections/all" class="btn-primary">JETZT STÖBERN</a>
+      </div>
+
+      <!-- Error State -->
+      <div id="wishlist-error" class="error-state" style="display: none;">
+        <div class="error-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="15" y1="9" x2="9" y2="15"/>
+            <line x1="9" y1="9" x2="15" y2="15"/>
+          </svg>
+        </div>
+        <h3>FEHLER BEIM LADEN</h3>
+        <p>Entschuldigung, deine Wunschliste konnte nicht geladen werden.</p>
+        <button id="retry-btn" class="btn-secondary">ERNEUT VERSUCHEN</button>
+      </div>
+
+      <!-- Filter & Sort Bar (Metallbude Style) -->
+      <div id="filter-bar" class="filter-bar" style="display: none;">
+        <div class="filter-left">
+          <span class="results-count">8 Produkte</span>
+        </div>
+        <div class="filter-right">
+          <select class="sort-select">
+            <option value="default">Ausgewählt</option>
+            <option value="price-low">Preis aufsteigend</option>
+            <option value="price-high">Preis absteigend</option>
+            <option value="name">Alphabetisch</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Wishlist Grid - Exact Metallbude Collection Layout -->
+      <div id="wishlist-items" class="wishlist-grid" style="display: none;">
+        <!-- Products will be loaded here -->
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+/* Metallbude Collection Page - Exact Style Match */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.wishlist-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #ffffff;
+  color: #000000;
+  line-height: 1.4;
+}
+
+.container {
+  width: 100%;
+}
+
+/* Header - Metallbude Style */
+.wishlist-header {
+  text-align: center;
+  margin-bottom: 60px;
+}
+
+.wishlist-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 1.8rem;
+  font-weight: 600;
+  color: #000000;
+  margin-bottom: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.heart-icon {
+  width: 20px;
+  height: 20px;
+  color: #000000;
+}
+
+.wishlist-subtitle {
+  font-size: 0.85rem;
+  color: #666666;
+  margin: 0;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Filter Bar - Metallbude Style */
+.filter-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 40px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.results-count {
+  font-size: 0.85rem;
+  color: #666666;
+  font-weight: 400;
+}
+
+/* Sort Select - 20px Border Radius */
+.sort-select {
+  background: #ffffff;
+  border: 1px solid #e8e8e8;
+  border-radius: 20px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: #000000;
+  cursor: pointer;
+  min-width: 160px;
+  font-weight: 400;
+}
+
+.sort-select:focus {
+  outline: none;
+  border-color: #000000;
+}
+
+/* Loading State */
+.loading-state {
+  text-align: center;
+  padding: 120px 20px;
+}
+
+.loading-spinner {
+  width: 30px;
+  height: 30px;
+  border: 2px solid #f0f0f0;
+  border-top: 2px solid #000000;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 24px;
+}
+
+.loading-state p {
+  color: #666666;
+  font-size: 0.9rem;
+  font-weight: 400;
+}
+
+/* Empty & Error States */
+.empty-state, .error-state {
+  text-align: center;
+  padding: 120px 20px;
+}
+
+.empty-icon svg, .error-icon svg {
+  width: 60px;
+  height: 60px;
+  color: #cccccc;
+  margin-bottom: 32px;
+}
+
+.error-icon svg {
+  color: #dc3545;
+}
+
+.empty-state h3, .error-state h3 {
+  font-size: 1.2rem;
+  color: #000000;
+  margin-bottom: 16px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.empty-state p, .error-state p {
+  color: #666666;
+  font-size: 0.9rem;
+  margin-bottom: 32px;
+  font-weight: 400;
+}
+
+/* Buttons - 20px Border Radius */
+.btn-primary, .btn-secondary {
+  display: inline-block;
+  padding: 12px 24px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border: none;
+  font-family: inherit;
+  border-radius: 20px;
+}
+
+.btn-primary {
+  background: #000000;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background: #333333;
+}
+
+.btn-secondary {
+  background: #ffffff;
+  color: #000000;
+  border: 1px solid #e8e8e8;
+}
+
+.btn-secondary:hover {
+  background: #f8f8f8;
+  border-color: #cccccc;
+}
+
+/* Wishlist Grid - Fixed Height for Perfect Alignment */
+.wishlist-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 48px 20px; /* More space between rows, tight columns */
+  margin-top: 0;
+}
+
+/* Product Card - Flexbox Layout for Perfect Button Alignment */
+.product-card {
+  background: #ffffff;
+  border: none;
+  border-radius: 20px;
+  position: relative;
+  cursor: pointer;
+  transition: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  height: 480px; /* Fixed height - adjust based on your content needs */
+}
+
+/* Product Image - 1:1.5 Portrait Aspect Ratio with 20px Border Radius */
+.product-image {
+  width: 100%;
+  aspect-ratio: 1/1.5; /* Portrait mode - taller than wide */
+  background: #f8f8f8;
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 16px;
+  border-radius: 20px;
+  flex-shrink: 0; /* Don't shrink the image */
+  transition: transform 0.2s ease;
+}
+
+.product-image:hover {
+  transform: scale(1.02); /* Subtle scale on hover to indicate clickability */
+}
+
+.product-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: none; /* No zoom effects */
+}
+
+.product-image svg {
+  width: 32px;
+  height: 32px;
+  color: #cccccc;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Product Info - Flexible content area */
+.product-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1; /* Take remaining space */
+  justify-content: space-between; /* Push button to bottom */
+}
+
+.product-content {
+  flex: 1; /* Take available space */
+}
+
+.product-actions {
+  margin-top: auto; /* Push to bottom */
+  padding-top: 8px;
+}
+
+/* Remove Button - Always Visible for Mobile */
+.remove-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #666666;
+  border: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  opacity: 1; /* Always visible for mobile compatibility */
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1); /* Subtle shadow for better visibility */
+}
+
+.remove-btn:hover {
+  color: #dc3545;
+  background: rgba(255, 255, 255, 1);
+  transform: scale(1.05); /* Slight scale on hover */
+}
+
+/* Product Badge - 20px Border Radius */
+.product-badge {
+  display: inline-block;
+  background: #000000;
+  color: #ffffff;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 6px;
+  margin-bottom: 8px;
+  border-radius: 20px;
+}
+
+.product-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #000000;
+  margin-bottom: 4px;
+  line-height: 1.3;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  text-decoration: none;
+  display: block;
+  min-height: 2.6em; /* Reserve space for 2 lines of text */
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2; /* Limit to 2 lines */
+  -webkit-box-orient: vertical;
+}
+
+.product-title:hover {
+  text-decoration: underline;
+}
+
+.product-vendor {
+  display: none; /* Metallbude doesn't show vendor */
+}
+
+.product-price {
+  color: #000000;
+  font-weight: 500;
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+}
+
+.product-price-from {
+  font-size: 0.75rem;
+  color: #666666;
+  font-weight: 400;
+  margin-right: 4px;
+  text-transform: lowercase;
+}
+
+/* Color Swatches - 20px Border Radius */
+.product-swatches {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 20px;
+  border: 1px solid #e8e8e8;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.swatch:hover {
+  transform: scale(1.1);
+  border-color: #000000;
+}
+
+.swatch-text {
+  font-size: 0.72rem;
+  color: #666666;
+  font-weight: 400;
+}
+
+/* Metallbude Color Definitions */
+.swatch[data-color="schwarz"] { background-color: #000000; }
+.swatch[data-color="weiß"] { background-color: #ffffff; border-color: #cccccc; }
+.swatch[data-color="cashew"] { background-color: #d4b896; }
+.swatch[data-color="blueberry-soda"] { background-color: #6b8dd6; }
+.swatch[data-color="mango-lassi"] { background-color: #ffa726; }
+.swatch[data-color="matcha-latte"] { background-color: #8bc34a; }
+.swatch[data-color="pink-lemonade"] { background-color: #f06292; }
+.swatch[data-color="beige"] { background-color: #f5f1eb; }
+
+/* Action Button - 20px Border Radius */
+.btn-view {
+  display: block;
+  width: 100%;
+  padding: 10px 0;
+  background: transparent;
+  color: #000000;
+  border: 1px solid #000000;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-decoration: none;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.btn-view:hover {
+  background: #000000;
+  color: #ffffff;
+}
+
+/* Success Message - 20px Border Radius */
+.success-message {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background: #000000;
+  color: #ffffff;
+  padding: 16px 24px;
+  border-radius: 20px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  z-index: 1000;
+  animation: slideIn 0.3s ease;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 0.8rem;
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(100%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Responsive Design - Fixed Heights for Each Breakpoint */
+@media (max-width: 1200px) {
+  .wishlist-grid {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 40px 18px;
+  }
+  
+  .product-card {
+    height: 500px; /* Slightly taller for 4-column layout */
+  }
+}
+
+@media (max-width: 1024px) {
+  .wishlist-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 36px 16px;
+  }
+  
+  .product-card {
+    height: 520px; /* Taller for 3-column layout */
+  }
+}
+
+@media (max-width: 768px) {
+  .wishlist-page {
+    padding: 24px 16px;
+  }
+  
+  .wishlist-header {
+    margin-bottom: 40px;
+  }
+  
+  .wishlist-title {
+    font-size: 1.5rem;
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .filter-bar {
+    flex-direction: column;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  
+  .wishlist-grid {
+    grid-template-columns: repeat(2, 1fr); /* Mobile: 2 products per row */
+    gap: 32px 16px;
+  }
+  
+  .product-card {
+    height: 550px; /* Taller for 2-column mobile layout */
+  }
+  
+  /* Mobile-specific remove button improvements */
+  .remove-btn {
+    width: 32px;
+    height: 32px;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  }
+}
+
+@media (max-width: 480px) {
+  .wishlist-grid {
+    grid-template-columns: repeat(2, 1fr); /* Keep 2 columns even on small mobile */
+    gap: 28px 12px;
+  }
+  
+  .wishlist-title {
+    font-size: 1.3rem;
+  }
+  
+  .product-card {
+    height: 520px; /* Appropriate height for small mobile */
+  }
+}
+
+/* High contrast focus states for accessibility */
+.btn-primary:focus,
+.btn-secondary:focus,
+.sort-select:focus {
+  outline: 2px solid #000000;
+  outline-offset: 2px;
+}
+</style>
+
+<script>
+// Metallbude Style Wishlist Manager - Clean Collection Page Experience
+class MetallbudeWishlistManager {
+  constructor() {
+    this.backendUrl = 'https://metallbude-auth.onrender.com';
+    this.customerId = this.getCustomerId();
+    this.products = [];
+    this.init();
+  }
+
+  getCustomerId() {
+    {% if customer %}
+      return '{{ customer.id }}';
+    {% else %}
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get('customer_id') || localStorage.getItem('temp_customer_id') || null;
+    {% endif %}
+  }
+
+  async init() {
+    console.log('🔥 Metallbude Wishlist Manager initialized');
+    console.log('🆔 Customer ID:', this.customerId);
+    console.log('🌐 Backend URL:', this.backendUrl);
+    
+    if (!this.customerId) {
+      console.warn('⚠️ No customer ID found');
+      this.showEmpty();
+      return;
+    }
+
+    await this.loadWishlist();
+    this.setupEventListeners();
+  }
+
+  setupEventListeners() {
+    // Sort functionality
+    const sortSelect = document.querySelector('.sort-select');
+    if (sortSelect) {
+      sortSelect.addEventListener('change', (e) => {
+        this.sortProducts(e.target.value);
+      });
+    }
+
+    // Retry button
+    const retryBtn = document.getElementById('retry-btn');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', () => this.loadWishlist());
+    }
+  }
+
+  async loadWishlist() {
+    try {
+      console.log('📥 Loading wishlist...');
+      this.showLoading();
+      
+      const apiUrl = `${this.backendUrl}/api/public/wishlist/items?customerId=${this.customerId}`;
+      console.log('🌐 Loading from:', apiUrl);
+      
+      const response = await fetch(apiUrl);
+      console.log('📡 Load response status:', response.status);
+      
+      if (!response.ok) {
+        throw new Error(`Backend error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('📡 Load response data:', data);
+      
+      if (!data.success || !data.items || data.items.length === 0) {
+        console.log('📭 No items found, showing empty state');
+        this.showEmpty();
+        return;
+      }
+
+      console.log(`📦 Found ${data.items.length} items in wishlist`);
+      await this.displayWishlistItems(data.items);
+      
+    } catch (error) {
+      console.error('🔥 Error loading wishlist:', error);
+      this.showError();
+    }
+  }
+
+  async displayWishlistItems(items) {
+    this.hideAllStates();
+    document.getElementById('wishlist-items').style.display = 'grid';
+    document.getElementById('filter-bar').style.display = 'flex';
+    
+    const productData = items.map(item => ({
+      productId: this.extractProductId(item.productId),
+      variantId: item.variantId || null,
+      originalItem: item
+    }));
+    
+    this.products = await this.fetchRealProductData(productData);
+    this.renderProducts();
+    this.updateResultsCount();
+  }
+
+  extractProductId(shopifyGid) {
+    if (typeof shopifyGid === 'string' && shopifyGid.includes('gid://shopify/Product/')) {
+      return shopifyGid.split('/').pop();
+    }
+    return shopifyGid;
+  }
+
+  async fetchRealProductData(productDataArray) {
+    const products = [];
+    
+    try {
+      const collectionsResponse = await fetch(`/collections/all/products.json?limit=250`);
+      
+      if (collectionsResponse.ok) {
+        const collectionsData = await collectionsResponse.json();
+        
+        productDataArray.forEach(productData => {
+          const productId = productData.productId;
+          const variantId = productData.variantId;
+          const foundProduct = collectionsData.products.find(p => p.id.toString() === productId);
+          
+          if (foundProduct) {
+            const variants = foundProduct.variants || [];
+            let selectedVariant = null;
+            if (variantId) {
+              selectedVariant = variants.find(v => v.id.toString() === variantId.toString());
+            }
+            
+            // Try to extract color from wishlist item data first (more reliable)
+            let selectedColor = this.extractColorFromWishlistItem(productData.originalItem);
+            
+            // Fall back to variant extraction if no color found in wishlist data
+            if (!selectedColor && selectedVariant) {
+              selectedColor = this.extractColorFromVariant(selectedVariant);
+            }
+            
+            // Only show the selected color if we have one, otherwise show no swatches
+            const displayColors = selectedColor ? [selectedColor] : [];
+            
+            // Use the selected variant's image if available, otherwise fallback to product featured image
+            let productImage = foundProduct.images && foundProduct.images[0] ? foundProduct.images[0].src : null;
+            if (selectedVariant && selectedVariant.featured_image) {
+              productImage = selectedVariant.featured_image.src;
+            }
+            
+            // Use the selected variant's price if available
+            let productPrice = foundProduct.variants[0]?.price || '0.00';
+            if (selectedVariant && selectedVariant.price) {
+              productPrice = selectedVariant.price;
+            }
+            
+            products.push({
+              id: productId,
+              gid: `gid://shopify/Product/${productId}`,
+              title: foundProduct.title,
+              handle: foundProduct.handle,
+              featuredImage: productImage,
+              price: productPrice,
+              priceMin: Math.min(...variants.map(v => parseFloat(v.price || 0))),
+              priceMax: Math.max(...variants.map(v => parseFloat(v.price || 0))),
+              available: foundProduct.available,
+              vendor: foundProduct.vendor || '',
+              url: `/products/${foundProduct.handle}`,
+              colors: displayColors, // Only show the selected color swatch
+              selectedColor: selectedColor,
+              selectedVariant: selectedVariant,
+              variants: variants,
+              tags: foundProduct.tags || [],
+              isReal: true,
+              // Store original wishlist item data for better variant handling
+              wishlistItemData: productData.originalItem
+            });
+          } else {
+            products.push({
+              id: productId,
+              gid: `gid://shopify/Product/${productId}`,
+              title: `Produkt ${productId}`,
+              handle: productId,
+              featuredImage: null,
+              price: '0.00',
+              priceMin: 0,
+              priceMax: 0,
+              available: true,
+              vendor: '',
+              url: `/products/${productId}`,
+              colors: [],
+              selectedColor: null,
+              selectedVariant: null,
+              variants: [],
+              tags: [],
+              isReal: false
+            });
+          }
+        });
+      }
+      
+    } catch (error) {
+      console.error('🔥 Error fetching product data:', error);
+    }
+    
+    return products;
+  }
+
+  extractColorFromVariant(variant) {
+    const options = [variant.option1, variant.option2, variant.option3];
+    for (const option of options) {
+      if (option) {
+        const colorName = option.toLowerCase().trim();
+        if (colorName.includes('schwarz') || colorName.includes('black')) return 'schwarz';
+        else if (colorName.includes('weiß') || colorName.includes('white')) return 'weiß';
+        else if (colorName.includes('cashew')) return 'cashew';
+        else if (colorName.includes('blueberry') || colorName.includes('soda')) return 'blueberry-soda';
+        else if (colorName.includes('mango') || colorName.includes('lassi')) return 'mango-lassi';
+        else if (colorName.includes('matcha') || colorName.includes('latte')) return 'matcha-latte';
+        else if (colorName.includes('pink') || colorName.includes('lemonade')) return 'pink-lemonade';
+        else if (colorName.includes('beige')) return 'beige';
+      }
+    }
+    return null;
+  }
+
+  // Extract color from wishlist item's selectedOptions
+  extractColorFromWishlistItem(wishlistItem) {
+    if (!wishlistItem || !wishlistItem.selectedOptions) {
+      return null;
+    }
+    
+    // Check various possible option names for color
+    const colorKeys = [
+      'Color', 'Farbe', 'Colour', 'color', 'farbe', 'colour',
+      'Leder Farbe', 'Haken Farbe', 'Korpus Farbe', 'Gestell Farbe'
+    ];
+    
+    for (const key of colorKeys) {
+      if (wishlistItem.selectedOptions[key]) {
+        const colorValue = wishlistItem.selectedOptions[key].toLowerCase().trim();
+        if (colorValue.includes('schwarz') || colorValue.includes('black')) return 'schwarz';
+        else if (colorValue.includes('weiß') || colorValue.includes('white')) return 'weiß';
+        else if (colorValue.includes('cashew')) return 'cashew';
+        else if (colorValue.includes('blueberry') || colorValue.includes('soda')) return 'blueberry-soda';
+        else if (colorValue.includes('mango') || colorValue.includes('lassi')) return 'mango-lassi';
+        else if (colorValue.includes('matcha') || colorValue.includes('latte')) return 'matcha-latte';
+        else if (colorValue.includes('pink') || colorValue.includes('lemonade')) return 'pink-lemonade';
+        else if (colorValue.includes('beige')) return 'beige';
+      }
+    }
+    
+    return null;
+  }
+
+  // Get readable selected option text from wishlist item
+  getSelectedOptionText(wishlistItem) {
+    if (!wishlistItem || !wishlistItem.selectedOptions) {
+      return null;
+    }
+    
+    // Look for color options specifically
+    const colorKeys = [
+      'Color', 'Farbe', 'Colour', 'color', 'farbe', 'colour',
+      'Leder Farbe', 'Haken Farbe', 'Korpus Farbe', 'Gestell Farbe'
+    ];
+    
+    for (const key of colorKeys) {
+      if (wishlistItem.selectedOptions[key]) {
+        return wishlistItem.selectedOptions[key];
+      }
+    }
+    
+    // If no color found, return the first available option
+    const options = Object.entries(wishlistItem.selectedOptions);
+    if (options.length > 0) {
+      return options[0][1]; // Return first option value
+    }
+    
+    return null;
+  }
+
+  extractColorsFromVariants(variants) {
+    const colors = new Set();
+    variants.forEach(variant => {
+      const options = [variant.option1, variant.option2, variant.option3];
+      options.forEach(option => {
+        if (option) {
+          const colorName = option.toLowerCase().trim();
+          if (colorName.includes('schwarz') || colorName.includes('black')) colors.add('schwarz');
+          else if (colorName.includes('weiß') || colorName.includes('white')) colors.add('weiß');
+          else if (colorName.includes('cashew')) colors.add('cashew');
+          else if (colorName.includes('blueberry') || colorName.includes('soda')) colors.add('blueberry-soda');
+          else if (colorName.includes('mango') || colorName.includes('lassi')) colors.add('mango-lassi');
+          else if (colorName.includes('matcha') || colorName.includes('latte')) colors.add('matcha-latte');
+          else if (colorName.includes('pink') || colorName.includes('lemonade')) colors.add('pink-lemonade');
+          else if (colorName.includes('beige')) colors.add('beige');
+        }
+      });
+    });
+    return Array.from(colors);
+  }
+
+  renderProducts() {
+    const grid = document.getElementById('wishlist-items');
+    grid.innerHTML = '';
+
+    this.products.forEach(product => {
+      const productCard = this.createMetallbudeProductCard(product);
+      grid.appendChild(productCard);
+    });
+  }
+
+  createMetallbudeProductCard(product) {
+    const card = document.createElement('div');
+    card.className = 'product-card';
+    
+    // Image HTML
+    let imageHtml;
+    if (product.featuredImage) {
+      imageHtml = `<img src="${product.featuredImage}" alt="${product.title}">`;
+    } else {
+      imageHtml = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <polyline points="21,15 16,10 5,21"/>
+        </svg>
+      `;
+    }
+    
+    // Price formatting (German style with comma)
+    let priceHtml = '';
+    if (product.isReal && product.priceMin && product.priceMax) {
+      if (product.priceMin === product.priceMax) {
+        priceHtml = `<p class="product-price">${product.priceMin.toFixed(2).replace('.', ',')} EUR</p>`;
+      } else {
+        priceHtml = `<p class="product-price"><span class="product-price-from">ab</span> ${product.priceMin.toFixed(2).replace('.', ',')} EUR</p>`;
+      }
+    } else if (product.price !== '0.00') {
+      priceHtml = `<p class="product-price">${product.price.replace('.', ',')} EUR</p>`;
+    }
+    
+    // Color swatches - only show if we have a selected color, and add option text
+    let swatchesHtml = '';
+    if (product.colors && product.colors.length > 0) {
+      const colorName = product.selectedColor;
+      const optionText = this.getSelectedOptionText(product.wishlistItemData);
+      
+      swatchesHtml = `
+        <div class="product-swatches">
+          <div class="swatch" data-color="${colorName}" title="${optionText || colorName}"></div>
+          ${optionText ? `<span class="swatch-text">${optionText}</span>` : ''}
+        </div>
+      `;
+    }
+
+    // Badge for bestsellers
+    let badgeHtml = '';
+    if (product.tags && product.tags.includes('bestseller')) {
+      badgeHtml = '<div class="product-badge">BESTSELLER</div>';
+    }
+    
+    card.innerHTML = `
+      <div class="product-image" onclick="window.location.href='${product.url}'" style="cursor: pointer;">
+        ${imageHtml}
+        <button class="remove-btn" title="Aus Wunschliste entfernen" onclick="event.stopPropagation(); window.wishlistManager.removeItemSafe(event, '${product.gid}', '${product.selectedVariant ? product.selectedVariant.id : ''}')">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="product-info">
+        <div class="product-content">
+          ${badgeHtml}
+          <a href="${product.url}" class="product-title">${product.title}</a>
+          ${priceHtml}
+          ${swatchesHtml}
+        </div>
+        <div class="product-actions">
+          <a href="${product.url}" class="btn-view">ANSEHEN</a>
+        </div>
+      </div>
+    `;
+    
+    // Store data attributes for safe removal
+    card.dataset.productId = product.gid;
+    if (product.selectedVariant) {
+      card.dataset.variantId = product.selectedVariant.id;
+    }
+    if (product.wishlistItemData?.selectedOptions) {
+      card.dataset.selectedOptions = JSON.stringify(product.wishlistItemData.selectedOptions);
+    }
+    
+    return card;
+  }
+
+  sortProducts(sortType) {
+    switch (sortType) {
+      case 'price-low':
+        this.products.sort((a, b) => (a.priceMin || parseFloat(a.price)) - (b.priceMin || parseFloat(b.price)));
+        break;
+      case 'price-high':
+        this.products.sort((a, b) => (b.priceMin || parseFloat(b.price)) - (a.priceMin || parseFloat(a.price)));
+        break;
+      case 'name':
+        this.products.sort((a, b) => a.title.localeCompare(b.title));
+        break;
+      default:
+        // Keep original order
+        break;
+    }
+    this.renderProducts();
+  }
+
+  updateResultsCount() {
+    const countElement = document.querySelector('.results-count');
+    if (countElement) {
+      const count = this.products.length;
+      countElement.textContent = `${count} ${count === 1 ? 'Produkt' : 'Produkte'}`;
+    }
+  }
+
+  async removeItem(productId, variantId = '', selectedOptions = {}) {
+    try {
+      console.log('🗑️ Starting remove item process...');
+      console.log('   Product ID:', productId);
+      console.log('   Variant ID:', variantId);
+      console.log('   Selected Options:', selectedOptions);
+      console.log('   Customer ID:', this.customerId);
+      
+      const requestBody = {
+        customerId: this.customerId,
+        productId: productId
+      };
+      
+      // Add variant and selected options if provided
+      if (variantId) {
+        requestBody.variantId = variantId;
+      }
+      if (selectedOptions && Object.keys(selectedOptions).length > 0) {
+        requestBody.selectedOptions = selectedOptions;
+      }
+      
+      console.log('📦 Request body:', requestBody);
+      console.log('🌐 API URL:', `${this.backendUrl}/api/public/wishlist/remove`);
+      
+      const response = await fetch(`${this.backendUrl}/api/public/wishlist/remove`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      console.log('📡 Response status:', response.status);
+      const responseData = await response.json();
+      console.log('📡 Response data:', responseData);
+
+      if (response.ok) {
+        this.showSuccess('ARTIKEL WURDE ENTFERNT!');
+        setTimeout(() => this.loadWishlist(), 500);
+      } else {
+        throw new Error(`Remove failed: ${response.status} - ${responseData.error || 'Unknown error'}`);
+      }
+      
+    } catch (error) {
+      console.error('🔥 Error removing item:', error);
+      alert('Fehler beim Entfernen des Artikels. Bitte versuchen Sie es erneut.');
+    }
+  }
+
+  // Safe remove method that reads data attributes from the clicked element
+  async removeItemSafe(clickEvent, productId, variantId) {
+    try {
+      console.log('🗑️ Removing item:', productId, variantId);
+      
+      const removeBtn = clickEvent.target.closest('.remove-btn');
+      const productCard = removeBtn.closest('.product-card');
+      const selectedOptionsJson = productCard.dataset.selectedOptions;
+      
+      let selectedOptions = {};
+      if (selectedOptionsJson) {
+        try {
+          selectedOptions = JSON.parse(selectedOptionsJson);
+        } catch (e) {
+          console.warn('Failed to parse selected options:', e);
+        }
+      }
+      
+      console.log('Selected options:', selectedOptions);
+      await this.removeItem(productId, variantId, selectedOptions);
+    } catch (error) {
+      console.error('🔥 Error in removeItemSafe:', error);
+      alert('Fehler beim Entfernen des Artikels. Bitte versuchen Sie es erneut.');
+    }
+  }
+
+  showLoading() {
+    this.hideAllStates();
+    document.getElementById('wishlist-loading').style.display = 'block';
+  }
+
+  showEmpty() {
+    this.hideAllStates();
+    document.getElementById('wishlist-empty').style.display = 'block';
+  }
+
+  showError() {
+    this.hideAllStates();
+    document.getElementById('wishlist-error').style.display = 'block';
+  }
+
+  hideAllStates() {
+    document.getElementById('wishlist-loading').style.display = 'none';
+    document.getElementById('wishlist-empty').style.display = 'none';
+    document.getElementById('wishlist-error').style.display = 'none';
+    document.getElementById('wishlist-items').style.display = 'none';
+    document.getElementById('filter-bar').style.display = 'none';
+  }
+
+  showSuccess(message) {
+    const successDiv = document.createElement('div');
+    successDiv.className = 'success-message';
+    successDiv.textContent = message;
+    document.body.appendChild(successDiv);
+    
+    setTimeout(() => {
+      successDiv.remove();
+    }, 3000);
+  }
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', function() {
+  window.wishlistManager = new MetallbudeWishlistManager();
+});
+</script>

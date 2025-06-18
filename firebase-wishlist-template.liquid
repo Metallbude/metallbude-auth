@@ -1,0 +1,400 @@
+<!-- Shopify Wishlist Page Template -->
+<!-- This file should be placed in your Shopify theme as templates/page.wishlist.liquid -->
+
+<div class="wishlist-container">
+  <h1>Meine Wunschliste</h1>
+  
+  <div id="wishlist-loading" style="display: none;">
+    <p>Lade Wunschliste...</p>
+  </div>
+  
+  <div id="wishlist-empty" style="display: none;">
+    <p>Deine Wunschliste ist leer.</p>
+    <a href="{{ routes.all_products_collection_url }}">Jetzt einkaufen</a>
+  </div>
+  
+  <div id="wishlist-items" class="wishlist-grid">
+    <!-- Wishlist items will be populated here by JavaScript -->
+  </div>
+</div>
+
+<style>
+.wishlist-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.wishlist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.wishlist-item {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  overflow: hidden;
+  background: white;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  transition: transform 0.2s;
+}
+
+.wishlist-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+.wishlist-item-image {
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+}
+
+.wishlist-item-content {
+  padding: 15px;
+}
+
+.wishlist-item-title {
+  font-size: 16px;
+  font-weight: bold;
+  margin-bottom: 8px;
+  color: #333;
+}
+
+.wishlist-item-price {
+  font-size: 18px;
+  color: #e74c3c;
+  font-weight: bold;
+  margin-bottom: 10px;
+}
+
+.wishlist-item-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: center;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.btn-primary {
+  background-color: #3498db;
+  color: white;
+}
+
+.btn-primary:hover {
+  background-color: #2980b9;
+}
+
+.btn-danger {
+  background-color: #e74c3c;
+  color: white;
+}
+
+.btn-danger:hover {
+  background-color: #c0392b;
+}
+
+.error-message {
+  color: #e74c3c;
+  padding: 10px;
+  background-color: #ffeaea;
+  border-radius: 4px;
+  margin: 10px 0;
+}
+</style>
+
+<script>
+class ShopifyWishlist {
+  constructor() {
+    this.backendUrl = 'https://metallbude-auth.onrender.com';
+    this.storefrontToken = '{{ settings.storefront_access_token }}'; // Add this to your theme settings
+    this.customerId = this.getCustomerId();
+    this.init();
+  }
+
+  getCustomerId() {
+    // Get customer ID from Shopify's customer object
+    {% if customer %}
+      return '{{ customer.id }}';
+    {% else %}
+      return null;
+    {% endif %}
+  }
+
+  async init() {
+    if (!this.customerId) {
+      document.getElementById('wishlist-empty').style.display = 'block';
+      document.getElementById('wishlist-empty').innerHTML = '<p>Bitte melde dich an, um deine Wunschliste zu sehen.</p><a href="/account/login">Anmelden</a>';
+      return;
+    }
+
+    await this.loadWishlist();
+  }
+
+  async loadWishlist() {
+    try {
+      document.getElementById('wishlist-loading').style.display = 'block';
+      
+      // Fetch wishlist item IDs from your backend
+      const response = await fetch(`${this.backendUrl}/api/public/wishlist/items?customerId=${this.customerId}`);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('Wishlist data from backend:', data);
+      
+      if (!data.success || !data.items || data.items.length === 0) {
+        document.getElementById('wishlist-loading').style.display = 'none';
+        document.getElementById('wishlist-empty').style.display = 'block';
+        return;
+      }
+
+      // Extract product IDs and fetch product details from Shopify
+      const productIds = data.items.map(item => this.extractProductId(item.productId));
+      console.log('Product IDs:', productIds);
+      
+      const products = await this.fetchProductDetails(productIds);
+      console.log('Product details:', products);
+      
+      this.renderWishlistItems(products);
+      
+    } catch (error) {
+      console.error('Error loading wishlist:', error);
+      document.getElementById('wishlist-loading').style.display = 'none';
+      document.getElementById('wishlist-items').innerHTML = `
+        <div class="error-message">
+          Fehler beim Laden der Wunschliste: ${error.message}
+        </div>
+      `;
+    }
+  }
+
+  extractProductId(shopifyGid) {
+    // Extract numeric ID from Shopify GID format
+    // e.g., "gid://shopify/Product/6631873446052" -> "6631873446052"
+    if (typeof shopifyGid === 'string' && shopifyGid.includes('gid://shopify/Product/')) {
+      return shopifyGid.split('/').pop();
+    }
+    return shopifyGid;
+  }
+
+  async fetchProductDetails(productIds) {
+    try {
+      // Use Shopify's Storefront API to fetch product details
+      const query = `
+        query getProducts($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Product {
+              id
+              handle
+              title
+              featuredImage {
+                url
+                altText
+              }
+              priceRange {
+                minVariantPrice {
+                  amount
+                  currencyCode
+                }
+              }
+              variants(first: 1) {
+                edges {
+                  node {
+                    id
+                    availableForSale
+                  }
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      // Convert numeric IDs back to GID format for Storefront API
+      const gids = productIds.map(id => `gid://shopify/Product/${id}`);
+
+      const response = await fetch(`/api/2023-10/graphql.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Storefront-Access-Token': this.storefrontToken
+        },
+        body: JSON.stringify({
+          query: query,
+          variables: { ids: gids }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Shopify API error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      if (result.errors) {
+        console.error('GraphQL errors:', result.errors);
+        throw new Error('GraphQL query failed');
+      }
+
+      return result.data.nodes.filter(node => node !== null);
+      
+    } catch (error) {
+      console.error('Error fetching product details:', error);
+      // Fallback: try to fetch using Ajax API (less detailed but more compatible)
+      return await this.fetchProductDetailsAjax(productIds);
+    }
+  }
+
+  async fetchProductDetailsAjax(productIds) {
+    // Fallback method using Shopify's Ajax API
+    const products = [];
+    
+    for (const productId of productIds) {
+      try {
+        const response = await fetch(`/products/${productId}.js`);
+        if (response.ok) {
+          const product = await response.json();
+          products.push({
+            id: `gid://shopify/Product/${product.id}`,
+            handle: product.handle,
+            title: product.title,
+            featuredImage: product.featured_image ? {
+              url: product.featured_image,
+              altText: product.title
+            } : null,
+            priceRange: {
+              minVariantPrice: {
+                amount: (product.price / 100).toFixed(2),
+                currencyCode: 'EUR'
+              }
+            },
+            variants: {
+              edges: product.variants.map(v => ({
+                node: {
+                  id: `gid://shopify/ProductVariant/${v.id}`,
+                  availableForSale: v.available
+                }
+              }))
+            }
+          });
+        }
+      } catch (error) {
+        console.error(`Error fetching product ${productId}:`, error);
+      }
+    }
+    
+    return products;
+  }
+
+  renderWishlistItems(products) {
+    document.getElementById('wishlist-loading').style.display = 'none';
+    
+    if (products.length === 0) {
+      document.getElementById('wishlist-empty').style.display = 'block';
+      return;
+    }
+
+    const wishlistContainer = document.getElementById('wishlist-items');
+    wishlistContainer.innerHTML = '';
+
+    products.forEach(product => {
+      const itemHtml = this.createWishlistItemHtml(product);
+      wishlistContainer.appendChild(itemHtml);
+    });
+  }
+
+  createWishlistItemHtml(product) {
+    const div = document.createElement('div');
+    div.className = 'wishlist-item';
+    
+    const imageUrl = product.featuredImage ? product.featuredImage.url : '/assets/no-image.png';
+    const price = product.priceRange.minVariantPrice.amount;
+    const currency = product.priceRange.minVariantPrice.currencyCode;
+    const isAvailable = product.variants.edges.length > 0 && product.variants.edges[0].node.availableForSale;
+    
+    div.innerHTML = `
+      <img src="${imageUrl}" alt="${product.featuredImage?.altText || product.title}" class="wishlist-item-image">
+      <div class="wishlist-item-content">
+        <h3 class="wishlist-item-title">${product.title}</h3>
+        <div class="wishlist-item-price">${price} ${currency}</div>
+        <div class="wishlist-item-actions">
+          <a href="/products/${product.handle}" class="btn btn-primary">Ansehen</a>
+          ${isAvailable ? `<button onclick="wishlistManager.addToCart('${product.variants.edges[0].node.id}')" class="btn btn-primary">In den Warenkorb</button>` : '<span class="btn" style="background: #ccc;">Nicht verfügbar</span>'}
+          <button onclick="wishlistManager.removeFromWishlist('${product.id}')" class="btn btn-danger">Entfernen</button>
+        </div>
+      </div>
+    `;
+    
+    return div;
+  }
+
+  async removeFromWishlist(productId) {
+    try {
+      const response = await fetch(`${this.backendUrl}/api/public/wishlist/remove`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          customerId: this.customerId,
+          productId: productId
+        })
+      });
+
+      if (response.ok) {
+        // Reload the wishlist
+        await this.loadWishlist();
+      } else {
+        throw new Error('Failed to remove item from wishlist');
+      }
+    } catch (error) {
+      console.error('Error removing from wishlist:', error);
+      alert('Fehler beim Entfernen aus der Wunschliste');
+    }
+  }
+
+  async addToCart(variantId) {
+    try {
+      const response = await fetch('/cart/add.js', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          id: variantId.replace('gid://shopify/ProductVariant/', ''),
+          quantity: 1
+        })
+      });
+
+      if (response.ok) {
+        // Optionally redirect to cart or show success message
+        alert('Produkt wurde zum Warenkorb hinzugefügt!');
+        // window.location.href = '/cart';
+      } else {
+        throw new Error('Failed to add to cart');
+      }
+    } catch (error) {
+      console.error('Error adding to cart:', error);
+      alert('Fehler beim Hinzufügen zum Warenkorb');
+    }
+  }
+}
+
+// Initialize wishlist when page loads
+document.addEventListener('DOMContentLoaded', function() {
+  window.wishlistManager = new ShopifyWishlist();
+});
+</script>

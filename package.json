@@ -5,9 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js",
-    "security:check": "node security-check.js",
-    "security:setup": "node setup-render-env.js"
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "axios": "^1.9.0",

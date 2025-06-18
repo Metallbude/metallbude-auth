@@ -204,8 +204,12 @@ class WishlistService {
   // Get wishlist product IDs only (for compatibility with existing Shopify product fetching)
   async getWishlistProductIds(customerId, customerEmail) {
     try {
+      console.log(`🔍 [DEBUG] Getting wishlist product IDs for ${customerEmail} (${customerId})`);
       const items = await this.getWishlist(customerId, customerEmail);
-      return items.map(item => item.productId);
+      console.log(`🔍 [DEBUG] Raw items from getWishlist:`, JSON.stringify(items, null, 2));
+      const productIds = items.map(item => item.productId);
+      console.log(`🔍 [DEBUG] Extracted product IDs:`, productIds);
+      return productIds;
     } catch (error) {
       console.error('❌ Firebase get wishlist product IDs error:', error);
       throw error;
