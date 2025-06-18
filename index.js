@@ -3778,9 +3778,18 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
 
     let wishlistProductIds = [];
     let useFirebase = firebaseEnabled && wishlistService;
+    let shouldSyncFromShopify = false;
 
     if (useFirebase) {
       try {
+        // Check if wishlist document exists first
+        const wishlistExists = await wishlistService.wishlistExists(req.session.customerId);
+        
+        if (!wishlistExists) {
+          console.log(`🔍 [DEBUG] No Firebase wishlist document found, will sync from Shopify if available`);
+          shouldSyncFromShopify = true;
+        }
+
         // Try Firebase first
         console.log(`🔍 [DEBUG] Attempting Firebase lookup for customer: ${req.session.customerId}, email: ${req.session.email}`);
         wishlistProductIds = await wishlistService.getWishlistProductIds(
@@ -3796,7 +3805,8 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
     }
 
     // Fallback to Shopify if Firebase fails or is not enabled
-    if (!useFirebase || wishlistProductIds.length === 0) {
+    // Also sync from Shopify if Firebase is working but no document exists yet
+    if (!useFirebase || shouldSyncFromShopify) {
       console.log('📦 Using Shopify metafield for wishlist');
       
       const query = `
@@ -3832,8 +3842,8 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
           wishlistProductIds = metafield.value.split(',').filter(id => id.trim());
         }
 
-        // If we found Shopify data and Firebase is working, sync it
-        if (wishlistProductIds.length > 0 && useFirebase && wishlistService) {
+        // If we found Shopify data and this is an initial sync to Firebase, sync it
+        if (wishlistProductIds.length > 0 && useFirebase && wishlistService && shouldSyncFromShopify) {
           try {
             await wishlistService.syncFromShopify(
               req.session.customerId,

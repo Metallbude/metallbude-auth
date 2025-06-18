@@ -216,6 +216,19 @@ class WishlistService {
     }
   }
 
+  // Check if wishlist document exists (distinct from empty wishlist)
+  async wishlistExists(customerId) {
+    try {
+      const sanitizedCustomerId = this._sanitizeCustomerId(customerId);
+      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(sanitizedCustomerId);
+      const wishlistDoc = await wishlistRef.get();
+      return wishlistDoc.exists;
+    } catch (error) {
+      console.error('🔥 [FIREBASE] Error checking wishlist existence:', error.message);
+      return false;
+    }
+  }
+
   // Health check - test Firebase connection
   async healthCheck() {
     try {
