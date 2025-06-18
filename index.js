@@ -9905,12 +9905,23 @@ app.post('/api/public/wishlist/add', async (req, res) => {
         // Also add to Firebase to keep it as canonical source
         if (firebaseEnabled && wishlistService) {
             try {
-                const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                const firebaseResult = await wishlistService.addToWishlist(fullCustomerId, 'anonymous@shopify.com', productId);
-                console.log(`[SHOPIFY] Item also added to Firebase:`, firebaseResult);
+                console.log(`🔄 [SYNC] Syncing authenticated wishlist to public storage for Shopify customer: ${customerId}`);
+                
+                // Use the correct customer ID format for Firebase
+                const shopifyCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+                
+                // Use a web-specific email identifier for logging
+                const customerEmail = 'web-addition@shopify.com'; // This is just for logging
+                
+                const firebaseResult = await wishlistService.addToWishlist(
+                    shopifyCustomerId, 
+                    customerEmail, 
+                    productId
+                );
+                console.log(`✅ [SYNC] Item also added to Firebase successfully:`, firebaseResult);
             } catch (firebaseError) {
-                console.error('[SHOPIFY] Error adding to Firebase (non-critical):', firebaseError);
-                // Don't fail the request if Firebase fails
+                console.error('❌ [SYNC] Error adding to Firebase (continuing anyway):', firebaseError.message);
+                // Don't fail the request if Firebase fails - this is a sync operation
             }
         }
 
