@@ -3777,6 +3777,7 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
     console.log('❤️ Fetching wishlist for:', req.session.email);
 
     let wishlistProductIds = [];
+    let wishlistItems = []; // ✅ Store full wishlist items with variant info
     let useFirebase = firebaseEnabled && wishlistService;
     let shouldSyncFromShopify = false;
 
@@ -3792,12 +3793,13 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
 
         // Try Firebase first
         console.log(`🔍 [DEBUG] Attempting Firebase lookup for customer: ${req.session.customerId}, email: ${req.session.email}`);
-        wishlistProductIds = await wishlistService.getWishlistProductIds(
+        wishlistItems = await wishlistService.getWishlist(
           req.session.customerId, 
           req.session.email
         );
-        console.log(`🔥 Firebase returned ${wishlistProductIds.length} wishlist items`);
-        console.log(`🔍 [DEBUG] Firebase product IDs:`, wishlistProductIds);
+        wishlistProductIds = wishlistItems.map(item => item.productId);
+        console.log(`🔥 Firebase returned ${wishlistItems.length} wishlist items`);
+        console.log(`🔍 [DEBUG] Firebase wishlist items with variant info:`, wishlistItems);
       } catch (firebaseError) {
         console.error('❌ Firebase wishlist fetch failed, falling back to Shopify:', firebaseError.message);
         useFirebase = false;
@@ -3838,8 +3840,26 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       if (metafield?.value) {
         try {
           wishlistProductIds = JSON.parse(metafield.value);
+          // Convert to wishlist items format for compatibility (no variant info available from Shopify metafield)
+          wishlistItems = wishlistProductIds.map(productId => ({
+            productId,
+            addedAt: new Date().toISOString(),
+            customerEmail: req.session.email,
+            customerId: req.session.customerId,
+            selectedOptions: null,
+            variantId: null
+          }));
         } catch (e) {
           wishlistProductIds = metafield.value.split(',').filter(id => id.trim());
+          // Convert to wishlist items format for compatibility (no variant info available from Shopify metafield)
+          wishlistItems = wishlistProductIds.map(productId => ({
+            productId: productId.trim(),
+            addedAt: new Date().toISOString(),
+            customerEmail: req.session.email,
+            customerId: req.session.customerId,
+            selectedOptions: null,
+            variantId: null
+          }));
         }
 
         // If we found Shopify data and this is an initial sync to Firebase, sync it
@@ -3954,38 +3974,107 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
     const products = productsResponse.data.data?.nodes || [];
     console.log(`🔍 [DEBUG] Extracted products:`, products.length, 'products');
     
-    const wishlist = products.filter(product => product !== null).map(product => ({
-      id: product.id,
-      title: product.title,
-      handle: product.handle,
-      description: product.description,
-      price: {
-        amount: product.priceRange.minVariantPrice.amount,
-        currencyCode: product.priceRange.minVariantPrice.currencyCode
-      },
-      compareAtPrice: product.compareAtPriceRange?.minVariantCompareAtPrice ? {
-        amount: product.compareAtPriceRange.minVariantCompareAtPrice.amount,
-        currencyCode: product.compareAtPriceRange.minVariantCompareAtPrice.currencyCode
-      } : null,
-      image: product.featuredImage?.url,
-      images: product.images.edges.map(edge => edge.node),
-      variants: product.variants.edges.map(edge => ({
-        id: edge.node.id,
-        title: edge.node.title,
-        sku: edge.node.sku,
-        price: edge.node.price,
-        compareAtPrice: edge.node.compareAtPrice,
-        selectedOptions: edge.node.selectedOptions,
-        image: edge.node.image
-      })),
-      totalInventory: product.totalInventory,
-      productType: product.productType,
-      vendor: product.vendor,
-      tags: product.tags,
-      isOnSale: product.compareAtPriceRange?.minVariantCompareAtPrice ? 
-        parseFloat(product.compareAtPriceRange.minVariantCompareAtPrice.amount) > parseFloat(product.priceRange.minVariantPrice.amount) : false,
-      addedToWishlistAt: new Date().toISOString() // You might want to track this separately
-    }));
+    const wishlist = products.filter(product => product !== null).map(product => {
+      // Find the matching wishlist item with variant information
+      const wishlistItem = wishlistItems.find(item => item.productId === product.id);
+      
+      let selectedVariant = null;
+      let selectedOptions = {};
+      let selectedSku = null;
+      let selectedPrice = null;
+      let selectedCompareAtPrice = null;
+      let selectedImage = null;
+      
+      if (wishlistItem && (wishlistItem.selectedOptions || wishlistItem.variantId)) {
+        console.log(`🔍 [VARIANT] Processing wishlist item:`, {
+          productId: product.id,
+          variantId: wishlistItem.variantId,
+          selectedOptions: wishlistItem.selectedOptions
+        });
+        
+        // Find the matching variant by ID first
+        if (wishlistItem.variantId) {
+          selectedVariant = product.variants.find(v => v.id === wishlistItem.variantId);
+        }
+        
+        // If no variant ID match, try to match by selectedOptions
+        if (!selectedVariant && wishlistItem.selectedOptions) {
+          selectedVariant = product.variants.find(variant => {
+            const variantOptions = {};
+            variant.selectedOptions.forEach(opt => {
+              variantOptions[opt.name] = opt.value;
+            });
+            
+            // Check if all stored options match this variant
+            return Object.entries(wishlistItem.selectedOptions).every(([key, value]) => 
+              variantOptions[key] === value
+            );
+          });
+        }
+        
+        if (selectedVariant) {
+          console.log(`✅ [VARIANT] Found matching variant:`, {
+            variantId: selectedVariant.id,
+            title: selectedVariant.title,
+            selectedOptions: selectedVariant.selectedOptions
+          });
+          
+          selectedOptions = {};
+          selectedVariant.selectedOptions.forEach(opt => {
+            selectedOptions[opt.name] = opt.value;
+          });
+          selectedSku = selectedVariant.sku;
+          selectedPrice = selectedVariant.price;
+          selectedCompareAtPrice = selectedVariant.compareAtPrice;
+          selectedImage = selectedVariant.image?.url || product.featuredImage?.url;
+        } else {
+          console.log(`⚠️ [VARIANT] No matching variant found, using stored options:`, wishlistItem.selectedOptions);
+          selectedOptions = wishlistItem.selectedOptions || {};
+        }
+      }
+      
+      return {
+        id: product.id,
+        title: product.title,
+        handle: product.handle,
+        description: product.description,
+        price: {
+          amount: selectedPrice || product.priceRange.minVariantPrice.amount,
+          currencyCode: product.priceRange.minVariantPrice.currencyCode
+        },
+        compareAtPrice: selectedCompareAtPrice ? {
+          amount: selectedCompareAtPrice,
+          currencyCode: product.priceRange.minVariantPrice.currencyCode
+        } : (product.compareAtPriceRange?.minVariantCompareAtPrice ? {
+          amount: product.compareAtPriceRange.minVariantCompareAtPrice.amount,
+          currencyCode: product.compareAtPriceRange.minVariantCompareAtPrice.currencyCode
+        } : null),
+        image: selectedImage || product.featuredImage?.url,
+        images: product.images.edges.map(edge => edge.node),
+        variants: product.variants.edges.map(edge => ({
+          id: edge.node.id,
+          title: edge.node.title,
+          sku: edge.node.sku,
+          price: edge.node.price,
+          compareAtPrice: edge.node.compareAtPrice,
+          selectedOptions: edge.node.selectedOptions,
+          image: edge.node.image
+        })),
+        selectedVariant: selectedVariant,
+        selectedOptions: selectedOptions, // ✅ CRITICAL: Include selected options
+        sku: selectedSku,
+        variantId: selectedVariant?.id,
+        totalInventory: product.totalInventory,
+        productType: product.productType,
+        vendor: product.vendor,
+        tags: product.tags,
+        isOnSale: (selectedCompareAtPrice && selectedPrice) ? 
+          parseFloat(selectedCompareAtPrice) > parseFloat(selectedPrice) : 
+          (product.compareAtPriceRange?.minVariantCompareAtPrice ? 
+            parseFloat(product.compareAtPriceRange.minVariantCompareAtPrice.amount) > parseFloat(product.priceRange.minVariantPrice.amount) : false),
+        addedToWishlistAt: wishlistItem?.addedAt || new Date().toISOString()
+      };
+    });
 
     console.log(`✅ Fetched ${wishlist.length} wishlist items`);
     res.json({ wishlist });
