@@ -748,7 +748,15 @@ class MetallbudeWishlistManager {
             
             // ✅ Build URL with variant information if available
             let productUrl = `/products/${foundProduct.handle}`;
-            if (selectedVariant && selectedVariant.id) {
+            
+            // First priority: Use variant ID from API response (most reliable)
+            if (productData.originalItem?.variantId) {
+              const apiVariantId = this.extractVariantId(productData.originalItem.variantId);
+              if (apiVariantId) {
+                productUrl += `?variant=${apiVariantId}`;
+              }
+            } else if (selectedVariant && selectedVariant.id) {
+              // Fallback: Use selected variant from product data
               productUrl += `?variant=${selectedVariant.id}`;
             }
             
@@ -917,8 +925,10 @@ class MetallbudeWishlistManager {
     let imageHtml;
     let imageUrl = product.featuredImage;
     
-    // Check if we have a specific variant image from wishlist data or selected variant
-    if (product.wishlistItemData?.variantImage) {
+    // Check if we have a specific variant image from wishlist data (API imageUrl) or selected variant
+    if (product.wishlistItemData?.imageUrl) {
+      imageUrl = product.wishlistItemData.imageUrl;
+    } else if (product.wishlistItemData?.variantImage) {
       imageUrl = product.wishlistItemData.variantImage;
     } else if (product.selectedVariant?.image?.url) {
       imageUrl = product.selectedVariant.image.url;
