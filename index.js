@@ -4124,13 +4124,113 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
       try {
         // Try Firebase first
         if (action === 'add') {
-          result = await wishlistService.addToWishlist(
-            req.session.customerId,
-            req.session.email,
-            productId,
-            variantId,
-            selectedOptions
-          );
+          // ✅ CRITICAL: Fetch product data from Shopify before storing in Firebase
+          let productData = null;
+          
+          try {
+            console.log('🛍️ Fetching product data from Shopify for Firebase storage');
+            const productQuery = `
+              query getProduct($productId: ID!) {
+                product(id: $productId) {
+                  id
+                  title
+                  handle
+                  featuredImage {
+                    url
+                  }
+                  priceRange {
+                    minVariantPrice {
+                      amount
+                    }
+                  }
+                  variants(first: 20) {
+                    edges {
+                      node {
+                        id
+                        title
+                        sku
+                        price
+                        selectedOptions {
+                          name
+                          value
+                        }
+                        image {
+                          url
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const productResponse = await axios.post(
+              config.adminApiUrl,
+              {
+                query: productQuery,
+                variables: { productId: productId }
+              },
+              {
+                headers: {
+                  'X-Shopify-Access-Token': config.adminToken,
+                  'Content-Type': 'application/json'
+                }
+              }
+            );
+
+            const product = productResponse.data.data?.product;
+            if (product) {
+              const variants = product.variants.edges.map(edge => edge.node);
+              let selectedVariant = null;
+              
+              // Find matching variant
+              if (variantId) {
+                selectedVariant = variants.find(v => v.id === variantId);
+              } else if (selectedOptions) {
+                selectedVariant = variants.find(variant => {
+                  return variant.selectedOptions.every(opt => 
+                    selectedOptions[opt.name] === opt.value
+                  );
+                });
+              }
+              
+              // Use selected variant or first variant as fallback
+              const useVariant = selectedVariant || variants[0];
+              
+              productData = {
+                title: product.title,
+                handle: product.handle,
+                imageUrl: useVariant?.image?.url || product.featuredImage?.url || '',
+                price: parseFloat(useVariant?.price || product.priceRange.minVariantPrice.amount) || 0,
+                sku: useVariant?.sku || ''
+              };
+              
+              console.log('✅ Fetched product data:', productData);
+            }
+          } catch (shopifyError) {
+            console.error('⚠️ Failed to fetch product data from Shopify:', shopifyError.message);
+            // Continue without product data - Firebase will store basic info
+          }
+          
+          // Use enhanced method if we have product data, otherwise use basic method
+          if (productData) {
+            result = await wishlistService.addToWishlistWithProductData(
+              req.session.customerId,
+              req.session.email,
+              productId,
+              variantId,
+              selectedOptions,
+              productData
+            );
+          } else {
+            result = await wishlistService.addToWishlist(
+              req.session.customerId,
+              req.session.email,
+              productId,
+              variantId,
+              selectedOptions
+            );
+          }
         } else if (action === 'remove') {
           result = await wishlistService.removeFromWishlist(
             req.session.customerId,
@@ -9520,11 +9620,41 @@ async function syncFirebaseToPublicStorage(customerId) {
     try {
         console.log(`🔄 [SYNC] Syncing Firebase to public storage for customer: ${customerId}`);
         
-        // Convert simple customer ID to full Shopify format for Firebase lookup
-        const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+        // Try both customer ID formats to find the Firebase document
+        let firebaseItems = [];
+        let foundFormat = null;
         
-        // Get wishlist from Firebase (canonical source)
-        const firebaseItems = await wishlistService.getWishlist(fullCustomerId, 'anonymous@shopify.com');
+        // Try simple format first (this is what gets stored when adding from Flutter)
+        try {
+            console.log(`🔍 [SYNC] Trying simple customer ID format: ${customerId}`);
+            firebaseItems = await wishlistService.getWishlist(customerId, 'anonymous@shopify.com');
+            if (firebaseItems.length > 0) {
+                foundFormat = 'simple';
+                console.log(`✅ [SYNC] Found ${firebaseItems.length} items using simple format`);
+            }
+        } catch (error) {
+            console.log(`⚠️ [SYNC] Simple format failed: ${error.message}`);
+        }
+        
+        // If no items found, try full Shopify GID format
+        if (firebaseItems.length === 0) {
+            try {
+                const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+                console.log(`🔍 [SYNC] Trying full customer ID format: ${fullCustomerId}`);
+                firebaseItems = await wishlistService.getWishlist(fullCustomerId, 'anonymous@shopify.com');
+                if (firebaseItems.length > 0) {
+                    foundFormat = 'full';
+                    console.log(`✅ [SYNC] Found ${firebaseItems.length} items using full format`);
+                }
+            } catch (error) {
+                console.log(`⚠️ [SYNC] Full format failed: ${error.message}`);
+            }
+        }
+        
+        if (firebaseItems.length === 0) {
+            console.log(`ℹ️ [SYNC] No wishlist items found in Firebase for customer ${customerId}`);
+            return true; // Not an error, just empty wishlist
+        }
         
         // Load current public storage
         const publicWishlistData = await loadWishlistData();
@@ -9533,13 +9663,13 @@ async function syncFirebaseToPublicStorage(customerId) {
         const publicItems = firebaseItems.map(item => ({
             productId: item.productId,
             variantId: item.variantId || item.productId, // Use actual variantId if available
-            title: `Product ${item.productId}`, // We'll let frontend fetch actual product details
-            imageUrl: '',
-            price: 0,
-            compareAtPrice: 0,
-            sku: '',
+            title: item.title || `Product ${item.productId}`, // ✅ Use enhanced title from Firebase
+            imageUrl: item.imageUrl || '', // ✅ Use enhanced image URL from Firebase (variant image!)
+            price: item.price || 0, // ✅ Use enhanced price from Firebase
+            compareAtPrice: item.compareAtPrice || 0,
+            sku: item.sku || '', // ✅ Use enhanced SKU from Firebase
             selectedOptions: item.selectedOptions || {}, // ✅ CRITICAL: Preserve selectedOptions from Firebase
-            handle: '',
+            handle: item.handle || '', // ✅ Use enhanced handle from Firebase
             addedAt: item.addedAt,
             syncedFromFirebase: true
         }));
@@ -9588,14 +9718,14 @@ async function syncAllFirebaseToPublicStorage() {
                 // Convert Firebase items to public storage format
                 const publicItems = (data.items || []).map(item => ({
                     productId: item.productId,
-                    variantId: item.productId,
-                    title: `Product ${item.productId}`,
-                    imageUrl: '',
-                    price: 0,
-                    compareAtPrice: 0,
-                    sku: '',
-                    selectedOptions: {},
-                    handle: '',
+                    variantId: item.variantId || item.productId,
+                    title: item.title || `Product ${item.productId}`, // ✅ Use enhanced title
+                    imageUrl: item.imageUrl || '', // ✅ Use enhanced image URL (variant image!)
+                    price: item.price || 0, // ✅ Use enhanced price
+                    compareAtPrice: item.compareAtPrice || 0,
+                    sku: item.sku || '', // ✅ Use enhanced SKU
+                    selectedOptions: item.selectedOptions || {}, // ✅ Preserve selectedOptions
+                    handle: item.handle || '', // ✅ Use enhanced handle
                     addedAt: item.addedAt,
                     syncedFromFirebase: true
                 }));
@@ -9906,15 +10036,20 @@ app.get('/api/public/wishlist/items', async (req, res) => {
         let customerWishlist = [];
 
         // Always try to sync from Firebase first to ensure we have the latest data
+        console.log(`🔍 [DEBUG] Firebase enabled: ${firebaseEnabled}, wishlistService available: ${!!wishlistService}`);
         if (firebaseEnabled && wishlistService) {
             try {
                 console.log(`[SHOPIFY] Syncing Firebase data for customer: ${customerId}`);
                 const syncSuccess = await syncFirebaseToPublicStorage(customerId);
+                console.log(`🔍 [DEBUG] Sync success: ${syncSuccess}`);
                 
                 if (syncSuccess) {
                     console.log(`[SHOPIFY] Successfully synced Firebase data, loading from public storage`);
                     const wishlistData = await loadWishlistData();
+                    console.log(`🔍 [DEBUG] Loaded wishlist data keys: ${Object.keys(wishlistData)}`);
                     customerWishlist = wishlistData[customerId] || [];
+                    console.log(`🔍 [DEBUG] Customer wishlist items: ${customerWishlist.length}`);
+                    console.log(`🔍 [DEBUG] First item:`, customerWishlist[0]);
                     console.log(`[SHOPIFY] Found ${customerWishlist.length} items after Firebase sync`);
                 } else {
                     console.log(`[SHOPIFY] Firebase sync failed, trying direct Firebase lookup`);
@@ -9945,6 +10080,210 @@ app.get('/api/public/wishlist/items', async (req, res) => {
         }
 
         console.log(`[SHOPIFY] Returning ${customerWishlist.length} items in wishlist`);
+
+        // ✅ CRITICAL FIX: Process wishlist items through Shopify GraphQL to get proper variant images
+        // This ensures the public API returns the same rich data as the mobile API
+        if (customerWishlist.length > 0) {
+            try {
+                // Extract product IDs for Shopify lookup
+                const wishlistProductIds = customerWishlist.map(item => item.productId).filter(Boolean);
+                
+                if (wishlistProductIds.length > 0) {
+                    console.log(`[SHOPIFY] Fetching product details from Shopify for ${wishlistProductIds.length} products`);
+                    
+                    // Use the same GraphQL query as the mobile API
+                    const productsQuery = `
+                      query getWishlistProducts($productIds: [ID!]!) {
+                        nodes(ids: $productIds) {
+                          ... on Product {
+                            id
+                            title
+                            handle
+                            description
+                            productType
+                            vendor
+                            tags
+                            createdAt
+                            priceRange {
+                              maxVariantPrice {
+                                amount
+                                currencyCode
+                              }
+                              minVariantPrice {
+                                amount
+                                currencyCode
+                              }
+                            }
+                            compareAtPriceRange {
+                              maxVariantCompareAtPrice {
+                                amount
+                                currencyCode
+                              }
+                              minVariantCompareAtPrice {
+                                amount
+                                currencyCode
+                              }
+                            }
+                            featuredImage {
+                              url
+                              altText
+                            }
+                            images(first: 5) {
+                              edges {
+                                node {
+                                  url
+                                  altText
+                                }
+                              }
+                            }
+                            variants(first: 10) {
+                              edges {
+                                node {
+                                  id
+                                  title
+                                  sku
+                                  price
+                                  compareAtPrice
+                                  selectedOptions {
+                                    name
+                                    value
+                                  }
+                                  image {
+                                    url
+                                  }
+                                }
+                              }
+                            }
+                            totalInventory
+                          }
+                        }
+                      }
+                    `;
+
+                    const productsResponse = await axios.post(
+                      config.adminApiUrl,
+                      {
+                        query: productsQuery,
+                        variables: { productIds: wishlistProductIds }
+                      },
+                      {
+                        headers: {
+                          'X-Shopify-Access-Token': config.adminToken,
+                          'Content-Type': 'application/json'
+                        }
+                      }
+                    );
+
+                    const products = productsResponse.data.data?.nodes || [];
+                    console.log(`[SHOPIFY] Fetched details for ${products.length} products from Shopify`);
+                    
+                    // Process each wishlist item with its corresponding product data
+                    const enhancedWishlist = [];
+                    
+                    for (const wishlistItem of customerWishlist) {
+                        const product = products.find(p => p && p.id === wishlistItem.productId);
+                        
+                        if (product) {
+                            // Use the same variant processing logic as the mobile API
+                            const processedVariants = product.variants.edges.map(edge => ({
+                                id: edge.node.id,
+                                title: edge.node.title,
+                                sku: edge.node.sku,
+                                price: edge.node.price,
+                                compareAtPrice: edge.node.compareAtPrice,
+                                selectedOptions: edge.node.selectedOptions,
+                                image: edge.node.image
+                            }));
+                            
+                            let selectedVariant = null;
+                            let selectedOptions = {};
+                            let selectedSku = null;
+                            let selectedPrice = null;
+                            let selectedCompareAtPrice = null;
+                            let selectedImage = null;
+                            
+                            if (wishlistItem.selectedOptions || wishlistItem.variantId) {
+                                console.log(`🔍 [VARIANT] Processing public wishlist item:`, {
+                                    productId: product.id,
+                                    variantId: wishlistItem.variantId,
+                                    selectedOptions: wishlistItem.selectedOptions
+                                });
+                                
+                                // Find the matching variant by ID first
+                                if (wishlistItem.variantId) {
+                                    selectedVariant = processedVariants.find(v => v.id === wishlistItem.variantId);
+                                    console.log(`🔍 [VARIANT] Searching for variant ID ${wishlistItem.variantId} in:`, processedVariants.map(v => v.id));
+                                }
+                                
+                                // If no variant ID match, try to match by selectedOptions
+                                if (!selectedVariant && wishlistItem.selectedOptions) {
+                                    selectedVariant = processedVariants.find(variant => {
+                                        const variantOptions = {};
+                                        variant.selectedOptions.forEach(opt => {
+                                            variantOptions[opt.name] = opt.value;
+                                        });
+                                        
+                                        // Check if all stored options match this variant
+                                        return Object.entries(wishlistItem.selectedOptions).every(([key, value]) => 
+                                            variantOptions[key] === value
+                                        );
+                                    });
+                                    console.log(`🔍 [VARIANT] Searching by selectedOptions:`, wishlistItem.selectedOptions);
+                                }
+                                
+                                if (selectedVariant) {
+                                    console.log(`✅ [VARIANT] Found matching variant:`, {
+                                        variantId: selectedVariant.id,
+                                        title: selectedVariant.title,
+                                        selectedOptions: selectedVariant.selectedOptions,
+                                        image: selectedVariant.image?.url
+                                    });
+                                    
+                                    selectedOptions = {};
+                                    selectedVariant.selectedOptions.forEach(opt => {
+                                        selectedOptions[opt.name] = opt.value;
+                                    });
+                                    selectedSku = selectedVariant.sku;
+                                    selectedPrice = selectedVariant.price;
+                                    selectedCompareAtPrice = selectedVariant.compareAtPrice;
+                                    selectedImage = selectedVariant.image?.url || product.featuredImage?.url;
+                                } else {
+                                    console.log(`⚠️ [VARIANT] No matching variant found, using stored options:`, wishlistItem.selectedOptions);
+                                    selectedOptions = wishlistItem.selectedOptions || {};
+                                    selectedImage = product.featuredImage?.url;
+                                }
+                            }
+                            
+                            // Create enhanced item with proper variant image
+                            const enhancedItem = {
+                                productId: wishlistItem.productId,
+                                variantId: selectedVariant?.id || wishlistItem.variantId || wishlistItem.productId,
+                                title: product.title,
+                                imageUrl: selectedImage || product.featuredImage?.url || '', // ✅ CRITICAL: Use variant image
+                                price: parseFloat(selectedPrice || product.priceRange.minVariantPrice.amount) || 0,
+                                compareAtPrice: selectedCompareAtPrice ? parseFloat(selectedCompareAtPrice) : null,
+                                sku: selectedSku || '',
+                                selectedOptions: selectedOptions, // ✅ CRITICAL: Include selected options
+                                handle: product.handle,
+                                addedAt: wishlistItem.addedAt,
+                                syncedFromFirebase: wishlistItem.syncedFromFirebase || false
+                            };
+                            
+                            enhancedWishlist.push(enhancedItem);
+                        } else {
+                            // Keep original item if product not found
+                            enhancedWishlist.push(wishlistItem);
+                        }
+                    }
+                    
+                    console.log(`[SHOPIFY] Enhanced ${enhancedWishlist.length} wishlist items with variant data`);
+                    customerWishlist = enhancedWishlist;
+                }
+            } catch (shopifyError) {
+                console.error('[SHOPIFY] Error fetching product details from Shopify:', shopifyError.message);
+                // Continue with original data if Shopify lookup fails
+            }
+        }
 
         res.json({
             success: true,
@@ -10047,14 +10386,25 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                 // Use a web-specific email identifier for logging
                 const customerEmail = 'web-addition@shopify.com'; // This is just for logging
                 
-                const firebaseResult = await wishlistService.addToWishlist(
+                // Prepare enhanced product data for Firebase
+                const productData = {
+                    title: title,
+                    handle: handle || '',
+                    imageUrl: imageUrl || '', // This should be the variant image
+                    price: parseFloat(price) || 0,
+                    sku: sku || ''
+                };
+                
+                // Use enhanced method to store additional data in Firebase
+                const firebaseResult = await wishlistService.addToWishlistWithProductData(
                     shopifyCustomerId, 
                     customerEmail, 
                     productId,
                     variantId,
-                    selectedOptions
+                    selectedOptions,
+                    productData
                 );
-                console.log(`✅ [SYNC] Item also added to Firebase successfully:`, firebaseResult);
+                console.log(`✅ [SYNC] Item also added to Firebase with enhanced data successfully:`, firebaseResult);
             } catch (firebaseError) {
                 console.error('❌ [SYNC] Error adding to Firebase (continuing anyway):', firebaseError.message);
                 // Don't fail the request if Firebase fails - this is a sync operation

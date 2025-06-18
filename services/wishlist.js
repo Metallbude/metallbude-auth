@@ -44,11 +44,121 @@ class WishlistService {
         customerEmail: customerEmail,
         customerId: customerId,
         variantId: item.variantId || null,
-        selectedOptions: item.selectedOptions || null
+        selectedOptions: item.selectedOptions || null,
+        // ✅ CRITICAL: Include enhanced data for web display
+        title: item.title || null,
+        imageUrl: item.imageUrl || null,
+        price: item.price || null,
+        sku: item.sku || null,
+        handle: item.handle || null,
+        primaryId: item.primaryId || null
       }));
 
     } catch (error) {
       console.error('🔥 [FIREBASE] Wishlist fetch error:', error.message, error.stack);
+      throw error;
+    }
+  }
+
+  // Add product to wishlist with enhanced data from Shopify
+  async addToWishlistWithProductData(customerId, customerEmail, productId, variantId = null, selectedOptions = null, productData = null) {
+    try {
+      console.log(`🔥 [FIREBASE] Adding product ${productId} to wishlist with enhanced data for ${customerEmail} (${customerId})`);
+      console.log(`🔥 [FIREBASE] Variant ID: ${variantId}, Selected Options:`, selectedOptions);
+      console.log(`🔥 [FIREBASE] Product data:`, productData ? 'provided' : 'not provided');
+
+      // Ensure Firebase is properly initialized
+      if (!this.db) {
+        throw new Error('Firebase Firestore not initialized');
+      }
+
+      // Sanitize customer ID for Firestore document path
+      const sanitizedCustomerId = this._sanitizeCustomerId(customerId);
+      console.log(`🔥 [FIREBASE] Using sanitized document ID: ${sanitizedCustomerId}`);
+
+      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(sanitizedCustomerId);
+      const wishlistDoc = await wishlistRef.get();
+
+      let items = [];
+      if (wishlistDoc.exists) {
+        const data = wishlistDoc.data();
+        items = data.items || [];
+      }
+
+      // Check if item already exists with same variant/options
+      const existingItemIndex = items.findIndex(item => {
+        // Priority 1: Match by primaryId (variantId when available, productId otherwise)
+        const itemPrimaryId = item.primaryId || item.variantId || item.productId;
+        const newPrimaryId = variantId || productId;
+        if (itemPrimaryId === newPrimaryId) return true;
+        
+        // Priority 2: Match by productId AND exact variant/options
+        if (item.productId !== productId) return false;
+        
+        // If we have variant information, match by variant
+        if (variantId && item.variantId) {
+          return item.variantId === variantId;
+        }
+        
+        // If we have selected options, match by options
+        if (selectedOptions && item.selectedOptions) {
+          return JSON.stringify(item.selectedOptions) === JSON.stringify(selectedOptions);
+        }
+        
+        // Otherwise match by product ID only (backward compatibility)
+        return !item.variantId && !item.selectedOptions;
+      });
+      
+      if (existingItemIndex !== -1) {
+        console.log(`🔥 [FIREBASE] Product ${productId} with variant/options already in wishlist for ${customerEmail}`);
+        return { success: true, action: 'add', productId, wishlistCount: items.length, alreadyExists: true };
+      }
+
+      // Add new item with variant information and enhanced data
+      const newItem = {
+        productId,
+        addedAt: new Date().toISOString(),
+        customerEmail,
+        customerId
+      };
+      
+      // ✅ CRITICAL: Use variantId or SKU as primary identifier when available
+      if (variantId) {
+        newItem.variantId = variantId;
+        newItem.primaryId = variantId; // Use variant ID as primary identifier
+      } else {
+        newItem.primaryId = productId; // Fallback to product ID
+      }
+      
+      if (selectedOptions && Object.keys(selectedOptions).length > 0) {
+        newItem.selectedOptions = selectedOptions;
+      }
+      
+      // ✅ CRITICAL: Store enhanced product data for web display
+      if (productData) {
+        newItem.title = productData.title;
+        newItem.imageUrl = productData.imageUrl; // Variant image URL
+        newItem.price = productData.price;
+        newItem.sku = productData.sku;
+        newItem.handle = productData.handle;
+      }
+
+      items.push(newItem);
+
+      // Update Firestore
+      await wishlistRef.set({
+        customerId,
+        customerEmail,
+        items,
+        updatedAt: new Date().toISOString(),
+        createdAt: wishlistDoc.exists ? (wishlistDoc.data().createdAt || new Date().toISOString()) : new Date().toISOString()
+      });
+
+      console.log(`🔥 [FIREBASE] Successfully added product ${productId} to wishlist for ${customerEmail}. Total items: ${items.length}`);
+      return { success: true, action: 'add', productId, wishlistCount: items.length };
+
+    } catch (error) {
+      console.error('🔥 [FIREBASE] Add to wishlist with product data error:', error.message, error.stack);
       throw error;
     }
   }
@@ -125,6 +235,13 @@ class WishlistService {
       if (selectedOptions && Object.keys(selectedOptions).length > 0) {
         newItem.selectedOptions = selectedOptions;
       }
+      
+      // ✅ CRITICAL: Store additional fields needed for web display
+      // These will be populated by the calling code (index.js) after Shopify lookup
+      newItem.title = null; // Will be set by caller
+      newItem.imageUrl = null; // Will be set by caller  
+      newItem.price = null; // Will be set by caller
+      newItem.sku = null; // Will be set by caller
 
       items.push(newItem);
 

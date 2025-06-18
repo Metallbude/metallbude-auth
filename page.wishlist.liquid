@@ -746,6 +746,12 @@ class MetallbudeWishlistManager {
               productPrice = selectedVariant.price;
             }
             
+            // ✅ Build URL with variant information if available
+            let productUrl = `/products/${foundProduct.handle}`;
+            if (selectedVariant && selectedVariant.id) {
+              productUrl += `?variant=${selectedVariant.id}`;
+            }
+            
             products.push({
               id: productId,
               gid: `gid://shopify/Product/${productId}`,
@@ -757,7 +763,7 @@ class MetallbudeWishlistManager {
               priceMax: Math.max(...variants.map(v => parseFloat(v.price || 0))),
               available: foundProduct.available,
               vendor: foundProduct.vendor || '',
-              url: `/products/${foundProduct.handle}`,
+              url: productUrl, // ✅ Use URL with variant parameter
               colors: displayColors, // Only show the selected color swatch
               selectedColor: selectedColor,
               selectedVariant: selectedVariant,
@@ -911,11 +917,14 @@ class MetallbudeWishlistManager {
     let imageHtml;
     let imageUrl = product.featuredImage;
     
-    // Check if we have a specific variant image from wishlist data
+    // Check if we have a specific variant image from wishlist data or selected variant
     if (product.wishlistItemData?.variantImage) {
       imageUrl = product.wishlistItemData.variantImage;
     } else if (product.selectedVariant?.image?.url) {
       imageUrl = product.selectedVariant.image.url;
+    } else if (product.selectedVariant?.featured_image?.src) {
+      // Fallback for Shopify variant image structure
+      imageUrl = product.selectedVariant.featured_image.src;
     }
     
     if (imageUrl) {
