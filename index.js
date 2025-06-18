@@ -3869,12 +3869,20 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
             tags
             createdAt
             priceRange {
+              maxVariantPrice {
+                amount
+                currencyCode
+              }
               minVariantPrice {
                 amount
                 currencyCode
               }
             }
             compareAtPriceRange {
+              maxVariantPrice {
+                amount
+                currencyCode
+              }
               minVariantPrice {
                 amount
                 currencyCode
@@ -3898,15 +3906,8 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
                   id
                   title
                   sku
-                  availableForSale
-                  priceV2 {
-                    amount
-                    currencyCode
-                  }
-                  compareAtPriceV2 {
-                    amount
-                    currencyCode
-                  }
+                  price
+                  compareAtPrice
                   selectedOptions {
                     name
                     value
@@ -3917,7 +3918,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
                 }
               }
             }
-            availableForSale
             totalInventory
           }
         }
@@ -3959,8 +3959,15 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       } : null,
       image: product.featuredImage?.url,
       images: product.images.edges.map(edge => edge.node),
-      variants: product.variants.edges.map(edge => edge.node),
-      availableForSale: product.availableForSale,
+      variants: product.variants.edges.map(edge => ({
+        id: edge.node.id,
+        title: edge.node.title,
+        sku: edge.node.sku,
+        price: edge.node.price,
+        compareAtPrice: edge.node.compareAtPrice,
+        selectedOptions: edge.node.selectedOptions,
+        image: edge.node.image
+      })),
       totalInventory: product.totalInventory,
       productType: product.productType,
       vendor: product.vendor,
