@@ -3976,7 +3976,10 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
     
     const wishlist = products.filter(product => product !== null).map(product => {
       // Find the matching wishlist item with variant information
-      const wishlistItem = wishlistItems.find(item => item.productId === product.id);
+      const wishlistItem = wishlistItems.find(item => 
+        item.productId === product.id || 
+        (item.variantId && product.variants.edges.some(v => v.node.id === item.variantId))
+      );
       
       // Process variants first
       const processedVariants = product.variants.edges.map(edge => ({

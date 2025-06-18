@@ -79,6 +79,12 @@ class WishlistService {
 
       // Check if item already exists with same variant/options
       const existingItemIndex = items.findIndex(item => {
+        // Priority 1: Match by primaryId (variantId when available, productId otherwise)
+        const itemPrimaryId = item.primaryId || item.variantId || item.productId;
+        const newPrimaryId = variantId || productId;
+        if (itemPrimaryId === newPrimaryId) return true;
+        
+        // Priority 2: Match by productId AND exact variant/options
         if (item.productId !== productId) return false;
         
         // If we have variant information, match by variant
@@ -108,10 +114,14 @@ class WishlistService {
         customerId
       };
       
-      // Add variant information if available
+      // ✅ CRITICAL: Use variantId or SKU as primary identifier when available
       if (variantId) {
         newItem.variantId = variantId;
+        newItem.primaryId = variantId; // Use variant ID as primary identifier
+      } else {
+        newItem.primaryId = productId; // Fallback to product ID
       }
+      
       if (selectedOptions && Object.keys(selectedOptions).length > 0) {
         newItem.selectedOptions = selectedOptions;
       }
@@ -165,11 +175,17 @@ class WishlistService {
       // Find and remove the matching item with variant/options
       const initialCount = items.length;
       items = items.filter(item => {
-        if (item.productId !== productId) return true;
+        // Priority 1: Match by primaryId (variantId when available, productId otherwise)
+        const itemPrimaryId = item.primaryId || item.variantId || item.productId;
+        const removePrimaryId = variantId || productId;
+        if (itemPrimaryId === removePrimaryId) return false; // Remove this item
+        
+        // Priority 2: Match by productId AND exact variant/options
+        if (item.productId !== productId) return true; // Keep this item
         
         // If we have variant information, match by variant
         if (variantId && item.variantId) {
-          return item.variantId !== variantId;
+          return item.variantId !== variantId; // Keep if different variant
         }
         
         // If we have selected options, match by options
@@ -178,7 +194,7 @@ class WishlistService {
         }
         
         // Otherwise remove by product ID only (backward compatibility)
-        return item.variantId || item.selectedOptions;
+        return item.variantId || item.selectedOptions; // Keep if it has variant info
       });
       const finalCount = items.length;
 
