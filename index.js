@@ -10347,12 +10347,26 @@ app.post('/api/public/wishlist/add', async (req, res) => {
             wishlistData[customerId] = [];
         }
 
-        // Check if item already exists
-        const existingItemIndex = wishlistData[customerId].findIndex(item => 
-            item.productId === productId && 
-            item.variantId === (variantId || productId) &&
-            JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions || {})
-        );
+        // Check if item already exists - only consider it duplicate if it's the exact same variant
+        const existingItemIndex = wishlistData[customerId].findIndex(item => {
+            // Must match product ID
+            if (item.productId !== productId) return false;
+            
+            // If both have variant IDs, they must match
+            if (variantId && item.variantId && item.variantId !== variantId) return false;
+            
+            // If only one has variant ID, they're different
+            if ((variantId && !item.variantId) || (!variantId && item.variantId)) return false;
+            
+            // Check selected options if they exist
+            if (selectedOptions || item.selectedOptions) {
+                const currentOptions = JSON.stringify(selectedOptions || {});
+                const existingOptions = JSON.stringify(item.selectedOptions || {});
+                if (currentOptions !== existingOptions) return false;
+            }
+            
+            return true;
+        });
 
         if (existingItemIndex !== -1) {
             console.log(`[SHOPIFY] Item already exists in wishlist`);
@@ -10366,7 +10380,7 @@ app.post('/api/public/wishlist/add', async (req, res) => {
         // Add new item to public storage
         const newItem = {
             productId,
-            variantId: variantId || productId,
+            variantId: variantId || null, // Don't default to productId
             title,
             imageUrl: imageUrl || '',
             price: price || 0,
