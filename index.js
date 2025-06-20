@@ -10471,37 +10471,58 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
 
         const initialLength = wishlistData[customerId].length;
         
+        console.log(`[SHOPIFY] Before removal: ${initialLength} items`);
+        console.log(`[SHOPIFY] Looking for item with productId: ${productId}, variantId: ${variantId}`);
+        
         // Remove item by productId, variantId AND selectedOptions for exact match
         wishlistData[customerId] = wishlistData[customerId].filter(item => {
-            // Check product match - handle both old and new data formats
-            const productMatch = item.productId === productId || 
-                                item.variantId === productId ||
-                                item.productId === (productId || variantId);
+            // Normalize IDs for comparison (remove GID prefixes if present)
+            const normalizeId = (id) => {
+                if (!id) return null;
+                if (typeof id === 'string' && id.includes('gid://shopify/')) {
+                    return id.split('/').pop();
+                }
+                return id.toString();
+            };
             
-            // For backward compatibility: if no variantId or selectedOptions are provided,
-            // just match by productId (for simple wishlist items)
-            if (!variantId && (!selectedOptions || Object.keys(selectedOptions).length === 0)) {
-                return !productMatch; // Remove if product matches
+            const itemProductId = normalizeId(item.productId);
+            const requestProductId = normalizeId(productId);
+            const itemVariantId = normalizeId(item.variantId);
+            const requestVariantId = normalizeId(variantId);
+            
+            console.log(`[SHOPIFY] Checking item - Product: ${itemProductId} vs ${requestProductId}, Variant: ${itemVariantId} vs ${requestVariantId}`);
+            
+            // Check product match
+            const productMatch = itemProductId === requestProductId;
+            
+            // For simple product removal (no variant specified), just match product
+            if (!requestVariantId && (!selectedOptions || Object.keys(selectedOptions).length === 0)) {
+                const shouldRemove = productMatch;
+                console.log(`[SHOPIFY] Simple removal - Product match: ${productMatch}, removing: ${shouldRemove}`);
+                return !shouldRemove; // Return false to remove, true to keep
             }
             
-            // Check variant match if provided
-            const variantMatch = !variantId || 
-                               !item.variantId || // Item doesn't have variantId (old format)
-                               item.variantId === variantId || 
-                               item.variantId === (variantId || productId);
+            // For variant-specific removal, match both product and variant
+            const variantMatch = !requestVariantId || itemVariantId === requestVariantId;
             
             // Check selected options match if provided
-            const optionsMatch = !selectedOptions || 
-                               Object.keys(selectedOptions).length === 0 ||
-                               !item.selectedOptions || // Item doesn't have selectedOptions (old format)
-                               JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions);
+            let optionsMatch = true;
+            if (selectedOptions && Object.keys(selectedOptions).length > 0 && item.selectedOptions) {
+                optionsMatch = JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions);
+            }
             
-            // Keep item if it doesn't match all criteria
-            return !(productMatch && variantMatch && optionsMatch);
+            const shouldRemove = productMatch && variantMatch && optionsMatch;
+            console.log(`[SHOPIFY] Detailed removal - Product: ${productMatch}, Variant: ${variantMatch}, Options: ${optionsMatch}, removing: ${shouldRemove}`);
+            
+            // Keep item if it doesn't match all criteria (return true to keep, false to remove)
+            return !shouldRemove;
         });
 
         const finalLength = wishlistData[customerId].length;
         const itemRemoved = initialLength > finalLength;
+        
+        console.log(`[SHOPIFY] After removal: ${finalLength} items`);
+        console.log(`[SHOPIFY] Items removed: ${initialLength - finalLength}`);
 
         if (itemRemoved) {
             await saveWishlistData(wishlistData);
@@ -10522,10 +10543,13 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             // Sync to Shopify customer metafields
             try {
                 await syncWishlistToShopify(customerId, wishlistData[customerId]);
+                console.log(`[SHOPIFY] Wishlist synced to Shopify metafields`);
             } catch (syncError) {
                 console.error('[SHOPIFY] Error syncing to Shopify metafields:', syncError);
                 // Don't fail the request if sync fails
             }
+        } else {
+            console.log(`[SHOPIFY] No items were removed - item may not have been found`);
         }
 
         res.json({
