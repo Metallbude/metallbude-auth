@@ -10579,7 +10579,15 @@ app.post('/api/public/wishlist/sync', async (req, res) => {
     try {
         const { fromCustomerId, toCustomerId, items } = req.body;
 
+        console.log(`[SYNC] Received sync request:`, {
+            fromCustomerId,
+            toCustomerId,
+            itemsCount: items?.length || 0,
+            items: items?.map(item => ({ title: item.title, productId: item.productId })) || []
+        });
+
         if (!fromCustomerId || !toCustomerId || !Array.isArray(items)) {
+            console.log(`[SYNC] Invalid request data`);
             return res.status(400).json({ 
                 success: false,
                 error: 'fromCustomerId, toCustomerId, and items array are required' 
@@ -10594,6 +10602,9 @@ app.post('/api/public/wishlist/sync', async (req, res) => {
         // Initialize arrays if they don't exist
         if (!wishlistData[toCustomerId]) {
             wishlistData[toCustomerId] = [];
+            console.log(`[SYNC] Created new wishlist for customer ${toCustomerId}`);
+        } else {
+            console.log(`[SYNC] Existing wishlist for ${toCustomerId} has ${wishlistData[toCustomerId].length} items`);
         }
 
         let syncedCount = 0;
