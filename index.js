@@ -9864,10 +9864,13 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
                 console.log(`🔍 [SYNC] Using numeric ID as Shopify customer ID: ${shopifyCustomerId}`);
             }
             
-            // Method 3: For your specific case, hardcode the mapping
-            if (customerId === 'gid://shopify/Customer/4088060379300' || customerId === '4088060379300') {
-                shopifyCustomerId = '4088060379300';
-                console.log(`🔍 [SYNC] Using hardcoded mapping: ${shopifyCustomerId}`);
+            // Extract customer ID from various formats
+            if (customerId.startsWith('gid://shopify/Customer/')) {
+                shopifyCustomerId = customerId.split('/').pop();
+                console.log(`🔍 [SYNC] Extracted customer ID from GID: ${shopifyCustomerId}`);
+            } else {
+                shopifyCustomerId = customerId;
+                console.log(`🔍 [SYNC] Using direct customer ID: ${shopifyCustomerId}`);
             }
             
             // Method 4: Try to extract from session metadata (check if session has Shopify customer info)
@@ -9975,9 +9978,13 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
                 shopifyCustomerId = customerId;
             }
             
-            // Hardcoded mapping for your specific case
-            if (customerId === 'gid://shopify/Customer/4088060379300' || customerId === '4088060379300') {
-                shopifyCustomerId = '4088060379300';
+            // Extract customer ID from various formats
+            if (customerId.startsWith('gid://shopify/Customer/')) {
+                shopifyCustomerId = customerId.split('/').pop();
+                console.log(`🔍 [REMOVE] Extracted customer ID from GID: ${shopifyCustomerId}`);
+            } else {
+                shopifyCustomerId = customerId;
+                console.log(`🔍 [REMOVE] Using direct customer ID: ${shopifyCustomerId}`);
             }
             
             if (shopifyCustomerId && wishlistData[shopifyCustomerId]) {
