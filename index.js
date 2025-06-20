@@ -10347,23 +10347,39 @@ app.post('/api/public/wishlist/add', async (req, res) => {
             wishlistData[customerId] = [];
         }
 
-        // Check if item already exists - only consider it duplicate if it's the exact same variant
+        // Normalize data for consistent comparison
+        const normalizeWishlistItem = (item) => {
+            const normalizeId = (id) => {
+                if (!id) return null;
+                const idStr = String(id);
+                if (idStr.includes('gid://shopify/')) {
+                    return idStr.split('/').pop();
+                }
+                return idStr;
+            };
+
+            return {
+                productId: normalizeId(item.productId),
+                variantId: normalizeId(item.variantId) || null,
+                selectedOptions: item.selectedOptions && typeof item.selectedOptions === 'object' ? 
+                    JSON.stringify(item.selectedOptions) : JSON.stringify({})
+            };
+        };
+
+        const currentNormalized = normalizeWishlistItem({ productId, variantId, selectedOptions });
+        
+        // Check if item already exists with normalized comparison
         const existingItemIndex = wishlistData[customerId].findIndex(item => {
+            const existingNormalized = normalizeWishlistItem(item);
+            
             // Must match product ID
-            if (item.productId !== productId) return false;
+            if (existingNormalized.productId !== currentNormalized.productId) return false;
             
-            // If both have variant IDs, they must match
-            if (variantId && item.variantId && item.variantId !== variantId) return false;
+            // Must match variant ID (both null or both same value)
+            if (existingNormalized.variantId !== currentNormalized.variantId) return false;
             
-            // If only one has variant ID, they're different
-            if ((variantId && !item.variantId) || (!variantId && item.variantId)) return false;
-            
-            // Check selected options if they exist
-            if (selectedOptions || item.selectedOptions) {
-                const currentOptions = JSON.stringify(selectedOptions || {});
-                const existingOptions = JSON.stringify(item.selectedOptions || {});
-                if (currentOptions !== existingOptions) return false;
-            }
+            // Must match selected options (both as JSON strings)
+            if (existingNormalized.selectedOptions !== currentNormalized.selectedOptions) return false;
             
             return true;
         });
@@ -10377,16 +10393,16 @@ app.post('/api/public/wishlist/add', async (req, res) => {
             });
         }
 
-        // Add new item to public storage
+        // Add new item to public storage with normalized data
         const newItem = {
-            productId,
-            variantId: variantId || null, // Don't default to productId
+            productId: productId.includes('gid://') ? productId : `gid://shopify/Product/${productId}`,
+            variantId: variantId ? (variantId.includes('gid://') ? variantId : `gid://shopify/ProductVariant/${variantId}`) : null,
             title,
             imageUrl: imageUrl || '',
             price: price || 0,
             compareAtPrice: compareAtPrice || 0,
             sku: sku || '',
-            selectedOptions: selectedOptions || {},
+            selectedOptions: selectedOptions && typeof selectedOptions === 'object' ? selectedOptions : {},
             handle: handle || '',
             addedAt: new Date().toISOString()
         };
@@ -10495,47 +10511,54 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
         console.log(`[SHOPIFY] Before removal: ${initialLength} items`);
         console.log(`[SHOPIFY] Looking for item with productId: ${productId}, variantId: ${variantId}`);
         
-        // Remove item by productId, variantId AND selectedOptions for exact match
-        wishlistData[customerId] = wishlistData[customerId].filter(item => {
-            // Normalize IDs for comparison (remove GID prefixes if present)
+        // Normalize data for consistent comparison
+        const normalizeWishlistItem = (item) => {
             const normalizeId = (id) => {
                 if (!id) return null;
-                if (typeof id === 'string' && id.includes('gid://shopify/')) {
-                    return id.split('/').pop();
+                const idStr = String(id);
+                if (idStr.includes('gid://shopify/')) {
+                    return idStr.split('/').pop();
                 }
-                return id.toString();
+                return idStr;
             };
-            
-            const itemProductId = normalizeId(item.productId);
-            const requestProductId = normalizeId(productId);
-            const itemVariantId = normalizeId(item.variantId);
-            const requestVariantId = normalizeId(variantId);
-            
-            console.log(`[SHOPIFY] Checking item - Product: ${itemProductId} vs ${requestProductId}, Variant: ${itemVariantId} vs ${requestVariantId}`);
+
+            return {
+                productId: normalizeId(item.productId),
+                variantId: normalizeId(item.variantId) || null,
+                selectedOptions: item.selectedOptions && typeof item.selectedOptions === 'object' ? 
+                    JSON.stringify(item.selectedOptions) : JSON.stringify({})
+            };
+        };
+
+        const targetNormalized = normalizeWishlistItem({ productId, variantId, selectedOptions });
+        console.log(`[SHOPIFY] Target normalized:`, targetNormalized);
+        
+        // Remove items that match the normalized criteria
+        wishlistData[customerId] = wishlistData[customerId].filter(item => {
+            const itemNormalized = normalizeWishlistItem(item);
+            console.log(`[SHOPIFY] Checking item normalized:`, itemNormalized);
             
             // Check product match
-            const productMatch = itemProductId === requestProductId;
+            const productMatch = itemNormalized.productId === targetNormalized.productId;
             
             // For simple product removal (no variant specified), just match product
-            if (!requestVariantId && (!selectedOptions || Object.keys(selectedOptions).length === 0)) {
+            if (!targetNormalized.variantId && targetNormalized.selectedOptions === '{}') {
                 const shouldRemove = productMatch;
                 console.log(`[SHOPIFY] Simple removal - Product match: ${productMatch}, removing: ${shouldRemove}`);
                 return !shouldRemove; // Return false to remove, true to keep
             }
             
-            // For variant-specific removal, match both product and variant
-            const variantMatch = !requestVariantId || itemVariantId === requestVariantId;
+            // For variant-specific removal, match product and variant
+            // If we have exact product + variant match, don't require options match
+            // because variant ID already uniquely identifies the product variant
+            const variantMatch = itemNormalized.variantId === targetNormalized.variantId;
+            const optionsMatch = itemNormalized.selectedOptions === targetNormalized.selectedOptions;
             
-            // Check selected options match if provided
-            let optionsMatch = true;
-            if (selectedOptions && Object.keys(selectedOptions).length > 0 && item.selectedOptions) {
-                optionsMatch = JSON.stringify(item.selectedOptions || {}) === JSON.stringify(selectedOptions);
-            }
-            
-            const shouldRemove = productMatch && variantMatch && optionsMatch;
+            // If product and variant match exactly, remove regardless of options
+            const shouldRemove = productMatch && variantMatch;
             console.log(`[SHOPIFY] Detailed removal - Product: ${productMatch}, Variant: ${variantMatch}, Options: ${optionsMatch}, removing: ${shouldRemove}`);
             
-            // Keep item if it doesn't match all criteria (return true to keep, false to remove)
+            // Keep item if it doesn't match criteria (return true to keep, false to remove)
             return !shouldRemove;
         });
 
