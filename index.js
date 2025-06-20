@@ -10567,6 +10567,113 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
     }
 });
 
+// Sync guest wishlist to logged-in user (public endpoint)
+app.post('/api/public/wishlist/sync', async (req, res) => {
+    try {
+        const { fromCustomerId, toCustomerId, items } = req.body;
+
+        if (!fromCustomerId || !toCustomerId || !Array.isArray(items)) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'fromCustomerId, toCustomerId, and items array are required' 
+            });
+        }
+
+        console.log(`[SYNC] Syncing wishlist from ${fromCustomerId} to ${toCustomerId}, ${items.length} items`);
+
+        // Load current wishlist data
+        const wishlistData = await loadWishlistData();
+        
+        // Initialize arrays if they don't exist
+        if (!wishlistData[toCustomerId]) {
+            wishlistData[toCustomerId] = [];
+        }
+
+        let syncedCount = 0;
+        
+        // Add each item to the target customer's wishlist
+        for (const item of items) {
+            // Check if item already exists in target wishlist
+            const exists = wishlistData[toCustomerId].some(existingItem => {
+                const normalizeId = (id) => {
+                    if (!id) return null;
+                    if (typeof id === 'string' && id.includes('gid://shopify/')) {
+                        return id.split('/').pop();
+                    }
+                    return id.toString();
+                };
+                
+                const existingProductId = normalizeId(existingItem.productId);
+                const itemProductId = normalizeId(item.productId);
+                
+                return existingProductId === itemProductId;
+            });
+
+            if (!exists) {
+                // Add the item with the new customer ID
+                const syncedItem = {
+                    ...item,
+                    customerId: toCustomerId,
+                    syncedAt: new Date().toISOString()
+                };
+                
+                wishlistData[toCustomerId].push(syncedItem);
+                syncedCount++;
+                console.log(`[SYNC] Added item: ${item.title}`);
+            } else {
+                console.log(`[SYNC] Item already exists: ${item.title}`);
+            }
+        }
+
+        // Save updated wishlist data
+        await saveWishlistData(wishlistData);
+
+        // Also sync with Firebase if enabled
+        if (firebaseEnabled && wishlistService) {
+            try {
+                for (const item of items) {
+                    const fullCustomerId = `gid://shopify/Customer/${toCustomerId}`;
+                    await wishlistService.addToWishlist(
+                        fullCustomerId,
+                        'anonymous@shopify.com',
+                        item.productId,
+                        item.title,
+                        item.handle,
+                        item.imageUrl,
+                        item.variantId,
+                        item.selectedOptions
+                    );
+                }
+                console.log(`[SYNC] Items also synced to Firebase`);
+            } catch (firebaseError) {
+                console.error('[SYNC] Error syncing to Firebase (non-critical):', firebaseError);
+            }
+        }
+
+        // Sync to Shopify customer metafields
+        try {
+            await syncWishlistToShopify(toCustomerId, wishlistData[toCustomerId]);
+            console.log(`[SYNC] Wishlist synced to Shopify metafields`);
+        } catch (syncError) {
+            console.error('[SYNC] Error syncing to Shopify metafields:', syncError);
+        }
+
+        res.json({ 
+            success: true,
+            message: `Synced ${syncedCount} new items to customer ${toCustomerId}`,
+            syncedCount,
+            totalItems: wishlistData[toCustomerId].length
+        });
+
+    } catch (error) {
+        console.error('[SYNC] Error syncing wishlist:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error' 
+        });
+    }
+});
+
 // Debug endpoint to see all customer IDs in wishlist (temporary)
 app.get('/api/debug/wishlist-customers', async (req, res) => {
     try {
