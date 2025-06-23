@@ -60,7 +60,9 @@ const corsOptions = {
           'http://localhost:3000',
           'http://127.0.0.1:3000',
           'http://localhost:8080',
-          'https://metallbude-de.myshopify.com' // Allow Shopify in development too
+          'https://metallbude-de.myshopify.com', // Allow Shopify in development too
+          'https://metallbude.com',
+          'https://www.metallbude.com'
         ];
     
     // In development, also allow file:// origins for local testing
