@@ -9887,13 +9887,7 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
                 console.log(`🔍 [SYNC] Using numeric ID as Shopify customer ID: ${shopifyCustomerId}`);
             }
             
-            // Method 3: For your specific case, hardcode the mapping
-            if (customerId === 'gid://shopify/Customer/4088060379300' || customerId === '4088060379300') {
-                shopifyCustomerId = '4088060379300';
-                console.log(`🔍 [SYNC] Using hardcoded mapping: ${shopifyCustomerId}`);
-            }
-            
-            // Method 4: Try to extract from session metadata (check if session has Shopify customer info)
+            // Method 3: Try to extract from session metadata (check if session has Shopify customer info)
             if (!shopifyCustomerId && req.session && req.session.shopifyCustomerId) {
                 shopifyCustomerId = req.session.shopifyCustomerId;
                 console.log(`🔍 [SYNC] Found in session metadata: ${shopifyCustomerId}`);
@@ -10000,11 +9994,6 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
                 shopifyCustomerId = customerId.replace('gid://shopify/Customer/', '');
             } else if (customerId && /^\d+$/.test(customerId)) {
                 shopifyCustomerId = customerId;
-            }
-            
-            // Hardcoded mapping for your specific case
-            if (customerId === 'gid://shopify/Customer/4088060379300' || customerId === '4088060379300') {
-                shopifyCustomerId = '4088060379300';
             }
             
             if (shopifyCustomerId && wishlistData[shopifyCustomerId]) {
@@ -10742,7 +10731,7 @@ app.get('/api/public/wishlist/items', async (req, res) => {
             // This is a temporary solution - you should implement proper customer ID mapping
             
             // For now, let's create a simple mapping based on the customer ID
-            // If the Shopify customer ID is 4088060379300, we can map it to session data
+            // Generic customer ID mapping for any Shopify customer
             
             // TODO: Implement proper customer ID mapping system
             console.log(`[SHOPIFY] Customer ${customerId} has no wishlist data in either system`);
