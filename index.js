@@ -9627,7 +9627,9 @@ async function syncFirebaseToPublicStorage(customerId) {
         // Try simple format first (this is what gets stored when adding from Flutter)
         try {
             console.log(`🔍 [SYNC] Trying simple customer ID format: ${customerId}`);
-            firebaseItems = await wishlistService.getWishlist(customerId, 'anonymous@shopify.com');
+            // Note: For sync operations, we use a customer-specific placeholder email
+            // since sync functions don't have access to session data with real customer emails
+            firebaseItems = await wishlistService.getWishlist(customerId, `sync-${customerId}@metallbude.internal`);
             if (firebaseItems.length > 0) {
                 foundFormat = 'simple';
                 console.log(`✅ [SYNC] Found ${firebaseItems.length} items using simple format`);
@@ -9641,7 +9643,7 @@ async function syncFirebaseToPublicStorage(customerId) {
             try {
                 const fullCustomerId = `gid://shopify/Customer/${customerId}`;
                 console.log(`🔍 [SYNC] Trying full customer ID format: ${fullCustomerId}`);
-                firebaseItems = await wishlistService.getWishlist(fullCustomerId, 'anonymous@shopify.com');
+                firebaseItems = await wishlistService.getWishlist(fullCustomerId, `sync-${customerId}@metallbude.internal`);
                 if (firebaseItems.length > 0) {
                     foundFormat = 'full';
                     console.log(`✅ [SYNC] Found ${firebaseItems.length} items using full format`);
@@ -10055,7 +10057,7 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                     console.log(`[SHOPIFY] Firebase sync failed, trying direct Firebase lookup`);
                     // Direct Firebase lookup as fallback
                     const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                    const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, 'anonymous@shopify.com');
+                    const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, `lookup-${customerId}@metallbude.internal`);
                     
                     if (firebaseItems.length > 0) {
                         console.log(`[SHOPIFY] Found ${firebaseItems.length} items in Firebase`);
@@ -10383,8 +10385,9 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                 // Use the correct customer ID format for Firebase
                 const shopifyCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
                 
-                // Use a web-specific email identifier for logging
-                const customerEmail = 'web-addition@shopify.com'; // This is just for logging
+                // Note: For public/anonymous additions, we use a customer-specific placeholder email
+                // since public endpoints don't have access to authenticated session data
+                const customerEmail = `web-${customerId}@metallbude.internal`; // Anonymous web addition identifier
                 
                 // Prepare enhanced product data for Firebase
                 const productData = {
@@ -10532,7 +10535,7 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             if (firebaseEnabled && wishlistService) {
                 try {
                     const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                    const firebaseResult = await wishlistService.removeFromWishlist(fullCustomerId, 'anonymous@shopify.com', productId, variantId, selectedOptions);
+                    const firebaseResult = await wishlistService.removeFromWishlist(fullCustomerId, `remove-${customerId}@metallbude.internal`, productId, variantId, selectedOptions);
                     console.log(`[SHOPIFY] Item also removed from Firebase:`, firebaseResult);
                 } catch (firebaseError) {
                     console.error('[SHOPIFY] Error removing from Firebase (non-critical):', firebaseError);
