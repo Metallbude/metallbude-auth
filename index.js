@@ -50,19 +50,26 @@ const corsOptions = {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
+    console.log(`🔍 CORS check for origin: ${origin}`);
+    
     const allowedOrigins = process.env.NODE_ENV === 'production' 
       ? [
           'https://metallbude.com',
           'https://www.metallbude.com',
-          'https://metallbude-de.myshopify.com'
+          'https://metallbude-de.myshopify.com',
+          // Add more Shopify variations
+          'https://metallbude.myshopify.com',
+          'https://checkout.shopify.com'
         ]
       : [
           'http://localhost:3000',
           'http://127.0.0.1:3000',
           'http://localhost:8080',
           'https://metallbude-de.myshopify.com', // Allow Shopify in development too
+          'https://metallbude.myshopify.com',
           'https://metallbude.com',
-          'https://www.metallbude.com'
+          'https://www.metallbude.com',
+          'https://checkout.shopify.com'
         ];
     
     // In development, also allow file:// origins for local testing
@@ -70,7 +77,14 @@ const corsOptions = {
       return callback(null, true);
     }
     
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    // More permissive matching for Shopify domains
+    if (origin && (
+      allowedOrigins.indexOf(origin) !== -1 ||
+      origin.includes('metallbude') ||
+      origin.includes('shopify.com') ||
+      origin.includes('myshopify.com')
+    )) {
+      console.log(`✅ CORS allowed for origin: ${origin}`);
       callback(null, true);
     } else {
       console.log(`🚫 CORS blocked origin: ${origin}`);
@@ -147,6 +161,63 @@ const config = {
   sessions: new Map(),
   customerEmails: new Map(),
 };
+
+// Helper function to get real customer email from Shopify for public endpoints
+async function getRealCustomerEmail(customerId) {
+    try {
+        // Skip if it's a guest customer ID
+        if (customerId.includes('guest_')) {
+            return `guest@metallbude.guest`;
+        }
+        
+        // Extract numeric ID if it's a GID
+        const numericCustomerId = customerId.includes('gid://shopify/Customer/') 
+            ? customerId.replace('gid://shopify/Customer/', '') 
+            : customerId;
+        
+        console.log(`🔍 [EMAIL] Fetching real email for customer: ${numericCustomerId}`);
+        
+        const query = `
+            query getCustomerEmail($id: ID!) {
+                customer(id: "gid://shopify/Customer/${numericCustomerId}") {
+                    id
+                    email
+                    firstName
+                    lastName
+                }
+            }
+        `;
+        
+        const response = await axios.post(
+            config.adminApiUrl,
+            {
+                query,
+                variables: { id: `gid://shopify/Customer/${numericCustomerId}` }
+            },
+            {
+                headers: {
+                    'X-Shopify-Access-Token': config.adminToken,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        const customerData = response.data?.data?.customer;
+        
+        if (customerData && customerData.email) {
+            console.log(`✅ [EMAIL] Found real email for ${numericCustomerId}: ${customerData.email}`);
+            return customerData.email;
+        } else {
+            console.log(`⚠️ [EMAIL] No email found for customer ${numericCustomerId}, using fallback`);
+            return `anonymous@metallbude.com`;
+        }
+        
+    } catch (error) {
+        console.error(`❌ [EMAIL] Error fetching customer email for ${customerId}:`, error.message);
+        // Return a cleaner fallback email for failed lookups
+        return `anonymous@metallbude.com`;
+    }
+}
 
 // 🔥 PERSISTENT SESSION STORAGE - Add this RIGHT AFTER the config object
 const fs = require('fs').promises;
@@ -10073,7 +10144,9 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                     console.log(`[SHOPIFY] Firebase sync failed, trying direct Firebase lookup`);
                     // Direct Firebase lookup as fallback
                     const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                    const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, `lookup-${customerId}@metallbude.internal`);
+                    // ✅ NEW: Get real customer email for Firebase operations
+                    const customerEmail = await getRealCustomerEmail(customerId);
+                    const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, customerEmail);
                     
                     if (firebaseItems.length > 0) {
                         console.log(`[SHOPIFY] Found ${firebaseItems.length} items in Firebase`);
@@ -10401,9 +10474,8 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                 // Use the correct customer ID format for Firebase
                 const shopifyCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
                 
-                // Note: For public/anonymous additions, we use a customer-specific placeholder email
-                // since public endpoints don't have access to authenticated session data
-                const customerEmail = `web-${customerId}@metallbude.internal`; // Anonymous web addition identifier
+                // ✅ NEW: Get real customer email from Shopify for proper identification
+                const customerEmail = await getRealCustomerEmail(customerId);
                 
                 // Prepare enhanced product data for Firebase
                 const productData = {
@@ -10551,7 +10623,9 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             if (firebaseEnabled && wishlistService) {
                 try {
                     const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                    const firebaseResult = await wishlistService.removeFromWishlist(fullCustomerId, `remove-${customerId}@metallbude.internal`, productId, variantId, selectedOptions);
+                    // ✅ NEW: Get real customer email for Firebase operations
+                    const customerEmail = await getRealCustomerEmail(customerId);
+                    const firebaseResult = await wishlistService.removeFromWishlist(fullCustomerId, customerEmail, productId, variantId, selectedOptions);
                     console.log(`[SHOPIFY] Item also removed from Firebase:`, firebaseResult);
                 } catch (firebaseError) {
                     console.error('[SHOPIFY] Error removing from Firebase (non-critical):', firebaseError);
