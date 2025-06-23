@@ -63,6 +63,11 @@ const corsOptions = {
           'https://metallbude-de.myshopify.com' // Allow Shopify in development too
         ];
     
+    // In development, also allow file:// origins for local testing
+    if (process.env.NODE_ENV !== 'production' && origin && origin.startsWith('file://')) {
+      return callback(null, true);
+    }
+    
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
