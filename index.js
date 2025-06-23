@@ -47,8 +47,6 @@ app.use((req, res, next) => {
 // CORS configuration with environment-specific origins
 const corsOptions = {
   origin: function (origin, callback) {
-    console.log(`🔍 CORS check - Origin: "${origin}", NODE_ENV: "${process.env.NODE_ENV}"`);
-    
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
@@ -65,16 +63,12 @@ const corsOptions = {
           'https://metallbude-de.myshopify.com' // Allow Shopify in development too
         ];
     
-    console.log(`🔍 Allowed origins:`, allowedOrigins);
-    
     // In development, also allow file:// origins for local testing
     if (process.env.NODE_ENV !== 'production' && (origin === 'file://' || origin.startsWith('file://'))) {
-      console.log(`✅ Allowing file:// origin in development`);
       return callback(null, true);
     }
     
     if (allowedOrigins.indexOf(origin) !== -1) {
-      console.log(`✅ Origin allowed: ${origin}`);
       callback(null, true);
     } else {
       console.log(`🚫 CORS blocked origin: ${origin}`);
@@ -9778,14 +9772,26 @@ function extractHandleFromProductId(productId) {
 // Get wishlist items for a customer
 app.get('/api/wishlist/items', authenticateAppToken, async (req, res) => {
     try {
-        const customerId = req.session.customerId;
+        const sessionCustomerId = req.session.customerId;
         
-        if (!customerId) {
+        if (!sessionCustomerId) {
             return res.status(400).json({ error: 'Customer ID not found' });
         }
 
+        console.log(`📥 [AUTH] Getting wishlist for authenticated customer: ${sessionCustomerId}`);
+
+        // Map customer ID for cross-platform compatibility
+        const customerId = mapCustomerIdForWishlist(sessionCustomerId);
+        console.log(`📥 [AUTH] Mapped to customer ID: ${customerId}`);
+
+        // First try to sync from Firebase to ensure we have the latest data
+        const syncSuccess = await syncFirebaseToPublicStorage(customerId);
+        console.log(`🔄 [AUTH] Firebase sync result: ${syncSuccess}`);
+
         const wishlistData = await loadWishlistData();
-        const customerWishlist = wishlistData[customerId] || [];
+        let customerWishlist = wishlistData[customerId] || [];
+
+        console.log(`📥 [AUTH] Found ${customerWishlist.length} wishlist items for ${customerId}`);
 
         res.json({
             success: true,
@@ -9801,11 +9807,15 @@ app.get('/api/wishlist/items', authenticateAppToken, async (req, res) => {
 // Add item to wishlist
 app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
     try {
-        const customerId = req.session.customerId;
+        const sessionCustomerId = req.session.customerId;
         
-        if (!customerId) {
+        if (!sessionCustomerId) {
             return res.status(400).json({ error: 'Customer ID not found' });
         }
+
+        // Map customer ID for cross-platform compatibility
+        const customerId = mapCustomerIdForWishlist(sessionCustomerId);
+        console.log(`➕ [AUTH] Adding to wishlist for customer: ${customerId} (session: ${sessionCustomerId})`);
 
         const {
             productId,
@@ -9945,11 +9955,15 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
 // Remove item from wishlist
 app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
     try {
-        const customerId = req.session.customerId;
+        const sessionCustomerId = req.session.customerId;
         
-        if (!customerId) {
+        if (!sessionCustomerId) {
             return res.status(400).json({ error: 'Customer ID not found' });
         }
+
+        // Map customer ID for cross-platform compatibility
+        const customerId = mapCustomerIdForWishlist(sessionCustomerId);
+        console.log(`➖ [AUTH] Removing from wishlist for customer: ${customerId} (session: ${sessionCustomerId})`);
 
         const { productId, variantId, selectedOptions } = req.body;
 
