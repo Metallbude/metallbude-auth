@@ -47,6 +47,8 @@ app.use((req, res, next) => {
 // CORS configuration with environment-specific origins
 const corsOptions = {
   origin: function (origin, callback) {
+    console.log(`🔍 CORS check - Origin: "${origin}", NODE_ENV: "${process.env.NODE_ENV}"`);
+    
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
@@ -63,12 +65,16 @@ const corsOptions = {
           'https://metallbude-de.myshopify.com' // Allow Shopify in development too
         ];
     
+    console.log(`🔍 Allowed origins:`, allowedOrigins);
+    
     // In development, also allow file:// origins for local testing
-    if (process.env.NODE_ENV !== 'production' && origin && origin.startsWith('file://')) {
+    if (process.env.NODE_ENV !== 'production' && (origin === 'file://' || origin.startsWith('file://'))) {
+      console.log(`✅ Allowing file:// origin in development`);
       return callback(null, true);
     }
     
     if (allowedOrigins.indexOf(origin) !== -1) {
+      console.log(`✅ Origin allowed: ${origin}`);
       callback(null, true);
     } else {
       console.log(`🚫 CORS blocked origin: ${origin}`);
