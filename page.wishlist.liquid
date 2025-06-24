@@ -89,7 +89,7 @@
   margin: 0 auto;
   padding: 40px 20px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: #ffffff;
+  background: #f5f1eb;
   color: #000000;
   line-height: 1.4;
 }
@@ -296,6 +296,7 @@
   border-radius: 16px;
   flex-shrink: 0; /* Don't shrink the image */
   transition: transform 0.2s ease;
+  cursor: pointer; /* Added cursor pointer */
 }
 
 .product-image:hover {
@@ -356,7 +357,9 @@
   transition: all 0.2s ease;
   opacity: 1; /* Always visible */
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  z-index: 10;
+  z-index: 20; /* Higher z-index to ensure it's clickable */
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .remove-btn:hover {
@@ -365,17 +368,49 @@
   transform: scale(1.05);
 }
 
+.remove-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Prevent parent click events when clicking on remove button */
+.remove-btn * {
+  pointer-events: none;
+}
+
+/* Product Badge (Sale, Bestseller) */
+.product-badge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  background: #000000;
+  color: #ffffff;
+  font-size: 0.6rem;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  z-index: 15;
+}
+
+.product-badge-sale {
+  background: #28a745; /* Green for sale */
+}
+
 /* Product Title - Consistent Height */
 .product-title {
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-size: 0.75rem; /* Smaller text size */
+  font-weight: 500; /* Lighter weight */
   color: #000000;
-  margin-bottom: 6px;
+  margin-bottom: 4px; /* Reduced gap */
   line-height: 1.3;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px; /* Reduced letter spacing */
   text-decoration: none;
   display: block;
+  text-align: center; /* Centered */
   min-height: 2.6em; /* Reserve space for 2 lines of text */
   overflow: hidden;
   display: -webkit-box;
@@ -395,23 +430,50 @@
 .product-price {
   color: #000000;
   font-weight: 500;
-  font-size: 0.9rem;
-  margin-bottom: 16px;
+  font-size: 0.75rem; /* Same size as title */
+  margin-bottom: 12px; /* Reduced margin */
+  text-align: center; /* Centered */
   min-height: 1.3em; /* Consistent height for price */
 }
 
 .product-price-from {
-  font-size: 0.75rem;
+  font-size: 0.68rem; /* Smaller text */
   color: #666666;
   font-weight: 400;
   margin-right: 4px;
   text-transform: lowercase;
 }
 
+/* Sale Price Styling */
+.product-price-sale {
+  color: #28a745; /* Green sale price */
+  font-weight: 600;
+}
+
+.product-price-compare {
+  color: #666666;
+  text-decoration: line-through;
+  font-size: 0.68rem;
+  margin-right: 6px;
+}
+
+.product-sale-badge {
+  background: #28a745;
+  color: white;
+  font-size: 0.6rem;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-left: 4px;
+}
+
 /* Color Swatches - Variant Display */
 .product-swatches {
   display: flex;
   align-items: center;
+  justify-content: center; /* Center the swatches */
   gap: 6px;
   margin-bottom: 16px;
   flex-wrap: wrap;
@@ -434,9 +496,10 @@
 }
 
 .swatch-text {
-  font-size: 0.72rem;
+  font-size: 0.68rem; /* Slightly smaller */
   color: #666666;
   font-weight: 400;
+  text-align: center; /* Center the text */
 }
 
 /* Metallbude Color Definitions */
@@ -644,6 +707,32 @@ class MetallbudeWishlistManager {
     if (retryBtn) {
       retryBtn.addEventListener('click', () => this.loadWishlist());
     }
+
+    // Event delegation for remove buttons
+    document.addEventListener('click', (e) => {
+      const removeBtn = e.target.closest('.remove-btn');
+      if (removeBtn) {
+        // Prevent event bubbling to parent elements
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const productGid = removeBtn.getAttribute('data-product-gid');
+        const variantId = removeBtn.getAttribute('data-variant-id');
+        
+        console.log('Remove button clicked:', productGid, variantId);
+        this.removeItemSafe(e, productGid, variantId);
+        return; // Exit early to prevent other handlers
+      }
+
+      // Event delegation for product image clicks (only if not clicking remove button)
+      const productImage = e.target.closest('.product-image');
+      if (productImage && !e.target.closest('.remove-btn')) {
+        const productUrl = productImage.getAttribute('data-product-url');
+        if (productUrl) {
+          window.location.href = productUrl;
+        }
+      }
+    });
   }
 
   async loadWishlist() {
@@ -654,7 +743,15 @@ class MetallbudeWishlistManager {
       const apiUrl = `${this.backendUrl}/api/public/wishlist/items?customerId=${this.customerId}`;
       console.log('🌐 Loading from:', apiUrl);
       
-      const response = await fetch(apiUrl);
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        credentials: 'omit',
+        mode: 'cors'
+      });
       console.log('📡 Load response status:', response.status);
       
       if (!response.ok) {
@@ -702,6 +799,13 @@ class MetallbudeWishlistManager {
     return shopifyGid;
   }
 
+  extractVariantId(shopifyGid) {
+    if (typeof shopifyGid === 'string' && shopifyGid.includes('gid://shopify/ProductVariant/')) {
+      return shopifyGid.split('/').pop();
+    }
+    return shopifyGid;
+  }
+
   async fetchRealProductData(productDataArray) {
     const products = [];
     
@@ -742,8 +846,10 @@ class MetallbudeWishlistManager {
             
             // Use the selected variant's price if available
             let productPrice = foundProduct.variants[0]?.price || '0.00';
+            let compareAtPrice = foundProduct.variants[0]?.compare_at_price || null;
             if (selectedVariant && selectedVariant.price) {
               productPrice = selectedVariant.price;
+              compareAtPrice = selectedVariant.compare_at_price || null;
             }
             
             // ✅ Build URL with variant information if available
@@ -767,6 +873,7 @@ class MetallbudeWishlistManager {
               handle: foundProduct.handle,
               featuredImage: productImage,
               price: productPrice,
+              compareAtPrice: compareAtPrice, // Add compare at price
               priceMin: Math.min(...variants.map(v => parseFloat(v.price || 0))),
               priceMax: Math.max(...variants.map(v => parseFloat(v.price || 0))),
               available: foundProduct.available,
@@ -949,16 +1056,36 @@ class MetallbudeWishlistManager {
       `;
     }
     
-    // Price formatting (German style with comma)
+    // Price formatting (German style with comma) with sale price support
     let priceHtml = '';
     if (product.isReal && product.priceMin && product.priceMax) {
       if (product.priceMin === product.priceMax) {
-        priceHtml = `<p class="product-price">${product.priceMin.toFixed(2).replace('.', ',')} EUR</p>`;
+        // Check if this is a sale item
+        if (product.compareAtPrice && parseFloat(product.compareAtPrice) > parseFloat(product.price)) {
+          priceHtml = `
+            <p class="product-price">
+              <span class="product-price-compare">${parseFloat(product.compareAtPrice).toFixed(2).replace('.', ',')} EUR</span>
+              <span class="product-price-sale">${parseFloat(product.price).toFixed(2).replace('.', ',')} EUR</span>
+            </p>
+          `;
+        } else {
+          priceHtml = `<p class="product-price">${product.priceMin.toFixed(2).replace('.', ',')} EUR</p>`;
+        }
       } else {
         priceHtml = `<p class="product-price"><span class="product-price-from">ab</span> ${product.priceMin.toFixed(2).replace('.', ',')} EUR</p>`;
       }
     } else if (product.price !== '0.00') {
-      priceHtml = `<p class="product-price">${product.price.replace('.', ',')} EUR</p>`;
+      // Check if this is a sale item for single price products
+      if (product.compareAtPrice && parseFloat(product.compareAtPrice) > parseFloat(product.price)) {
+        priceHtml = `
+          <p class="product-price">
+            <span class="product-price-compare">${parseFloat(product.compareAtPrice).toFixed(2).replace('.', ',')} EUR</span>
+            <span class="product-price-sale">${product.price.replace('.', ',')} EUR</span>
+          </p>
+        `;
+      } else {
+        priceHtml = `<p class="product-price">${product.price.replace('.', ',')} EUR</p>`;
+      }
     }
     
     // Color swatches - show for any product with variant options
@@ -976,16 +1103,20 @@ class MetallbudeWishlistManager {
       `;
     }
 
-    // Badge for bestsellers
+    // Badge for bestsellers and sale items
     let badgeHtml = '';
-    if (product.tags && product.tags.includes('bestseller')) {
+    const isOnSale = product.compareAtPrice && parseFloat(product.compareAtPrice) > parseFloat(product.price);
+    
+    if (isOnSale) {
+      badgeHtml = '<div class="product-badge product-badge-sale">SALE</div>';
+    } else if (product.tags && product.tags.includes('bestseller')) {
       badgeHtml = '<div class="product-badge">BESTSELLER</div>';
     }
     
     card.innerHTML = `
-      <div class="product-image" onclick="window.location.href='${product.url}'" style="cursor: pointer;">
+      <div class="product-image" data-product-url="${product.url}">
         ${imageHtml}
-        <button class="remove-btn" title="Aus Wunschliste entfernen" onclick="event.stopPropagation(); window.wishlistManager.removeItemSafe(event, '${product.gid}', '${product.selectedVariant ? product.selectedVariant.id : ''}')">
+        <button class="remove-btn" title="Aus Wunschliste entfernen" data-product-gid="${product.gid}" data-variant-id="${product.selectedVariant ? product.selectedVariant.id : ''}" type="button">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -1059,10 +1190,14 @@ class MetallbudeWishlistManager {
       // Add variant and selected options if provided
       if (variantId) {
         requestBody.variantId = variantId;
+        console.log('   Added variant ID to request:', variantId);
       }
       if (selectedOptions && Object.keys(selectedOptions).length > 0) {
         requestBody.selectedOptions = selectedOptions;
+        console.log('   Added selected options to request:', selectedOptions);
       }
+      
+      console.log('📦 Final request body:', JSON.stringify(requestBody, null, 2));
       
       console.log('📦 Request body:', requestBody);
       console.log('🌐 API URL:', `${this.backendUrl}/api/public/wishlist/remove`);
@@ -1071,7 +1206,10 @@ class MetallbudeWishlistManager {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Accept': 'application/json'
         },
+        credentials: 'omit',
+        mode: 'cors',
         body: JSON.stringify(requestBody)
       });
 
@@ -1079,16 +1217,32 @@ class MetallbudeWishlistManager {
       const responseData = await response.json();
       console.log('📡 Response data:', responseData);
 
-      if (response.ok) {
+      if (response.ok && responseData.success) {
+        console.log('✅ Item removed successfully');
         this.showSuccess('ARTIKEL WURDE ENTFERNT!');
-        setTimeout(() => this.loadWishlist(), 500);
+        // Wait a bit longer and only reload if removal was confirmed successful
+        setTimeout(() => {
+          this.loadWishlist();
+        }, 800);
       } else {
         throw new Error(`Remove failed: ${response.status} - ${responseData.error || 'Unknown error'}`);
       }
       
     } catch (error) {
       console.error('🔥 Error removing item:', error);
-      alert('Fehler beim Entfernen des Artikels. Bitte versuchen Sie es erneut.');
+      
+      // Show specific error message based on the error type
+      let errorMessage = 'Fehler beim Entfernen des Artikels. Bitte versuchen Sie es erneut.';
+      if (error.message.includes('404')) {
+        errorMessage = 'Artikel wurde bereits entfernt oder nicht gefunden.';
+      } else if (error.message.includes('500')) {
+        errorMessage = 'Server-Fehler. Bitte versuchen Sie es später erneut.';
+      }
+      
+      alert(errorMessage);
+      
+      // Re-throw error so calling function knows it failed
+      throw error;
     }
   }
 
@@ -1098,7 +1252,29 @@ class MetallbudeWishlistManager {
       console.log('🗑️ Removing item:', productId, variantId);
       
       const removeBtn = clickEvent.target.closest('.remove-btn');
+      if (!removeBtn) {
+        console.error('Remove button not found');
+        return;
+      }
+
+      // Prevent multiple clicks
+      if (removeBtn.disabled) {
+        console.log('⚠️ Remove already in progress');
+        return;
+      }
+
+      // Disable button to prevent multiple clicks
+      removeBtn.disabled = true;
+      removeBtn.style.opacity = '0.5';
+      
       const productCard = removeBtn.closest('.product-card');
+      if (!productCard) {
+        console.error('Product card not found');
+        removeBtn.disabled = false;
+        removeBtn.style.opacity = '1';
+        return;
+      }
+
       const selectedOptionsJson = productCard.dataset.selectedOptions;
       
       let selectedOptions = {};
@@ -1111,9 +1287,20 @@ class MetallbudeWishlistManager {
       }
       
       console.log('Selected options:', selectedOptions);
+      
+      // Call remove and wait for completion
       await this.removeItem(productId, variantId, selectedOptions);
+      
     } catch (error) {
       console.error('🔥 Error in removeItemSafe:', error);
+      
+      // Re-enable button on error
+      const removeBtn = clickEvent.target.closest('.remove-btn');
+      if (removeBtn) {
+        removeBtn.disabled = false;
+        removeBtn.style.opacity = '1';
+      }
+      
       alert('Fehler beim Entfernen des Artikels. Bitte versuchen Sie es erneut.');
     }
   }

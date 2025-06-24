@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wishlist Remove Debug</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f8f9fa;
+        }
+        .debug-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+        input, textarea, button {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .result {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin-top: 15px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .error {
+            border-left-color: #dc3545;
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .success {
+            border-left-color: #28a745;
+            background: #d4edda;
+            color: #155724;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 Metallbude Wishlist Remove Debug</h1>
+    
+    <div class="debug-panel">
+        <h2>1. View Customer Wishlist</h2>
+        <div class="form-group">
+            <label for="viewCustomerId">Customer ID:</label>
+            <input type="text" id="viewCustomerId" placeholder="Enter customer ID">
+        </div>
+        <button onclick="viewWishlist()">View Wishlist</button>
+        <div id="viewResult" class="result" style="display: none;"></div>
+    </div>
+
+    <div class="debug-panel">
+        <h2>2. Test Remove Functionality</h2>
+        <div class="form-group">
+            <label for="customerId">Customer ID:</label>
+            <input type="text" id="customerId" placeholder="Enter customer ID">
+        </div>
+        <div class="form-group">
+            <label for="productId">Product ID:</label>
+            <input type="text" id="productId" placeholder="gid://shopify/Product/123456 or just 123456">
+        </div>
+        <div class="form-group">
+            <label for="variantId">Variant ID (optional):</label>
+            <input type="text" id="variantId" placeholder="gid://shopify/ProductVariant/123456 or just 123456">
+        </div>
+        <div class="form-group">
+            <label for="selectedOptions">Selected Options (JSON, optional):</label>
+            <textarea id="selectedOptions" rows="3" placeholder='{"Color": "schwarz", "Size": "M"}'></textarea>
+        </div>
+        <button onclick="testRemove()">Test Remove</button>
+        <div id="removeResult" class="result" style="display: none;"></div>
+    </div>
+
+    <div class="debug-panel">
+        <h2>3. Production Test</h2>
+        <p>Test against the actual production endpoint:</p>
+        <button onclick="testProductionRemove()">Test Production Remove</button>
+        <div id="productionResult" class="result" style="display: none;"></div>
+    </div>
+
+    <script>
+        const DEBUG_URL = 'http://localhost:3001';
+        const PRODUCTION_URL = 'https://metallbude-auth.onrender.com';
+
+        async function viewWishlist() {
+            const customerId = document.getElementById('viewCustomerId').value;
+            const resultDiv = document.getElementById('viewResult');
+            
+            if (!customerId) {
+                showResult(resultDiv, 'Please enter a customer ID', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${DEBUG_URL}/debug/wishlist/${customerId}`);
+                const data = await response.json();
+                
+                let resultText = `Status: ${response.status}\n\n`;
+                resultText += JSON.stringify(data, null, 2);
+                
+                showResult(resultDiv, resultText, response.ok ? 'success' : 'error');
+            } catch (error) {
+                showResult(resultDiv, `Error: ${error.message}\n\nMake sure the debug server is running:\nnode test_wishlist_remove_debug.js`, 'error');
+            }
+        }
+
+        async function testRemove() {
+            const customerId = document.getElementById('customerId').value;
+            const productId = document.getElementById('productId').value;
+            const variantId = document.getElementById('variantId').value;
+            const selectedOptionsText = document.getElementById('selectedOptions').value;
+            const resultDiv = document.getElementById('removeResult');
+            
+            if (!customerId || !productId) {
+                showResult(resultDiv, 'Please enter at least Customer ID and Product ID', 'error');
+                return;
+            }
+
+            let selectedOptions = {};
+            if (selectedOptionsText.trim()) {
+                try {
+                    selectedOptions = JSON.parse(selectedOptionsText);
+                } catch (e) {
+                    showResult(resultDiv, `Invalid JSON in Selected Options: ${e.message}`, 'error');
+                    return;
+                }
+            }
+
+            const requestBody = {
+                customerId,
+                productId
+            };
+
+            if (variantId) requestBody.variantId = variantId;
+            if (Object.keys(selectedOptions).length > 0) requestBody.selectedOptions = selectedOptions;
+
+            try {
+                const response = await fetch(`${DEBUG_URL}/debug/remove`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                const data = await response.json();
+                
+                let resultText = `Request Body:\n${JSON.stringify(requestBody, null, 2)}\n\n`;
+                resultText += `Response Status: ${response.status}\n\n`;
+                resultText += `Response Data:\n${JSON.stringify(data, null, 2)}`;
+                
+                showResult(resultDiv, resultText, response.ok ? 'success' : 'error');
+            } catch (error) {
+                showResult(resultDiv, `Error: ${error.message}\n\nMake sure the debug server is running:\nnode test_wishlist_remove_debug.js`, 'error');
+            }
+        }
+
+        async function testProductionRemove() {
+            const customerId = document.getElementById('customerId').value;
+            const productId = document.getElementById('productId').value;
+            const variantId = document.getElementById('variantId').value;
+            const selectedOptionsText = document.getElementById('selectedOptions').value;
+            const resultDiv = document.getElementById('productionResult');
+            
+            if (!customerId || !productId) {
+                showResult(resultDiv, 'Please enter at least Customer ID and Product ID', 'error');
+                return;
+            }
+
+            let selectedOptions = {};
+            if (selectedOptionsText.trim()) {
+                try {
+                    selectedOptions = JSON.parse(selectedOptionsText);
+                } catch (e) {
+                    showResult(resultDiv, `Invalid JSON in Selected Options: ${e.message}`, 'error');
+                    return;
+                }
+            }
+
+            const requestBody = {
+                customerId,
+                productId
+            };
+
+            if (variantId) requestBody.variantId = variantId;
+            if (Object.keys(selectedOptions).length > 0) requestBody.selectedOptions = selectedOptions;
+
+            try {
+                const response = await fetch(`${PRODUCTION_URL}/api/public/wishlist/remove`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                const data = await response.json();
+                
+                let resultText = `Request Body:\n${JSON.stringify(requestBody, null, 2)}\n\n`;
+                resultText += `Response Status: ${response.status}\n\n`;
+                resultText += `Response Data:\n${JSON.stringify(data, null, 2)}`;
+                
+                showResult(resultDiv, resultText, response.ok ? 'success' : 'error');
+            } catch (error) {
+                showResult(resultDiv, `Error: ${error.message}`, 'error');
+            }
+        }
+
+        function showResult(element, text, type) {
+            element.textContent = text;
+            element.className = `result ${type}`;
+            element.style.display = 'block';
+        }
+
+        // Pre-fill some example data
+        document.addEventListener('DOMContentLoaded', function() {
+            // You can pre-fill these with your actual customer ID and product ID for testing
+            // document.getElementById('viewCustomerId').value = 'YOUR_CUSTOMER_ID_HERE';
+            // document.getElementById('customerId').value = 'YOUR_CUSTOMER_ID_HERE';
+            // document.getElementById('productId').value = 'gid://shopify/Product/YOUR_PRODUCT_ID_HERE';
+        });
+    </script>
+</body>
+</html>

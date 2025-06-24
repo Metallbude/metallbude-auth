@@ -1,0 +1,47 @@
+{
+  "4088060379300": [
+    {
+      "productId": "gid://shopify/Product/11569167335692",
+      "variantId": "1001307",
+      "title": "BEISTELLTISCH CIRO",
+      "imageUrl": "https://cdn.shopify.com/s/files/1/0483/4374/4676/files/runder-Beistelltisch-Metall-schwarz-20.jpg?v=1744122516",
+      "price": 250,
+      "compareAtPrice": 0,
+      "sku": "1001304",
+      "selectedOptions": {
+        "Farbe": "Matcha Latte"
+      },
+      "handle": "beistelltisch-ciro",
+      "addedAt": "2025-06-23T16:33:03.021Z",
+      "syncedFromFirebase": true
+    },
+    {
+      "productId": "gid://shopify/Product/8480628637964",
+      "variantId": "gid://shopify/ProductVariant/54186894328076",
+      "title": "BEISTELLTISCH COSMO",
+      "imageUrl": "",
+      "price": 0,
+      "compareAtPrice": 0,
+      "sku": "",
+      "selectedOptions": {
+        "FarbeBlueberry Soda": "Blueberry Soda"
+      },
+      "handle": "beistelltisch-cosmo",
+      "addedAt": "2025-06-23T16:43:09.386Z",
+      "syncedFromFirebase": true
+    },
+    {
+      "productId": "test",
+      "variantId": "test",
+      "title": "Test",
+      "imageUrl": "",
+      "price": 0,
+      "compareAtPrice": 0,
+      "sku": "",
+      "selectedOptions": {},
+      "handle": "",
+      "addedAt": "2025-06-23T19:10:18.694Z",
+      "syncedFromFirebase": true
+    }
+  ]
+}

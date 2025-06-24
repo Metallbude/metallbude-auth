@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wishlist API Test</title>
+</head>
+<body>
+    <h1>Wishlist API Test</h1>
+    <div id="results"></div>
+    <button onclick="testWishlistAPI()">Test Wishlist API</button>
+
+    <script>
+        async function testWishlistAPI() {
+            const results = document.getElementById('results');
+            results.innerHTML = 'Testing...';
+            
+            try {
+                const customerId = '4088060379300';
+                const apiUrl = `https://metallbude-auth.onrender.com/api/public/wishlist/items?customerId=${customerId}`;
+                
+                console.log('Testing API:', apiUrl);
+                
+                const response = await fetch(apiUrl, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    credentials: 'omit',
+                    mode: 'cors'
+                });
+                
+                console.log('Response status:', response.status);
+                console.log('Response headers:', [...response.headers.entries()]);
+                
+                const data = await response.json();
+                console.log('Response data:', data);
+                
+                results.innerHTML = `
+                    <h2>Success!</h2>
+                    <p>Status: ${response.status}</p>
+                    <p>Items found: ${data.items ? data.items.length : 0}</p>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+                
+            } catch (error) {
+                console.error('Error:', error);
+                results.innerHTML = `
+                    <h2>Error</h2>
+                    <p style="color: red;">${error.message}</p>
+                    <p>Check console for more details</p>
+                `;
+            }
+        }
+        
+        // Auto-test on load
+        window.onload = function() {
+            testWishlistAPI();
+        };
+    </script>
+</body>
+</html>
