@@ -75,6 +75,13 @@
   </div>
 </div>
 
+<!-- Mobile Debug Info (only visible in development) -->
+<div id="mobile-debug" class="mobile-debug" style="display: none;">
+  <h4>🔧 Mobile Debug Info</h4>
+  <div id="debug-info"></div>
+  <button onclick="document.getElementById('mobile-debug').style.display='none'">Close</button>
+</div>
+
 <style>
 /* Metallbude Collection Page - Exact Style Match */
 
@@ -619,26 +626,15 @@
     padding: 0 12px 12px 12px;
   }
 }
-    gap: 32px 16px;
-  }
-  
-  .product-card {
-    height: 550px; /* Taller for 2-column mobile layout */
-  }
-  
-  /* Mobile-specific remove button improvements */
-  .remove-btn {
-    width: 32px;
-    height: 32px;
-    background: rgba(255, 255, 255, 0.98);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-  }
-}
 
 @media (max-width: 480px) {
+  .wishlist-page {
+    padding: 20px 12px;
+  }
+  
   .wishlist-grid {
     grid-template-columns: repeat(2, 1fr); /* Keep 2 columns even on small mobile */
-    gap: 28px 12px;
+    gap: 20px 8px;
   }
   
   .wishlist-title {
@@ -646,8 +642,73 @@
   }
   
   .product-card {
-    height: 520px; /* Appropriate height for small mobile */
+    height: 480px; /* Appropriate height for small mobile */
   }
+  
+  .product-title {
+    font-size: 0.75rem;
+    line-height: 1.2;
+  }
+  
+  .product-price {
+    font-size: 0.8rem;
+  }
+  
+  /* Extra large touch targets for small screens */
+  .remove-btn {
+    width: 44px;
+    height: 44px;
+    top: 6px;
+    right: 6px;
+  }
+  
+  /* Improve loading and error states for mobile */
+  .loading-state,
+  .empty-state,
+  .error-state {
+    padding: 40px 20px;
+    text-align: center;
+  }
+  
+  .btn-primary,
+  .btn-secondary {
+    padding: 12px 24px;
+    font-size: 0.9rem;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Mobile Debug Overlay */
+.mobile-debug {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  background: rgba(0, 0, 0, 0.9);
+  color: white;
+  padding: 15px;
+  border-radius: 8px;
+  z-index: 9999;
+  font-size: 12px;
+  line-height: 1.4;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.mobile-debug h4 {
+  margin: 0 0 10px 0;
+  color: #00ff00;
+}
+
+.mobile-debug button {
+  margin-top: 10px;
+  padding: 5px 10px;
+  background: #333;
+  color: white;
+  border: 1px solid #666;
+  border-radius: 4px;
+  cursor: pointer;
 }
 
 /* High contrast focus states for accessibility */
@@ -682,15 +743,43 @@ class MetallbudeWishlistManager {
     console.log('🔥 Metallbude Wishlist Manager initialized');
     console.log('🆔 Customer ID:', this.customerId);
     console.log('🌐 Backend URL:', this.backendUrl);
+    console.log('📱 Device info:', {
+      isMobile: /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent),
+      isIOS: /iPad|iPhone|iPod/.test(navigator.userAgent),
+      isAndroid: /Android/.test(navigator.userAgent),
+      touchSupport: 'ontouchstart' in window,
+      cookiesEnabled: navigator.cookieEnabled,
+      localStorage: typeof(Storage) !== "undefined"
+    });
     
     if (!this.customerId) {
       console.warn('⚠️ No customer ID found');
-      this.showEmpty();
-      return;
+      console.log('🔍 Checking alternative customer ID sources...');
+      
+      // Try alternative ways to get customer ID for mobile
+      const urlCustomerId = new URLSearchParams(window.location.search).get('customer_id');
+      const storageCustomerId = localStorage.getItem('temp_customer_id');
+      
+      console.log('🔍 URL customer ID:', urlCustomerId);
+      console.log('🔍 Storage customer ID:', storageCustomerId);
+      
+      if (urlCustomerId) {
+        this.customerId = urlCustomerId;
+        console.log('✅ Using URL customer ID:', this.customerId);
+      } else if (storageCustomerId) {
+        this.customerId = storageCustomerId;
+        console.log('✅ Using storage customer ID:', this.customerId);
+      } else {
+        this.showEmpty();
+        return;
+      }
     }
 
-    await this.loadWishlist();
-    this.setupEventListeners();
+    // Add a small delay for mobile browsers to ensure DOM is fully ready
+    setTimeout(() => {
+      this.loadWishlist();
+      this.setupEventListeners();
+    }, 100);
   }
 
   setupEventListeners() {
@@ -702,77 +791,138 @@ class MetallbudeWishlistManager {
       });
     }
 
-    // Retry button
+    // Retry button with both click and touch events
     const retryBtn = document.getElementById('retry-btn');
     if (retryBtn) {
       retryBtn.addEventListener('click', () => this.loadWishlist());
+      retryBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        this.loadWishlist();
+      });
     }
 
-    // Event delegation for remove buttons
-    document.addEventListener('click', (e) => {
-      const removeBtn = e.target.closest('.remove-btn');
-      if (removeBtn) {
-        // Prevent event bubbling to parent elements
-        e.preventDefault();
-        e.stopPropagation();
-        
-        const productGid = removeBtn.getAttribute('data-product-gid');
-        const variantId = removeBtn.getAttribute('data-variant-id');
-        
-        console.log('Remove button clicked:', productGid, variantId);
-        this.removeItemSafe(e, productGid, variantId);
-        return; // Exit early to prevent other handlers
-      }
-
-      // Event delegation for product image clicks (only if not clicking remove button)
-      const productImage = e.target.closest('.product-image');
-      if (productImage && !e.target.closest('.remove-btn')) {
-        const productUrl = productImage.getAttribute('data-product-url');
-        if (productUrl) {
-          window.location.href = productUrl;
+    // Event delegation for remove buttons with mobile-friendly handling
+    const eventTypes = ['click'];
+    if ('ontouchstart' in window) {
+      eventTypes.push('touchend');
+    }
+    
+    eventTypes.forEach(eventType => {
+      document.addEventListener(eventType, (e) => {
+        const removeBtn = e.target.closest('.remove-btn');
+        if (removeBtn) {
+          // Prevent event bubbling and default behavior
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          
+          const productGid = removeBtn.getAttribute('data-product-gid');
+          const variantId = removeBtn.getAttribute('data-variant-id');
+          
+          console.log('Remove button triggered:', eventType, productGid, variantId);
+          this.removeItemSafe(e, productGid, variantId);
+          return false; // Exit early to prevent other handlers
         }
-      }
+
+        // Event delegation for product image clicks (only if not clicking remove button)
+        const productImage = e.target.closest('.product-image');
+        if (productImage && !e.target.closest('.remove-btn')) {
+          const productUrl = productImage.getAttribute('data-product-url');
+          if (productUrl) {
+            if (eventType === 'touchend') {
+              e.preventDefault(); // Prevent ghost click
+            }
+            console.log('Navigating to product:', productUrl);
+            window.location.href = productUrl;
+          }
+        }
+      }, { passive: false });
     });
   }
 
   async loadWishlist() {
     try {
       console.log('📥 Loading wishlist...');
+      console.log('📱 User Agent:', navigator.userAgent);
+      console.log('🌐 Online status:', navigator.onLine);
+      
       this.showLoading();
       
       const apiUrl = `${this.backendUrl}/api/public/wishlist/items?customerId=${this.customerId}`;
       console.log('🌐 Loading from:', apiUrl);
       
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        credentials: 'omit',
-        mode: 'cors'
-      });
-      console.log('📡 Load response status:', response.status);
+      // Add timeout for mobile networks and better error handling
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
       
-      if (!response.ok) {
-        throw new Error(`Backend error: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      console.log('📡 Load response data:', data);
-      
-      if (!data.success || !data.items || data.items.length === 0) {
-        console.log('📭 No items found, showing empty state');
-        this.showEmpty();
-        return;
-      }
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'User-Agent': navigator.userAgent || 'Mozilla/5.0 (Mobile)',
+            'Cache-Control': 'no-cache'
+          },
+          credentials: 'omit',
+          mode: 'cors',
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        console.log('📡 Load response status:', response.status);
+        console.log('📡 Load response headers:', Object.fromEntries(response.headers.entries()));
+        
+        if (!response.ok) {
+          throw new Error(`Backend error: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        console.log('📡 Load response data:', data);
+        
+        if (!data.success) {
+          console.error('❌ API returned error:', data.error || 'Unknown error');
+          throw new Error(data.error || 'API returned unsuccessful response');
+        }
+        
+        if (!data.items || data.items.length === 0) {
+          console.log('📭 No items found, showing empty state');
+          this.showEmpty();
+          return;
+        }
 
-      console.log(`📦 Found ${data.items.length} items in wishlist`);
-      await this.displayWishlistItems(data.items);
+        console.log(`📦 Found ${data.items.length} items in wishlist`);
+        await this.displayWishlistItems(data.items);
+        
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          throw new Error('Request timeout - please check your internet connection');
+        }
+        throw fetchError;
+      }
       
     } catch (error) {
       console.error('🔥 Error loading wishlist:', error);
-      this.showError();
+      console.error('🔥 Error stack:', error.stack);
+      
+      // Show detailed error information for debugging
+      if (error.message.includes('timeout')) {
+        console.error('🐌 Network timeout - possibly slow mobile connection');
+      } else if (error.message.includes('CORS')) {
+        console.error('🚫 CORS error - check domain settings');
+      } else if (error.message.includes('Failed to fetch')) {
+        console.error('🌐 Network error - check internet connection');
+      }
+      
+      // Show debug info on mobile devices when there's an error
+      const isMobile = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      if (isMobile) {
+        console.log('📱 Mobile device detected, showing debug info...');
+        setTimeout(() => this.showMobileDebug(), 1000);
+      }
+      
+      this.showError(error.message);
     }
   }
 
@@ -1315,9 +1465,19 @@ class MetallbudeWishlistManager {
     document.getElementById('wishlist-empty').style.display = 'block';
   }
 
-  showError() {
+  showError(errorMessage) {
     this.hideAllStates();
-    document.getElementById('wishlist-error').style.display = 'block';
+    const errorElement = document.getElementById('wishlist-error');
+    
+    // Update error message if provided
+    if (errorMessage) {
+      const errorText = errorElement.querySelector('p');
+      if (errorText) {
+        errorText.textContent = `Fehler: ${errorMessage}`;
+      }
+    }
+    
+    errorElement.style.display = 'block';
   }
 
   hideAllStates() {
@@ -1338,10 +1498,80 @@ class MetallbudeWishlistManager {
       successDiv.remove();
     }, 3000);
   }
+
+  // Add debug functionality for mobile troubleshooting
+  showMobileDebug() {
+    const debugInfo = {
+      timestamp: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      customerId: this.customerId,
+      backendUrl: this.backendUrl,
+      onLine: navigator.onLine,
+      cookieEnabled: navigator.cookieEnabled,
+      localStorage: typeof(Storage) !== "undefined",
+      fetch: typeof(fetch) !== "undefined",
+      windowSize: `${window.innerWidth}x${window.innerHeight}`,
+      screenSize: `${screen.width}x${screen.height}`,
+      touchSupport: 'ontouchstart' in window,
+      customerLoggedIn: '{{ customer }}' !== '',
+      shopifyDomain: '{{ shop.permanent_domain }}',
+      currentUrl: window.location.href
+    };
+    
+    const debugDiv = document.getElementById('debug-info');
+    if (debugDiv) {
+      debugDiv.innerHTML = '<pre>' + JSON.stringify(debugInfo, null, 2) + '</pre>';
+    }
+    
+    document.getElementById('mobile-debug').style.display = 'block';
+    console.log('🔧 Mobile Debug Info:', debugInfo);
+  }
 }
 
-// Initialize
-document.addEventListener('DOMContentLoaded', function() {
-  window.wishlistManager = new MetallbudeWishlistManager();
+// Initialize with mobile-friendly approach
+function initializeWishlist() {
+  try {
+    console.log('📱 Initializing wishlist manager...');
+    console.log('📱 Document ready state:', document.readyState);
+    console.log('📱 Window loaded:', document.readyState === 'complete');
+    
+    window.wishlistManager = new MetallbudeWishlistManager();
+  } catch (error) {
+    console.error('❌ Failed to initialize wishlist manager:', error);
+    
+    // Show error message to user
+    const errorDiv = document.getElementById('wishlist-error');
+    if (errorDiv) {
+      const errorText = errorDiv.querySelector('p');
+      if (errorText) {
+        errorText.textContent = 'Fehler beim Laden der Wunschliste. Bitte laden Sie die Seite neu.';
+      }
+      errorDiv.style.display = 'block';
+    }
+  }
+}
+
+// Multiple initialization strategies for different mobile browsers
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initializeWishlist);
+} else {
+  // DOM is already loaded
+  initializeWishlist();
+}
+
+// Fallback for older mobile browsers
+window.addEventListener('load', function() {
+  if (!window.wishlistManager) {
+    console.log('📱 Fallback initialization triggered');
+    initializeWishlist();
+  }
 });
+
+// Additional fallback with timeout
+setTimeout(function() {
+  if (!window.wishlistManager) {
+    console.log('📱 Timeout fallback initialization triggered');
+    initializeWishlist();
+  }
+}, 2000);
 </script>
