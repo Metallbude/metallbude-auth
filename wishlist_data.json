@@ -2,75 +2,6 @@
   "4088060379300": [
     {
       "productId": "gid://shopify/Product/11569167335692",
-      "variantId": "1001307",
-      "title": "BEISTELLTISCH CIRO",
-      "imageUrl": "https://cdn.shopify.com/s/files/1/0483/4374/4676/files/runder-Beistelltisch-Metall-schwarz-20.jpg?v=1744122516",
-      "price": 250,
-      "compareAtPrice": 0,
-      "sku": "1001304",
-      "selectedOptions": {
-        "Farbe": "Matcha Latte"
-      },
-      "handle": "beistelltisch-ciro",
-      "addedAt": "2025-06-23T16:33:03.021Z",
-      "syncedFromFirebase": true
-    },
-    {
-      "productId": "gid://shopify/Product/8480628637964",
-      "variantId": "gid://shopify/ProductVariant/54186894328076",
-      "title": "BEISTELLTISCH COSMO",
-      "imageUrl": "",
-      "price": 0,
-      "compareAtPrice": 0,
-      "sku": "",
-      "selectedOptions": {
-        "FarbeBlueberry Soda": "Blueberry Soda"
-      },
-      "handle": "beistelltisch-cosmo",
-      "addedAt": "2025-06-23T16:43:09.386Z",
-      "syncedFromFirebase": true
-    },
-    {
-      "productId": "gid://shopify/Product/8480628637964",
-      "variantId": "gid://shopify/ProductVariant/44718663500044",
-      "title": "BEISTELLTISCH COSMO",
-      "imageUrl": "",
-      "price": 0,
-      "compareAtPrice": 0,
-      "sku": "",
-      "selectedOptions": {},
-      "handle": "beistelltisch-cosmo",
-      "addedAt": "2025-06-23T20:04:26.777Z",
-      "syncedFromFirebase": true
-    },
-    {
-      "productId": "gid://shopify/Product/11569167335692",
-      "variantId": "gid://shopify/ProductVariant/54202562478348",
-      "title": "BEISTELLTISCH CIRO",
-      "imageUrl": "",
-      "price": 0,
-      "compareAtPrice": 0,
-      "sku": "",
-      "selectedOptions": {},
-      "handle": "beistelltisch-ciro",
-      "addedAt": "2025-06-23T20:08:47.323Z",
-      "syncedFromFirebase": true
-    },
-    {
-      "productId": "gid://shopify/Product/11569167335692",
-      "variantId": "gid://shopify/ProductVariant/54202562412812",
-      "title": "BEISTELLTISCH CIRO",
-      "imageUrl": "",
-      "price": 0,
-      "compareAtPrice": 0,
-      "sku": "",
-      "selectedOptions": {},
-      "handle": "beistelltisch-ciro",
-      "addedAt": "2025-06-23T20:09:08.343Z",
-      "syncedFromFirebase": true
-    },
-    {
-      "productId": "gid://shopify/Product/11569167335692",
       "variantId": "gid://shopify/ProductVariant/54202562445580",
       "title": "BEISTELLTISCH CIRO",
       "imageUrl": "",
@@ -80,6 +11,37 @@
       "selectedOptions": {},
       "handle": "beistelltisch-ciro",
       "addedAt": "2025-06-23T21:23:14.547Z",
+      "syncedFromFirebase": true
+    },
+    {
+      "productId": "gid://shopify/Product/11569167335692",
+      "variantId": "gid://shopify/ProductVariant/54202562511116",
+      "title": "BEISTELLTISCH CIRO",
+      "imageUrl": "",
+      "price": 0,
+      "compareAtPrice": 0,
+      "sku": "",
+      "selectedOptions": {},
+      "handle": "beistelltisch-ciro",
+      "addedAt": "2025-06-24T12:43:03.088Z",
+      "syncedFromFirebase": true
+    }
+  ],
+  "test-user-123": [
+    {
+      "productId": "8765919117604",
+      "variantId": "47692049031460",
+      "title": "Test Product",
+      "imageUrl": "",
+      "price": 29.99,
+      "compareAtPrice": 0,
+      "sku": "",
+      "selectedOptions": {
+        "Size": "M",
+        "Color": "Black"
+      },
+      "handle": "test-product",
+      "addedAt": "2025-06-24T13:41:34.918Z",
       "syncedFromFirebase": true
     }
   ]

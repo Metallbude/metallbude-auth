@@ -313,27 +313,65 @@ class WishlistService {
 
       // Find and remove the matching item with variant/options
       const initialCount = items.length;
+      console.log(`🔍 [DEBUG] Looking for item to remove:`, {
+        productId,
+        variantId,
+        selectedOptions
+      });
+      
       items = items.filter(item => {
-        // Priority 1: Match by primaryId (variantId when available, productId otherwise)
-        const itemPrimaryId = item.primaryId || item.variantId || item.productId;
-        const removePrimaryId = variantId || productId;
-        if (itemPrimaryId === removePrimaryId) return false; // Remove this item
+        console.log(`🔍 [DEBUG] Checking item:`, {
+          itemProductId: item.productId,
+          itemVariantId: item.variantId,
+          itemSelectedOptions: item.selectedOptions
+        });
         
-        // Priority 2: Match by productId AND exact variant/options
-        if (item.productId !== productId) return true; // Keep this item
+        // Normalize product IDs for comparison (handle GID prefix differences)
+        const itemProductIdClean = item.productId.toString().replace('gid://shopify/Product/', '');
+        const searchProductIdClean = productId.toString().replace('gid://shopify/Product/', '');
         
-        // If we have variant information, match by variant
-        if (variantId && item.variantId) {
-          return item.variantId !== variantId; // Keep if different variant
+        console.log(`🔍 [DEBUG] Comparing clean product IDs: ${itemProductIdClean} vs ${searchProductIdClean}`);
+        
+        // Must match on product ID first
+        if (itemProductIdClean !== searchProductIdClean) {
+          console.log(`🔍 [DEBUG] Product ID mismatch, keeping item`);
+          return true; // Keep this item
+        }
+        
+        // If we have variant ID, match by variant
+        if (variantId) {
+          const itemVariantIdClean = item.variantId ? item.variantId.toString().replace('gid://shopify/ProductVariant/', '') : null;
+          const searchVariantIdClean = variantId.toString().replace('gid://shopify/ProductVariant/', '');
+          
+          console.log(`🔍 [DEBUG] Comparing clean variant IDs: ${itemVariantIdClean} vs ${searchVariantIdClean}`);
+          if (itemVariantIdClean === searchVariantIdClean) {
+            console.log(`🔍 [DEBUG] ✅ MATCH by variant ID - REMOVING item`);
+            return false; // Remove this item
+          }
         }
         
         // If we have selected options, match by options
-        if (selectedOptions && item.selectedOptions) {
-          return JSON.stringify(item.selectedOptions) !== JSON.stringify(selectedOptions);
+        if (selectedOptions && Object.keys(selectedOptions).length > 0) {
+          if (item.selectedOptions) {
+            const itemOptionsStr = JSON.stringify(item.selectedOptions);
+            const searchOptionsStr = JSON.stringify(selectedOptions);
+            
+            console.log(`🔍 [DEBUG] Comparing options: ${itemOptionsStr} vs ${searchOptionsStr}`);
+            if (itemOptionsStr === searchOptionsStr) {
+              console.log(`🔍 [DEBUG] ✅ MATCH by selected options - REMOVING item`);
+              return false; // Remove this item
+            }
+          }
         }
         
-        // Otherwise remove by product ID only (backward compatibility)
-        return item.variantId || item.selectedOptions; // Keep if it has variant info
+        // If no variant/options specified, remove any matching product (fallback)
+        if (!variantId && (!selectedOptions || Object.keys(selectedOptions).length === 0)) {
+          console.log(`🔍 [DEBUG] ✅ MATCH by product ID only - REMOVING item`);
+          return false; // Remove this item
+        }
+        
+        console.log(`🔍 [DEBUG] No match, keeping item`);
+        return true; // Keep this item
       });
       const finalCount = items.length;
 
