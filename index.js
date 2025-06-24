@@ -122,6 +122,7 @@ const config = {
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
   storefrontToken: process.env.SHOPIFY_STOREFRONT_TOKEN,
   adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
+  // ✅ FIXED: Use consistent API version (2024-10) for both Storefront and Admin APIs
   apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
   adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2024-10/graphql.json',
   cleverpushChannelId: process.env.CLEVERPUSH_CHANNEL_ID,
