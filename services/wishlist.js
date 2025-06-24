@@ -12,6 +12,28 @@ class WishlistService {
     return customerId.replace(/[\/\:]/g, '_').replace(/^gid_+/, '');
   }
 
+  // ✅ NEW: Helper function to normalize items (handle both array and object formats)
+  // This fixes the issue where Firebase stores items as objects with numeric keys instead of arrays
+  _normalizeItems(items) {
+    if (!items) return [];
+    
+    // If items is already an array, return as is
+    if (Array.isArray(items)) {
+      return items;
+    }
+    
+    // If items is an object with numeric keys, convert to array
+    if (typeof items === 'object') {
+      console.log(`🔧 [FIREBASE] Converting items object to array`);
+      return Object.keys(items)
+        .sort((a, b) => parseInt(a) - parseInt(b)) // Sort by numeric keys
+        .map(key => items[key])
+        .filter(item => item && typeof item === 'object'); // Filter out invalid items
+    }
+    
+    return [];
+  }
+
   // Get customer's wishlist
   async getWishlist(customerId, customerEmail) {
     try {
@@ -35,7 +57,7 @@ class WishlistService {
       }
 
       const wishlistData = wishlistDoc.data();
-      const items = wishlistData.items || [];
+      const items = this._normalizeItems(wishlistData.items);
 
       console.log(`🔥 [FIREBASE] Found ${items.length} items in Firebase wishlist for ${customerEmail}`);
       return items.map(item => ({
@@ -82,7 +104,7 @@ class WishlistService {
       let items = [];
       if (wishlistDoc.exists) {
         const data = wishlistDoc.data();
-        items = data.items || [];
+        items = this._normalizeItems(data.items);
       }
 
       // Check if item already exists with same variant/options
@@ -184,7 +206,7 @@ class WishlistService {
       let items = [];
       if (wishlistDoc.exists) {
         const data = wishlistDoc.data();
-        items = data.items || [];
+        items = this._normalizeItems(data.items);
       }
 
       // Check if item already exists with same variant/options
@@ -287,7 +309,7 @@ class WishlistService {
       }
 
       const data = wishlistDoc.data();
-      let items = data.items || [];
+      let items = this._normalizeItems(data.items);
 
       // Find and remove the matching item with variant/options
       const initialCount = items.length;
