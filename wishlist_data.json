@@ -31,16 +31,55 @@
       "syncedFromFirebase": true
     },
     {
-      "productId": "test",
-      "variantId": "test",
-      "title": "Test",
+      "productId": "gid://shopify/Product/8480628637964",
+      "variantId": "gid://shopify/ProductVariant/44718663500044",
+      "title": "BEISTELLTISCH COSMO",
       "imageUrl": "",
       "price": 0,
       "compareAtPrice": 0,
       "sku": "",
       "selectedOptions": {},
-      "handle": "",
-      "addedAt": "2025-06-23T19:10:18.694Z",
+      "handle": "beistelltisch-cosmo",
+      "addedAt": "2025-06-23T20:04:26.777Z",
+      "syncedFromFirebase": true
+    },
+    {
+      "productId": "gid://shopify/Product/11569167335692",
+      "variantId": "gid://shopify/ProductVariant/54202562478348",
+      "title": "BEISTELLTISCH CIRO",
+      "imageUrl": "",
+      "price": 0,
+      "compareAtPrice": 0,
+      "sku": "",
+      "selectedOptions": {},
+      "handle": "beistelltisch-ciro",
+      "addedAt": "2025-06-23T20:08:47.323Z",
+      "syncedFromFirebase": true
+    },
+    {
+      "productId": "gid://shopify/Product/11569167335692",
+      "variantId": "gid://shopify/ProductVariant/54202562412812",
+      "title": "BEISTELLTISCH CIRO",
+      "imageUrl": "",
+      "price": 0,
+      "compareAtPrice": 0,
+      "sku": "",
+      "selectedOptions": {},
+      "handle": "beistelltisch-ciro",
+      "addedAt": "2025-06-23T20:09:08.343Z",
+      "syncedFromFirebase": true
+    },
+    {
+      "productId": "gid://shopify/Product/11569167335692",
+      "variantId": "gid://shopify/ProductVariant/54202562445580",
+      "title": "BEISTELLTISCH CIRO",
+      "imageUrl": "",
+      "price": 0,
+      "compareAtPrice": 0,
+      "sku": "",
+      "selectedOptions": {},
+      "handle": "beistelltisch-ciro",
+      "addedAt": "2025-06-23T21:23:14.547Z",
       "syncedFromFirebase": true
     }
   ]
