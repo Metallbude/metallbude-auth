@@ -10780,59 +10780,6 @@ app.get('/api/health/sync', async (req, res) => {
     }
 });
 
-// Enhanced public wishlist endpoint that also checks authenticated sessions
-app.get('/api/public/wishlist/items', async (req, res) => {
-    try {
-        const { customerId } = req.query;
-        
-        if (!customerId) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Customer ID is required' 
-            });
-        }
-
-        console.log(`[SHOPIFY] Getting wishlist for customer: ${customerId}`);
-
-        // First, check the public wishlist data
-        const wishlistData = await loadWishlistData();
-        let customerWishlist = wishlistData[customerId] || [];
-
-        console.log(`[SHOPIFY] Found ${customerWishlist.length} items in public wishlist for ${customerId}`);
-
-        // If no items found in public wishlist, check if this customer has data in authenticated sessions
-        if (customerWishlist.length === 0) {
-            console.log(`[SHOPIFY] No public wishlist data found, checking for customer mapping...`);
-            
-            // Try to find this customer's data in the authenticated system
-            // This is a temporary solution - you should implement proper customer ID mapping
-            
-            // For now, let's create a simple mapping based on the customer ID
-            // Generic customer ID mapping for any Shopify customer
-            
-            // TODO: Implement proper customer ID mapping system
-            console.log(`[SHOPIFY] Customer ${customerId} has no wishlist data in either system`);
-        }
-
-        res.json({
-            success: true,
-            items: customerWishlist,
-            count: customerWishlist.length,
-            debug: {
-                customerId: customerId,
-                publicDataFound: customerWishlist.length > 0,
-                source: 'public_storage'
-            }
-        });
-    } catch (error) {
-        console.error('[SHOPIFY] Error getting wishlist:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Internal server error' 
-        });
-    }
-});
-
 // Endpoint to manually link Shopify customer ID to Flutter app data
 app.post('/api/debug/link-customer', async (req, res) => {
     try {
