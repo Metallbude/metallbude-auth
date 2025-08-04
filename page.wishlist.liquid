@@ -96,7 +96,7 @@
   margin: 0 auto;
   padding: 40px 20px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: #f5f1eb;
+  background: #FCFBF9;
   color: #000000;
   line-height: 1.4;
 }
@@ -274,7 +274,7 @@
 
 /* Product Card - Flexbox Layout for Perfect Button Alignment */
 .product-card {
-  background: #ffffff;
+  background: #FCFBF9; /* Same as page background */
   border: none;
   border-radius: 20px;
   position: relative;
@@ -283,7 +283,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  min-height: 480px; /* Minimum height ensures consistent card heights */
+  /* Remove fixed height - let content determine height */
   box-shadow: none;
 }
 
@@ -292,11 +292,44 @@
   box-shadow: 0 8px 25px rgba(0,0,0,0.08);
 }
 
+/* ✅ Beautiful smooth removal animation with slide and fade */
+.product-card.removing {
+  transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  transform: translateX(-100%) scale(0.9);
+  opacity: 0;
+  filter: blur(2px);
+  z-index: -1;
+}
+
+/* Loading state for remove button */
+.product-card.removing .remove-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Smooth grid reflow when items are removed */
+.wishlist-grid {
+  transition: grid-template-columns 0.3s ease;
+}
+
+/* Additional animation states */
+.product-card.removing-fade-only {
+  transition: opacity 0.3s ease-out, transform 0.3s ease-out;
+  opacity: 0;
+  transform: scale(0.95);
+}
+
+.product-card.removing-slide-up {
+  transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  transform: translateY(-30px) scale(0.9);
+  opacity: 0;
+}
+
 /* Product Image - 1.5:1 Portrait Aspect Ratio */
 .product-image {
   width: 100%;
   aspect-ratio: 1/1.5; /* Portrait mode - 1.5:1 ratio (taller than wide) */
-  background: #f8f8f8;
+  background: #FCFBF9; /* Same as page background */
   position: relative;
   overflow: hidden;
   margin-bottom: 16px;
@@ -333,6 +366,8 @@
   flex-direction: column;
   flex: 1; /* Take remaining space */
   padding: 0 16px 16px 16px;
+  background: #FCFBF9; /* Same background as page */
+  border-radius: 0 0 20px 20px; /* Round bottom corners to match card */
 }
 
 .product-content {
@@ -346,7 +381,7 @@
   padding-top: 12px;
 }
 
-/* Remove Button - Always Visible */
+/* Remove Button - Always Visible with consistent design across all devices */
 .remove-btn {
   position: absolute;
   top: 12px;
@@ -367,6 +402,9 @@
   z-index: 20; /* Higher z-index to ensure it's clickable */
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
+  /* Mobile-friendly properties */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .remove-btn:hover {
@@ -567,6 +605,7 @@
   to { opacity: 1; transform: translateX(0); }
 }
 
+/* ✅ Loading animation for remove button */
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
@@ -613,17 +652,16 @@
     gap: 32px 12px;
   }
   
-  .product-card {
-    min-height: 420px; /* Smaller cards on mobile */
-  }
+  /* Remove fixed height - let content determine height */
   
+  /* Keep same 1.5:1 aspect ratio on mobile */
   .product-image {
-    aspect-ratio: 1/1.2; /* Slightly less tall on mobile */
-    margin-bottom: 12px;
+    aspect-ratio: 1/1.5; /* Same as desktop - 1.5:1 portrait */
+    margin-bottom: 16px; /* Same as desktop */
   }
   
   .product-info {
-    padding: 0 12px 12px 12px;
+    padding: 0 16px 16px 16px; /* Same as desktop */
   }
 }
 
@@ -642,7 +680,7 @@
   }
   
   .product-card {
-    height: 480px; /* Appropriate height for small mobile */
+    min-height: 480px; /* Keep consistent height */
   }
   
   .product-title {
@@ -654,13 +692,7 @@
     font-size: 0.8rem;
   }
   
-  /* Extra large touch targets for small screens */
-  .remove-btn {
-    width: 44px;
-    height: 44px;
-    top: 6px;
-    right: 6px;
-  }
+  /* Keep desktop remove button size - no mobile overrides */
   
   /* Improve loading and error states for mobile */
   .loading-state,
@@ -801,17 +833,102 @@ class MetallbudeWishlistManager {
       });
     }
 
-    // Event delegation for remove buttons with mobile-friendly handling
-    const eventTypes = ['click'];
+    // Touch tracking for distinguishing scroll vs tap
+    this.touchData = {
+      startX: 0,
+      startY: 0,
+      startTime: 0,
+      moved: false,
+      threshold: 5, // More sensitive - 5 pixels moved before considering it a scroll
+      isScrolling: false,
+      touchTarget: null
+    };
+
+    // Event delegation for remove buttons (desktop only)
+    document.addEventListener('click', (e) => {
+      const removeBtn = e.target.closest('.remove-btn');
+      if (removeBtn) {
+        // Prevent event bubbling and default behavior
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        
+        const productGid = removeBtn.getAttribute('data-product-gid');
+        const variantId = removeBtn.getAttribute('data-variant-id');
+        
+        console.log('Remove button clicked:', productGid, variantId);
+        this.removeItemSafe(e, productGid, variantId);
+        return false;
+      }
+
+      // Desktop click for product images
+      const productImage = e.target.closest('.product-image');
+      if (productImage && !e.target.closest('.remove-btn') && !('ontouchstart' in window)) {
+        const productUrl = productImage.getAttribute('data-product-url');
+        if (productUrl) {
+          console.log('Desktop: Navigating to product:', productUrl);
+          window.location.href = productUrl;
+        }
+      }
+    });
+
+    // Listen for scroll events to detect active scrolling
+    let scrollTimeout;
+    document.addEventListener('scroll', () => {
+      if ('ontouchstart' in window) {
+        this.touchData.isScrolling = true;
+        console.log('Mobile: Scroll event detected');
+        
+        // Clear existing timeout
+        if (scrollTimeout) {
+          clearTimeout(scrollTimeout);
+        }
+        
+        // Reset scrolling state after scroll stops
+        scrollTimeout = setTimeout(() => {
+          this.touchData.isScrolling = false;
+          console.log('Mobile: Scroll stopped');
+        }, 150);
+      }
+    }, { passive: true });
+
+    // Mobile touch handling with proper scroll detection
     if ('ontouchstart' in window) {
-      eventTypes.push('touchend');
-    }
-    
-    eventTypes.forEach(eventType => {
-      document.addEventListener(eventType, (e) => {
+      // Touch start - record initial position
+      document.addEventListener('touchstart', (e) => {
+        const touch = e.touches[0];
+        this.touchData.startX = touch.clientX;
+        this.touchData.startY = touch.clientY;
+        this.touchData.startTime = Date.now();
+        this.touchData.moved = false;
+        this.touchData.isScrolling = false;
+        this.touchData.touchTarget = e.target;
+        console.log('Mobile: Touch start on', e.target.tagName, e.target.className);
+      }, { passive: true });
+
+      // Touch move - detect if user is scrolling
+      document.addEventListener('touchmove', (e) => {
+        const touch = e.touches[0];
+        const deltaX = Math.abs(touch.clientX - this.touchData.startX);
+        const deltaY = Math.abs(touch.clientY - this.touchData.startY);
+        
+        // If moved more than threshold, consider it scrolling
+        if (deltaX > this.touchData.threshold || deltaY > this.touchData.threshold) {
+          this.touchData.moved = true;
+          this.touchData.isScrolling = true;
+          console.log('Mobile: Scroll detected - deltaX:', deltaX, 'deltaY:', deltaY);
+        }
+      }, { passive: true });
+
+      // Touch end - only navigate if it wasn't a scroll
+      document.addEventListener('touchend', (e) => {
+        const touchDuration = Date.now() - this.touchData.startTime;
+        
+        console.log('Mobile: Touch end - moved:', this.touchData.moved, 'isScrolling:', this.touchData.isScrolling, 'duration:', touchDuration);
+        
         const removeBtn = e.target.closest('.remove-btn');
         if (removeBtn) {
-          // Prevent event bubbling and default behavior
+          // Remove button - always work regardless of movement
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
@@ -819,25 +936,49 @@ class MetallbudeWishlistManager {
           const productGid = removeBtn.getAttribute('data-product-gid');
           const variantId = removeBtn.getAttribute('data-variant-id');
           
-          console.log('Remove button triggered:', eventType, productGid, variantId);
+          console.log('Remove button touched:', productGid, variantId);
           this.removeItemSafe(e, productGid, variantId);
-          return false; // Exit early to prevent other handlers
+          return false;
         }
 
-        // Event delegation for product image clicks (only if not clicking remove button)
+        // Product navigation - only if it was a tap, not a scroll
         const productImage = e.target.closest('.product-image');
         if (productImage && !e.target.closest('.remove-btn')) {
-          const productUrl = productImage.getAttribute('data-product-url');
-          if (productUrl) {
-            if (eventType === 'touchend') {
+          // Only navigate if:
+          // 1. User didn't move much (not scrolling)
+          // 2. Touch was brief (not a long press)
+          // 3. Touch duration was reasonable for a tap
+          // 4. Not currently in a scrolling state
+          const isValidTap = !this.touchData.moved && 
+                            !this.touchData.isScrolling && 
+                            touchDuration < 400 && 
+                            touchDuration > 30;
+          
+          if (isValidTap) {
+            const productUrl = productImage.getAttribute('data-product-url');
+            if (productUrl) {
               e.preventDefault(); // Prevent ghost click
+              console.log('Mobile: Valid tap detected, navigating to product:', productUrl);
+              window.location.href = productUrl;
             }
-            console.log('Navigating to product:', productUrl);
-            window.location.href = productUrl;
+          } else {
+            console.log(`Mobile: Tap ignored - moved: ${this.touchData.moved}, scrolling: ${this.touchData.isScrolling}, duration: ${touchDuration}ms`);
           }
         }
+        
+        // Reset scrolling state after a short delay
+        setTimeout(() => {
+          this.touchData.isScrolling = false;
+        }, 100);
       }, { passive: false });
-    });
+
+      // Touch cancel - reset state when touch is interrupted
+      document.addEventListener('touchcancel', (e) => {
+        console.log('Mobile: Touch cancelled');
+        this.touchData.moved = false;
+        this.touchData.isScrolling = false;
+      }, { passive: true });
+    }
   }
 
   async loadWishlist() {
@@ -993,8 +1134,8 @@ class MetallbudeWishlistManager {
             }
             
             // Use the selected variant's price if available
-            let productPrice = foundProduct.variants[0]?.price || '0.00';
-            let compareAtPrice = foundProduct.variants[0]?.compare_at_price || null;
+            let productPrice = (foundProduct.variants[0] && foundProduct.variants[0].price) || '0.00';
+            let compareAtPrice = (foundProduct.variants[0] && foundProduct.variants[0].compare_at_price) || null;
             if (selectedVariant && selectedVariant.price) {
               productPrice = selectedVariant.price;
               compareAtPrice = selectedVariant.compare_at_price || null;
@@ -1004,7 +1145,7 @@ class MetallbudeWishlistManager {
             let productUrl = `/products/${foundProduct.handle}`;
             
             // First priority: Use variant ID from API response (most reliable)
-            if (productData.originalItem?.variantId) {
+            if (productData.originalItem && productData.originalItem.variantId) {
               const apiVariantId = this.extractVariantId(productData.originalItem.variantId);
               if (apiVariantId) {
                 productUrl += `?variant=${apiVariantId}`;
@@ -1016,7 +1157,7 @@ class MetallbudeWishlistManager {
             
             products.push({
               id: productId,
-              gid: `gid://shopify/Product/${productId}`,
+              gid: (productData.originalItem && productData.originalItem.productId) || `gid://shopify/Product/${productId}`, // ✅ Use original Firebase product ID (with full GID) or fallback
               title: foundProduct.title,
               handle: foundProduct.handle,
               featuredImage: productImage,
@@ -1039,7 +1180,7 @@ class MetallbudeWishlistManager {
           } else {
             products.push({
               id: productId,
-              gid: `gid://shopify/Product/${productId}`,
+              gid: (productData.originalItem && productData.originalItem.productId) || `gid://shopify/Product/${productId}`, // ✅ Use original Firebase product ID (with full GID) or fallback
               title: `Produkt ${productId}`,
               handle: productId,
               featuredImage: null,
@@ -1181,13 +1322,13 @@ class MetallbudeWishlistManager {
     let imageUrl = product.featuredImage;
     
     // Check if we have a specific variant image from wishlist data (API imageUrl) or selected variant
-    if (product.wishlistItemData?.imageUrl) {
+    if (product.wishlistItemData && product.wishlistItemData.imageUrl) {
       imageUrl = product.wishlistItemData.imageUrl;
-    } else if (product.wishlistItemData?.variantImage) {
+    } else if (product.wishlistItemData && product.wishlistItemData.variantImage) {
       imageUrl = product.wishlistItemData.variantImage;
-    } else if (product.selectedVariant?.image?.url) {
+    } else if (product.selectedVariant && product.selectedVariant.image && product.selectedVariant.image.url) {
       imageUrl = product.selectedVariant.image.url;
-    } else if (product.selectedVariant?.featured_image?.src) {
+    } else if (product.selectedVariant && product.selectedVariant.featured_image && product.selectedVariant.featured_image.src) {
       // Fallback for Shopify variant image structure
       imageUrl = product.selectedVariant.featured_image.src;
     }
@@ -1264,7 +1405,7 @@ class MetallbudeWishlistManager {
     card.innerHTML = `
       <div class="product-image" data-product-url="${product.url}">
         ${imageHtml}
-        <button class="remove-btn" title="Aus Wunschliste entfernen" data-product-gid="${product.gid}" data-variant-id="${product.selectedVariant ? product.selectedVariant.id : ''}" type="button">
+        <button class="remove-btn" title="Aus Wunschliste entfernen" data-product-gid="${product.gid}" data-variant-id="${(product.wishlistItemData && product.wishlistItemData.variantId) || (product.selectedVariant ? product.selectedVariant.id : '')}" type="button">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -1284,12 +1425,14 @@ class MetallbudeWishlistManager {
       </div>
     `;
     
-    // Store data attributes for safe removal
-    card.dataset.productId = product.gid;
-    if (product.selectedVariant) {
+    // Store data attributes for safe removal - use original wishlist item data
+    card.dataset.productId = product.gid; // This now contains the original Firebase product ID
+    if (product.wishlistItemData && product.wishlistItemData.variantId) {
+      card.dataset.variantId = product.wishlistItemData.variantId; // Use original variant ID from wishlist
+    } else if (product.selectedVariant) {
       card.dataset.variantId = product.selectedVariant.id;
     }
-    if (product.wishlistItemData?.selectedOptions) {
+    if (product.wishlistItemData && product.wishlistItemData.selectedOptions) {
       card.dataset.selectedOptions = JSON.stringify(product.wishlistItemData.selectedOptions);
     }
     
@@ -1330,15 +1473,26 @@ class MetallbudeWishlistManager {
       console.log('   Selected Options:', selectedOptions);
       console.log('   Customer ID:', this.customerId);
       
+      // Extract numeric product ID from GID if needed
+      const cleanProductId = this.extractProductId(productId);
+      console.log('   Clean Product ID:', cleanProductId);
+      
+      // Extract numeric variant ID from GID if needed
+      let cleanVariantId = '';
+      if (variantId) {
+        cleanVariantId = this.extractVariantId(variantId);
+        console.log('   Clean Variant ID:', cleanVariantId);
+      }
+      
       const requestBody = {
         customerId: this.customerId,
-        productId: productId
+        productId: cleanProductId
       };
       
       // Add variant and selected options if provided
-      if (variantId) {
-        requestBody.variantId = variantId;
-        console.log('   Added variant ID to request:', variantId);
+      if (cleanVariantId) {
+        requestBody.variantId = cleanVariantId;
+        console.log('   Added variant ID to request:', cleanVariantId);
       }
       if (selectedOptions && Object.keys(selectedOptions).length > 0) {
         requestBody.selectedOptions = selectedOptions;
@@ -1367,11 +1521,20 @@ class MetallbudeWishlistManager {
 
       if (response.ok && responseData.success) {
         console.log('✅ Item removed successfully');
-        this.showSuccess('ARTIKEL WURDE ENTFERNT!');
-        // Wait a bit longer and only reload if removal was confirmed successful
+        
+        // ✅ IMMEDIATE UI UPDATE: Remove the item from display instantly
+        this.removeItemFromUI(productId, variantId, selectedOptions);
+        
+        // ✅ Show success message (count will be updated by removeItemFromUI)
         setTimeout(() => {
-          this.loadWishlist();
-        }, 800);
+          const remainingCount = this.products.length;
+          const successMessage = remainingCount > 0 
+            ? `ARTIKEL ENTFERNT! (${remainingCount} ${remainingCount === 1 ? 'Artikel' : 'Artikel'} verbleibend)`
+            : 'ARTIKEL ENTFERNT! Wunschliste ist leer';
+          this.showSuccess(successMessage);
+        }, 100);
+        
+        console.log('✅ Item removed from UI immediately');
       } else {
         throw new Error(`Remove failed: ${response.status} - ${responseData.error || 'Unknown error'}`);
       }
@@ -1411,9 +1574,11 @@ class MetallbudeWishlistManager {
         return;
       }
 
-      // Disable button to prevent multiple clicks
+      // Disable button and show loading state
       removeBtn.disabled = true;
       removeBtn.style.opacity = '0.5';
+      removeBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle></svg>';
+      removeBtn.style.animation = 'spin 1s linear infinite';
       
       const productCard = removeBtn.closest('.product-card');
       if (!productCard) {
@@ -1449,7 +1614,14 @@ class MetallbudeWishlistManager {
         removeBtn.style.opacity = '1';
       }
       
+      // Show error message
       alert('Fehler beim Entfernen des Artikels. Bitte versuchen Sie es erneut.');
+      
+      // Reload wishlist to ensure UI is in sync with server state
+      console.log('🔄 Reloading wishlist due to error...');
+      setTimeout(() => {
+        this.loadWishlist();
+      }, 1000);
     }
   }
 
@@ -1523,6 +1695,135 @@ class MetallbudeWishlistManager {
     
     document.getElementById('mobile-debug').style.display = 'block';
     console.log('🔧 Mobile Debug Info:', debugInfo);
+  }
+
+  // ✅ NEW: Immediately remove item from UI without waiting for reload
+  removeItemFromUI(productId, variantId, selectedOptions) {
+    try {
+      console.log('🎨 Removing item from UI immediately:', { productId, variantId, selectedOptions });
+      
+      // Find and remove the matching product card from the DOM
+      const productCards = document.querySelectorAll('.product-card');
+      let matchingCards = [];
+      
+      productCards.forEach(card => {
+        const cardProductId = card.dataset.productId;
+        const cardVariantId = card.dataset.variantId;
+        const cardSelectedOptions = card.dataset.selectedOptions;
+        
+        console.log('🔍 Checking card:', { cardProductId, cardVariantId, cardSelectedOptions });
+        console.log('🔍 Looking for:', { productId, variantId, selectedOptions });
+        
+        // Match by product ID
+        if (cardProductId !== productId) {
+          console.log('❌ Product ID mismatch:', cardProductId, '!==', productId);
+          return;
+        }
+        
+        // Match by variant ID if provided
+        if (variantId && cardVariantId && cardVariantId !== variantId) {
+          console.log('❌ Variant ID mismatch:', cardVariantId, '!==', variantId);
+          return;
+        }
+        
+        // Match by selected options if provided
+        if (selectedOptions && Object.keys(selectedOptions).length > 0) {
+          let cardOptions = {};
+          try {
+            cardOptions = cardSelectedOptions ? JSON.parse(cardSelectedOptions) : {};
+          } catch (e) {
+            console.warn('Failed to parse card selected options:', e);
+          }
+          
+          console.log('🔍 Comparing options:', JSON.stringify(cardOptions), 'vs', JSON.stringify(selectedOptions));
+          if (JSON.stringify(cardOptions) !== JSON.stringify(selectedOptions)) {
+            console.log('❌ Selected options mismatch');
+            return;
+          }
+        }
+        
+        // This card matches!
+        console.log('✅ Found matching card:', card);
+        matchingCards.push(card);
+      });
+      
+      if (matchingCards.length === 0) {
+        console.warn('⚠️ No matching cards found to remove from UI');
+        return;
+      }
+      
+      console.log(`🎨 Found ${matchingCards.length} matching card(s) to remove`);
+      
+      // Remove each matching card with beautiful animation
+      matchingCards.forEach((card, index) => {
+        console.log('🎨 Removing card from DOM with enhanced animation:', card);
+        
+        // Add staggered animation delay for multiple items
+        const animationDelay = index * 100; // 100ms delay between each item
+        
+        setTimeout(() => {
+          // Add enhanced removal animation class
+          card.classList.add('removing');
+          
+          // For variety, alternate between different animation styles
+          if (index % 3 === 0) {
+            card.classList.add('removing-slide-up');
+          } else if (index % 3 === 1) {
+            card.classList.add('removing-fade-only');
+          }
+          // Default: side slide animation from CSS
+          
+          // Remove from DOM after animation completes
+          setTimeout(() => {
+            if (card.parentNode) {
+              card.parentNode.removeChild(card);
+              console.log('✅ Card removed from DOM with animation');
+              
+              // Update result count
+              this.updateResultsCount();
+              
+              // Check if we need to show empty state
+              const remainingCards = document.querySelectorAll('.product-card');
+              if (remainingCards.length === 0) {
+                console.log('📭 No cards remaining, showing empty state');
+                this.showEmpty();
+              }
+            }
+          }, 400); // Match the longest CSS animation duration
+        }, animationDelay);
+      });
+      
+      // Update the products array immediately (optimistic update)
+      this.products = this.products.filter(product => {
+        // Remove product if it matches
+        if (product.gid === productId || product.id === productId.replace('gid://shopify/Product/', '')) {
+          // If we have variant or options matching, be more specific
+          if (variantId && product.selectedVariant && product.selectedVariant.id.toString() === variantId) {
+            return false; // Remove this product
+          }
+          if (selectedOptions && Object.keys(selectedOptions).length > 0) {
+            const productOptions = (product.wishlistItemData && product.wishlistItemData.selectedOptions) || {};
+            if (JSON.stringify(productOptions) === JSON.stringify(selectedOptions)) {
+              return false; // Remove this product
+            }
+          }
+          // If no variant/options specified, remove any matching product
+          if (!variantId && (!selectedOptions || Object.keys(selectedOptions).length === 0)) {
+            return false; // Remove this product
+          }
+        }
+        return true; // Keep this product
+      });
+      
+      console.log(`🎨 Updated products array, ${this.products.length} products remaining`);
+      
+    } catch (error) {
+      console.error('🔥 Error removing item from UI:', error);
+      // Fall back to full reload if UI update fails
+      setTimeout(() => {
+        this.loadWishlist();
+      }, 500);
+    }
   }
 }
 

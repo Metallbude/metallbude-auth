@@ -1,0 +1,32 @@
+{% comment %}
+  Add this script to your Shopify theme to expose customer information
+  to the wishlist button JavaScript. 
+  
+  Place this in your theme.liquid file, preferably in the <head> section
+  or before the wishlist-button.js script is loaded.
+{% endcomment %}
+
+<script>
+  // Expose customer information for wishlist functionality
+  {% if customer %}
+    window.ShopifyCustomer = {
+      id: {{ customer.id }},
+      email: "{{ customer.email }}",
+      firstName: "{{ customer.first_name }}",
+      lastName: "{{ customer.last_name }}",
+      acceptsMarketing: {{ customer.accepts_marketing }},
+      tags: {{ customer.tags | json }}
+    };
+    
+    // Also set it in a meta tag for fallback detection
+    const customerMeta = document.createElement('meta');
+    customerMeta.name = 'customer-id';
+    customerMeta.content = '{{ customer.id }}';
+    document.head.appendChild(customerMeta);
+    
+    console.log('✅ Shopify customer information loaded:', {{ customer.id }});
+  {% else %}
+    window.ShopifyCustomer = null;
+    console.log('👤 No customer logged in');
+  {% endif %}
+</script>
