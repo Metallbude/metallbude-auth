@@ -1618,14 +1618,14 @@ app.post('/auth/verify-code', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Refresh token required' });
     }
   
-    const refreshData = config.appRefreshTokens.get(refreshToken);
+    const refreshData = appRefreshTokens.get(refreshToken);
     if (!refreshData) {
       return res.status(401).json({ success: false, error: 'Invalid refresh token' });
     }
   
     // Check if refresh token is expired
     if (refreshData.expiresAt < Date.now()) {
-      config.appRefreshTokens.delete(refreshToken);
+      appRefreshTokens.delete(refreshToken);
       return res.status(401).json({ success: false, error: 'Refresh token expired' });
     }
   
@@ -9523,7 +9523,7 @@ async function cleanupExpiredTokens() {
   // Clean expired refresh tokens
   for (const [refreshToken, data] of appRefreshTokens.entries()) {
     if (data.expiresAt < now) {
-      config.appRefreshTokens.delete(refreshToken);
+      appRefreshTokens.delete(refreshToken);
       cleanedRefreshTokens++;
     }
   }
@@ -9541,7 +9541,7 @@ setInterval(async () => {
 // Health check endpoint with token statistics
 app.get('/auth/health', (req, res) => {
   const activeSessions = sessions.size;
-  const activeRefreshTokens = config.appRefreshTokens.size;
+  const activeRefreshTokens = appRefreshTokens.size;
   const pendingVerifications = config.verificationCodes.size;
   
   const activeShopifyTokens = shopifyCustomerTokens.size;
