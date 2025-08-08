@@ -190,7 +190,7 @@ async function getRealCustomerEmail(customerId) {
         
         const query = `
             query getCustomerEmail($id: ID!) {
-                customer(id: "gid://shopify/Customer/${numericCustomerId}") {
+                customer(id: $id) {
                     id
                     email
                     firstName
@@ -11191,7 +11191,7 @@ app.get('/debug/raw-customer/:customerId', async (req, res) => {
     // Test the Shopify API call directly
     const query = `
         query getCustomerEmail($id: ID!) {
-            customer(id: "gid://shopify/Customer/${numericCustomerId}") {
+            customer(id: $id) {
                 id
                 email
                 firstName
