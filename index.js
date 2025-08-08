@@ -11105,3 +11105,27 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   - Refresh Warning: ${config.refreshThresholds.warningDays} days before expiry`);
   console.log(`   - Users will stay logged in for MONTHS!`);
 });
+
+// 🔍 DEBUG: Test endpoint to check email resolution
+app.get('/debug/customer-email/:customerId', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    console.log(`🔍 [EMAIL_TEST] Testing email resolution for customer: ${customerId}`);
+    
+    const customerEmail = await getRealCustomerEmail(customerId);
+    
+    res.json({
+      success: true,
+      customerId: customerId,
+      resolvedEmail: customerEmail,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error(`❌ [EMAIL_TEST] Error testing email for ${req.params.customerId}:`, error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      customerId: req.params.customerId
+    });
+  }
+});
