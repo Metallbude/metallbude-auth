@@ -10491,6 +10491,7 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                 
                 // ✅ NEW: Get real customer email from Shopify for proper identification
                 const customerEmail = await getRealCustomerEmail(customerId);
+                console.log(`🔍 [EMAIL_DEBUG] Customer ID: ${customerId}, Retrieved email: ${customerEmail}`);
                 
                 // Prepare enhanced product data for Firebase
                 const productData = {
