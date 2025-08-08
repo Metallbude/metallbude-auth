@@ -477,6 +477,34 @@ class WishlistService {
       return { status: 'unhealthy', error: error.message };
     }
   }
+
+  // Clear entire wishlist for a customer (used for migration)
+  async clearWishlist(customerId, customerEmail) {
+    try {
+      console.log(`🗑️ [FIREBASE] Clearing wishlist for ${customerEmail} (${customerId})`);
+
+      // Ensure Firebase is properly initialized
+      if (!this.db) {
+        throw new Error('Firebase Firestore not initialized');
+      }
+
+      // Sanitize customer ID for Firestore document path
+      const sanitizedCustomerId = this._sanitizeCustomerId(customerId);
+      console.log(`🗑️ [FIREBASE] Using sanitized document ID: ${sanitizedCustomerId}`);
+
+      const wishlistRef = this.db.collection(COLLECTIONS.WISHLISTS).doc(sanitizedCustomerId);
+      
+      // Delete the entire document
+      await wishlistRef.delete();
+
+      console.log(`🗑️ [FIREBASE] Successfully cleared wishlist for ${customerEmail}`);
+      return { success: true, action: 'clear', customerId };
+
+    } catch (error) {
+      console.error('🗑️ [FIREBASE] Clear wishlist error:', error.message, error.stack);
+      throw error;
+    }
+  }
 }
 
 module.exports = WishlistService;

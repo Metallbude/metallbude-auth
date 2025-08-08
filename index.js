@@ -10704,6 +10704,122 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
     }
 });
 
+// Migrate wishlist from device ID to customer email when user logs in
+app.post('/api/public/wishlist/migrate', async (req, res) => {
+    try {
+        const { deviceId, customerId, customerEmail } = req.body;
+
+        if (!deviceId || !customerId) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Device ID and customer ID are required' 
+            });
+        }
+
+        console.log(`[MIGRATION] Migrating wishlist from device ${deviceId} to customer ${customerId} (${customerEmail})`);
+
+        let migratedCount = 0;
+
+        // 1. Migrate in public storage (JSON file)
+        const wishlistData = await loadWishlistData();
+        
+        if (wishlistData[deviceId] && wishlistData[deviceId].length > 0) {
+            console.log(`[MIGRATION] Found ${wishlistData[deviceId].length} items for device ${deviceId}`);
+            
+            // Ensure customer wishlist exists
+            if (!wishlistData[customerId]) {
+                wishlistData[customerId] = [];
+            }
+            
+            // Merge device wishlist into customer wishlist (avoid duplicates)
+            const deviceItems = wishlistData[deviceId];
+            for (const deviceItem of deviceItems) {
+                // Check if item already exists in customer wishlist
+                const existingItemIndex = wishlistData[customerId].findIndex(item => 
+                    item.productId === deviceItem.productId && 
+                    item.variantId === deviceItem.variantId &&
+                    JSON.stringify(item.selectedOptions || {}) === JSON.stringify(deviceItem.selectedOptions || {})
+                );
+                
+                if (existingItemIndex === -1) {
+                    // Item doesn't exist, add it
+                    wishlistData[customerId].push({
+                        ...deviceItem,
+                        migratedFromDevice: deviceId,
+                        migratedAt: new Date().toISOString()
+                    });
+                    migratedCount++;
+                }
+            }
+            
+            // Remove device wishlist after migration
+            delete wishlistData[deviceId];
+            await saveWishlistData(wishlistData);
+            
+            console.log(`[MIGRATION] Migrated ${migratedCount} items from device to public storage`);
+        }
+
+        // 2. Migrate in Firebase
+        if (firebaseEnabled && wishlistService && customerEmail) {
+            try {
+                console.log(`[MIGRATION] Migrating Firebase entries from device ${deviceId} to customer ${customerId}`);
+                
+                // Get device wishlist from Firebase
+                const deviceFirebaseItems = await wishlistService.getWishlist(deviceId, `device@${deviceId}.guest`);
+                
+                if (deviceFirebaseItems.length > 0) {
+                    console.log(`[MIGRATION] Found ${deviceFirebaseItems.length} items in Firebase for device ${deviceId}`);
+                    
+                    // Add each item to customer's Firebase wishlist
+                    for (const item of deviceFirebaseItems) {
+                        try {
+                            await wishlistService.addToWishlistWithProductData(
+                                customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`,
+                                customerEmail,
+                                item.productId,
+                                item.variantId,
+                                item.selectedOptions,
+                                {
+                                    title: item.title,
+                                    handle: item.handle,
+                                    imageUrl: item.imageUrl,
+                                    price: item.price,
+                                    sku: item.sku
+                                }
+                            );
+                        } catch (addError) {
+                            console.error(`[MIGRATION] Error adding item ${item.productId} to customer Firebase:`, addError.message);
+                        }
+                    }
+                    
+                    // Remove device wishlist from Firebase
+                    await wishlistService.clearWishlist(deviceId, `device@${deviceId}.guest`);
+                    
+                    console.log(`[MIGRATION] Successfully migrated Firebase entries`);
+                }
+            } catch (firebaseError) {
+                console.error('[MIGRATION] Error migrating Firebase data:', firebaseError.message);
+                // Don't fail the entire migration if Firebase fails
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `Successfully migrated ${migratedCount} wishlist items`,
+            migratedCount: migratedCount,
+            deviceId: deviceId,
+            customerId: customerId
+        });
+
+    } catch (error) {
+        console.error('[MIGRATION] Error migrating wishlist:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error' 
+        });
+    }
+});
+
 // Debug endpoint to see all customer IDs in wishlist (temporary)
 app.get('/api/debug/wishlist-customers', async (req, res) => {
     try {
