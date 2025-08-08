@@ -11175,6 +11175,78 @@ app.get('/debug/find-customer/:email', async (req, res) => {
 });
 
 // 🔍 DEBUG: Test endpoint to check email resolution
+app.get('/debug/raw-customer/:customerId', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    
+    // Extract numeric ID if it's a GID
+    const numericCustomerId = customerId.includes('gid://shopify/Customer/') 
+        ? customerId.replace('gid://shopify/Customer/', '') 
+        : customerId;
+    
+    console.log(`🔍 [RAW_TEST] Testing raw Shopify API for customer: ${numericCustomerId}`);
+    console.log(`🔍 [RAW_TEST] API URL: ${config.adminApiUrl}`);
+    console.log(`🔍 [RAW_TEST] Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
+    
+    // Test the Shopify API call directly
+    const query = `
+        query getCustomerEmail($id: ID!) {
+            customer(id: "gid://shopify/Customer/${numericCustomerId}") {
+                id
+                email
+                firstName
+                lastName
+                displayName
+                state
+            }
+        }
+    `;
+    
+    console.log(`🔍 [RAW_TEST] Query:`, query);
+    
+    const response = await axios.post(
+        config.adminApiUrl,
+        {
+            query,
+            variables: { id: `gid://shopify/Customer/${numericCustomerId}` }
+        },
+        {
+            headers: {
+                'X-Shopify-Access-Token': config.adminToken,
+                'Content-Type': 'application/json'
+            }
+        }
+    );
+    
+    console.log(`🔍 [RAW_TEST] Response status: ${response.status}`);
+    console.log(`🔍 [RAW_TEST] Response data:`, JSON.stringify(response.data, null, 2));
+    
+    const customerData = response.data?.data?.customer;
+    
+    res.json({
+      success: true,
+      customerId: customerId,
+      numericId: numericCustomerId,
+      apiUrl: config.adminApiUrl,
+      hasAdminToken: !!config.adminToken,
+      responseStatus: response.status,
+      responseData: response.data,
+      customerData: customerData,
+      customerEmail: customerData?.email || 'NOT_FOUND',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error(`❌ [RAW_TEST] Error testing raw API for ${req.params.customerId}:`, error.message);
+    console.error(`❌ [RAW_TEST] Error response:`, error.response?.data);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      errorData: error.response?.data,
+      customerId: req.params.customerId
+    });
+  }
+});
+
 app.get('/debug/customer-email/:customerId', async (req, res) => {
   try {
     const { customerId } = req.params;
