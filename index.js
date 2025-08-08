@@ -11106,6 +11106,63 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   - Users will stay logged in for MONTHS!`);
 });
 
+// 🔍 DEBUG: Find customer by email
+app.get('/debug/find-customer/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    console.log(`🔍 [EMAIL_SEARCH] Searching for customer with email: ${email}`);
+    
+    const query = `
+        query getCustomerByEmail($query: String!) {
+            customers(first: 5, query: $query) {
+                edges {
+                    node {
+                        id
+                        email
+                        firstName
+                        lastName
+                        displayName
+                        state
+                        createdAt
+                    }
+                }
+            }
+        }
+    `;
+    
+    const response = await axios.post(
+        config.adminApiUrl,
+        {
+            query,
+            variables: { query: `email:${email}` }
+        },
+        {
+            headers: {
+                'X-Shopify-Access-Token': config.adminToken,
+                'Content-Type': 'application/json'
+            }
+        }
+    );
+    
+    const customers = response.data?.data?.customers?.edges || [];
+    
+    res.json({
+      success: true,
+      searchEmail: email,
+      foundCustomers: customers.map(edge => edge.node),
+      count: customers.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error(`❌ [EMAIL_SEARCH] Error searching for email ${req.params.email}:`, error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      searchEmail: req.params.email
+    });
+  }
+});
+
 // 🔍 DEBUG: Test endpoint to check email resolution
 app.get('/debug/customer-email/:customerId', async (req, res) => {
   try {
