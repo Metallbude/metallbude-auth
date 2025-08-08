@@ -185,6 +185,8 @@ async function getRealCustomerEmail(customerId) {
             : customerId;
         
         console.log(`🔍 [EMAIL] Fetching real email for customer: ${numericCustomerId}`);
+        console.log(`🔍 [EMAIL] API URL: ${config.adminApiUrl}`);
+        console.log(`🔍 [EMAIL] Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
         
         const query = `
             query getCustomerEmail($id: ID!) {
@@ -196,6 +198,9 @@ async function getRealCustomerEmail(customerId) {
                 }
             }
         `;
+        
+        console.log(`🔍 [EMAIL] GraphQL query:`, query);
+        console.log(`🔍 [EMAIL] Variables:`, { id: `gid://shopify/Customer/${numericCustomerId}` });
         
         const response = await axios.post(
             config.adminApiUrl,
@@ -211,6 +216,9 @@ async function getRealCustomerEmail(customerId) {
             }
         );
         
+        console.log(`🔍 [EMAIL] Response status: ${response.status}`);
+        console.log(`🔍 [EMAIL] Response data:`, JSON.stringify(response.data, null, 2));
+        
         const customerData = response.data?.data?.customer;
         
         if (customerData && customerData.email) {
@@ -218,11 +226,14 @@ async function getRealCustomerEmail(customerId) {
             return customerData.email;
         } else {
             console.log(`⚠️ [EMAIL] No email found for customer ${numericCustomerId}, using fallback`);
+            console.log(`⚠️ [EMAIL] Response errors:`, response.data?.errors);
             return `anonymous@metallbude.com`;
         }
         
     } catch (error) {
         console.error(`❌ [EMAIL] Error fetching customer email for ${customerId}:`, error.message);
+        console.error(`❌ [EMAIL] Error response:`, error.response?.data);
+        console.error(`❌ [EMAIL] Error status:`, error.response?.status);
         // Return a cleaner fallback email for failed lookups
         return `anonymous@metallbude.com`;
     }
