@@ -9663,12 +9663,16 @@ async function loadWishlistData() {
     try {
         const filePath = path.join(__dirname, 'wishlist_data.json');
         const data = await fs.readFile(filePath, 'utf8');
+        console.log('✅ [STORAGE] Successfully loaded wishlist data from filesystem');
         return JSON.parse(data);
     } catch (error) {
         if (error.code === 'ENOENT') {
+            console.log('ℹ️ [STORAGE] No wishlist data file found, starting with empty data');
             return {}; // Return empty object if file doesn't exist
+        } else {
+            console.error('⚠️ [STORAGE] Error reading wishlist data file (using empty data):', error.message);
+            return {}; // Return empty object if any read error
         }
-        throw error;
     }
 }
 
@@ -9691,9 +9695,11 @@ async function saveWishlistData(data) {
     try {
         const filePath = path.join(__dirname, 'wishlist_data.json');
         await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+        console.log('✅ [STORAGE] Successfully saved wishlist data to filesystem');
     } catch (error) {
-        console.error('Error saving wishlist data:', error);
-        throw error;
+        console.error('⚠️ [STORAGE] Error saving wishlist data to filesystem (continuing without persistent storage):', error.message);
+        // Don't throw error - continue without persistent storage
+        // The data will still be processed and sent to Firebase
     }
 }
 
