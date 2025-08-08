@@ -248,7 +248,16 @@ async function loadPersistedSessionsWithLogging() {
     
     try {
       const sessionData = await fs.readFile(SESSION_FILE, 'utf8');
-      const sessionEntries = JSON.parse(sessionData);
+      let sessionEntries;
+      
+      try {
+        sessionEntries = JSON.parse(sessionData);
+      } catch (jsonParseError) {
+        console.error('❌ [SESSIONS] Failed to parse sessions JSON:', jsonParseError.message);
+        console.error('❌ [SESSIONS] Session data length:', sessionData?.length || 0);
+        console.error('❌ [SESSIONS] Session data preview:', sessionData?.substring(0, 200));
+        throw new Error('Corrupted sessions file - cannot parse JSON');
+      }
       
       console.log(`📂 Raw sessions data length: ${sessionEntries.length}`);
       
@@ -278,7 +287,16 @@ async function loadPersistedSessionsWithLogging() {
     // Similar for refresh tokens...
     try {
       const refreshData = await fs.readFile('/tmp/refresh_tokens.json', 'utf8');
-      const refreshEntries = JSON.parse(refreshData);
+      let refreshEntries;
+      
+      try {
+        refreshEntries = JSON.parse(refreshData);
+      } catch (jsonParseError) {
+        console.error('❌ [REFRESH_TOKENS] Failed to parse refresh tokens JSON:', jsonParseError.message);
+        console.error('❌ [REFRESH_TOKENS] Refresh data length:', refreshData?.length || 0);
+        console.error('❌ [REFRESH_TOKENS] Refresh data preview:', refreshData?.substring(0, 200));
+        throw new Error('Corrupted refresh tokens file - cannot parse JSON');
+      }
       
       let loadedRefreshTokens = 0;
       const now = Date.now();
@@ -958,7 +976,8 @@ async function setAsDefaultAddress(customerId, addressId) {
       }
     );
     
-    console.log('Set default address response:', JSON.stringify(response.data, null, 2));
+    console.log('Set default address response status:', response.status);
+    console.log('Set default address success:', !!response.data.data?.customerUpdate?.customer);
     return response.data.data?.customerUpdate?.customer != null;
   } catch (error) {
     console.error('Error setting default address:', error.response?.data || error.message);
@@ -3936,7 +3955,10 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
             selectedOptions: null,
             variantId: null
           }));
-        } catch (e) {
+        } catch (jsonParseError) {
+          console.error('❌ [WISHLIST] Failed to parse metafield JSON:', jsonParseError.message);
+          console.error('❌ [WISHLIST] Corrupted metafield value length:', metafield.value?.length || 0);
+          // Fall back to comma-separated parsing
           wishlistProductIds = metafield.value.split(',').filter(id => id.trim());
           // Convert to wishlist items format for compatibility (no variant info available from Shopify metafield)
           wishlistItems = wishlistProductIds.map(productId => ({
@@ -4056,7 +4078,8 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
     );
 
     console.log(`🔍 [DEBUG] Shopify products query response status:`, productsResponse.status);
-    console.log(`🔍 [DEBUG] Shopify products query result:`, JSON.stringify(productsResponse.data, null, 2));
+    // Avoid logging massive response data that can cause JSON corruption
+    console.log(`🔍 [DEBUG] Shopify products query result: ${productsResponse.data?.data?.nodes?.length || 0} products returned`);
 
     const products = productsResponse.data.data?.nodes || [];
     console.log(`🔍 [DEBUG] Extracted products:`, products.length, 'products');
@@ -4371,7 +4394,9 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
       if (existingMetafield?.value) {
         try {
           currentWishlist = JSON.parse(existingMetafield.value);
-        } catch (e) {
+        } catch (jsonParseError) {
+          console.error('❌ [WISHLIST_ADD] Failed to parse existing metafield JSON:', jsonParseError.message);
+          console.error('❌ [WISHLIST_ADD] Corrupted metafield value length:', existingMetafield.value?.length || 0);
           currentWishlist = existingMetafield.value.split(',').filter(id => id.trim());
         }
       }
@@ -5471,7 +5496,10 @@ app.get('/customer/recently-viewed', authenticateAppToken, async (req, res) => {
         const viewedData = JSON.parse(metafield.value);
         // Extract product IDs from viewed data (with timestamps)
         recentlyViewedIds = viewedData.map(item => item.productId || item).slice(0, 20);
-      } catch (e) {
+      } catch (jsonParseError) {
+        console.error('❌ [RECENTLY_VIEWED] Failed to parse metafield JSON:', jsonParseError.message);
+        console.error('❌ [RECENTLY_VIEWED] Corrupted metafield value length:', metafield.value?.length || 0);
+        // Fall back to comma-separated parsing
         recentlyViewedIds = metafield.value.split(',').filter(id => id.trim()).slice(0, 20);
       }
     }
@@ -5584,7 +5612,9 @@ app.post('/customer/recently-viewed', authenticateAppToken, async (req, res) => 
     if (existingMetafield?.value) {
       try {
         recentlyViewed = JSON.parse(existingMetafield.value);
-      } catch (e) {
+      } catch (jsonParseError) {
+        console.error('❌ [ADD_RECENTLY_VIEWED] Failed to parse metafield JSON:', jsonParseError.message);
+        console.error('❌ [ADD_RECENTLY_VIEWED] Corrupted metafield value length:', existingMetafield.value?.length || 0);
         recentlyViewed = [];
       }
     }
@@ -5698,7 +5728,9 @@ app.get('/customer/support-tickets', authenticateAppToken, async (req, res) => {
     if (metafield?.value) {
       try {
         tickets = JSON.parse(metafield.value);
-      } catch (e) {
+      } catch (jsonParseError) {
+        console.error('❌ [SUPPORT_TICKETS] Failed to parse metafield JSON:', jsonParseError.message);
+        console.error('❌ [SUPPORT_TICKETS] Corrupted metafield value length:', metafield.value?.length || 0);
         tickets = [];
       }
     }
@@ -5757,7 +5789,9 @@ app.post('/customer/support-tickets', authenticateAppToken, async (req, res) => 
     if (existingMetafield?.value) {
       try {
         tickets = JSON.parse(existingMetafield.value);
-      } catch (e) {
+      } catch (jsonParseError) {
+        console.error('❌ [ADD_SUPPORT_TICKET] Failed to parse metafield JSON:', jsonParseError.message);
+        console.error('❌ [ADD_SUPPORT_TICKET] Corrupted metafield value length:', existingMetafield.value?.length || 0);
         tickets = [];
       }
     }
@@ -7943,7 +7977,8 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       }
     );
 
-    console.log('Store credit response:', JSON.stringify(response.data));
+    console.log('Store credit response status:', response.status);
+    console.log('Store credit response success:', !response.data.errors);
 
     if (response.data.errors) {
       console.error('GraphQL errors:', response.data.errors);
@@ -9458,10 +9493,16 @@ app.get('/debug/disk-sessions', async (req, res) => {
     // Check sessions file
     try {
       const sessionData = await fs.readFile('/tmp/sessions.json', 'utf8');
-      const sessionEntries = JSON.parse(sessionData);
-      diskSessions = sessionEntries;
-      sessionsFileExists = true;
-      console.log(`📂 Found ${sessionEntries.length} sessions on disk`);
+      try {
+        const sessionEntries = JSON.parse(sessionData);
+        diskSessions = sessionEntries;
+        sessionsFileExists = true;
+        console.log(`📂 Found ${sessionEntries.length} sessions on disk`);
+      } catch (jsonParseError) {
+        console.error('❌ [DEBUG_DISK] Failed to parse sessions JSON:', jsonParseError.message);
+        console.error('❌ [DEBUG_DISK] Session data length:', sessionData?.length || 0);
+        sessionsFileExists = false;
+      }
     } catch (error) {
       console.log('📂 No sessions file found on disk');
     }
@@ -9469,10 +9510,16 @@ app.get('/debug/disk-sessions', async (req, res) => {
     // Check refresh tokens file
     try {
       const refreshData = await fs.readFile('/tmp/refresh_tokens.json', 'utf8');
-      const refreshEntries = JSON.parse(refreshData);
-      diskRefreshTokens = refreshEntries;
-      refreshTokensFileExists = true;
-      console.log(`📂 Found ${refreshEntries.length} refresh tokens on disk`);
+      try {
+        const refreshEntries = JSON.parse(refreshData);
+        diskRefreshTokens = refreshEntries;
+        refreshTokensFileExists = true;
+        console.log(`📂 Found ${refreshEntries.length} refresh tokens on disk`);
+      } catch (jsonParseError) {
+        console.error('❌ [DEBUG_DISK] Failed to parse refresh tokens JSON:', jsonParseError.message);
+        console.error('❌ [DEBUG_DISK] Refresh data length:', refreshData?.length || 0);
+        refreshTokensFileExists = false;
+      }
     } catch (error) {
       console.log('📂 No refresh tokens file found on disk');
     }
