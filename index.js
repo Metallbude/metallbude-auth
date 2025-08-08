@@ -184,10 +184,6 @@ async function getRealCustomerEmail(customerId) {
             ? customerId.replace('gid://shopify/Customer/', '') 
             : customerId;
         
-        console.log(`🔍 [EMAIL] Fetching real email for customer: ${numericCustomerId}`);
-        console.log(`🔍 [EMAIL] API URL: ${config.adminApiUrl}`);
-        console.log(`🔍 [EMAIL] Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
-        
         const query = `
             query getCustomerEmail($id: ID!) {
                 customer(id: $id) {
@@ -198,9 +194,6 @@ async function getRealCustomerEmail(customerId) {
                 }
             }
         `;
-        
-        console.log(`🔍 [EMAIL] GraphQL query:`, query);
-        console.log(`🔍 [EMAIL] Variables:`, { id: `gid://shopify/Customer/${numericCustomerId}` });
         
         const response = await axios.post(
             config.adminApiUrl,
@@ -216,24 +209,16 @@ async function getRealCustomerEmail(customerId) {
             }
         );
         
-        console.log(`🔍 [EMAIL] Response status: ${response.status}`);
-        console.log(`🔍 [EMAIL] Response data:`, JSON.stringify(response.data, null, 2));
-        
         const customerData = response.data?.data?.customer;
         
         if (customerData && customerData.email) {
-            console.log(`✅ [EMAIL] Found real email for ${numericCustomerId}: ${customerData.email}`);
             return customerData.email;
         } else {
-            console.log(`⚠️ [EMAIL] No email found for customer ${numericCustomerId}, using fallback`);
-            console.log(`⚠️ [EMAIL] Response errors:`, response.data?.errors);
             return `anonymous@metallbude.com`;
         }
         
     } catch (error) {
         console.error(`❌ [EMAIL] Error fetching customer email for ${customerId}:`, error.message);
-        console.error(`❌ [EMAIL] Error response:`, error.response?.data);
-        console.error(`❌ [EMAIL] Error status:`, error.response?.status);
         // Return a cleaner fallback email for failed lookups
         return `anonymous@metallbude.com`;
     }
@@ -3904,19 +3889,16 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         const wishlistExists = await wishlistService.wishlistExists(req.session.customerId);
         
         if (!wishlistExists) {
-          console.log(`🔍 [DEBUG] No Firebase wishlist document found, will sync from Shopify if available`);
           shouldSyncFromShopify = true;
         }
 
         // Try Firebase first
-        console.log(`🔍 [DEBUG] Attempting Firebase lookup for customer: ${req.session.customerId}, email: ${req.session.email}`);
         wishlistItems = await wishlistService.getWishlist(
           req.session.customerId, 
           req.session.email
         );
         wishlistProductIds = wishlistItems.map(item => item.productId);
         console.log(`🔥 Firebase returned ${wishlistItems.length} wishlist items`);
-        console.log(`🔍 [DEBUG] Firebase wishlist items with variant info:`, wishlistItems);
       } catch (firebaseError) {
         console.error('❌ Firebase wishlist fetch failed, falling back to Shopify:', firebaseError.message);
         useFirebase = false;
@@ -3998,10 +3980,8 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       }
     }
 
-    console.log(`🔍 [DEBUG] Final wishlistProductIds before product lookup:`, wishlistProductIds);
 
     if (wishlistProductIds.length === 0) {
-      console.log(`🔍 [DEBUG] No wishlist items found, returning empty array`);
       return res.json({ wishlist: [] });
     }
 
@@ -4088,12 +4068,9 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       }
     );
 
-    console.log(`🔍 [DEBUG] Shopify products query response status:`, productsResponse.status);
     // Avoid logging massive response data that can cause JSON corruption
-    console.log(`🔍 [DEBUG] Shopify products query result: ${productsResponse.data?.data?.nodes?.length || 0} products returned`);
 
     const products = productsResponse.data.data?.nodes || [];
-    console.log(`🔍 [DEBUG] Extracted products:`, products.length, 'products');
     
     const wishlist = products.filter(product => product !== null).map(product => {
       // Find the matching wishlist item with variant information
@@ -4130,7 +4107,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         // Find the matching variant by ID first
         if (wishlistItem.variantId) {
           selectedVariant = processedVariants.find(v => v.id === wishlistItem.variantId);
-          console.log(`🔍 [VARIANT] Searching for variant ID ${wishlistItem.variantId} in:`, processedVariants.map(v => v.id));
         }
         
         // If no variant ID match, try to match by selectedOptions
@@ -4146,7 +4122,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
               variantOptions[key] === value
             );
           });
-          console.log(`🔍 [VARIANT] Searching by selectedOptions:`, wishlistItem.selectedOptions);
         }
         
         if (selectedVariant) {
@@ -9777,7 +9752,6 @@ async function syncFirebaseToPublicStorage(customerId) {
         
         // Try simple format first (this is what gets stored when adding from Flutter)
         try {
-            console.log(`🔍 [SYNC] Trying simple customer ID format: ${customerId}`);
             // Note: For sync operations, we use a customer-specific placeholder email
             // since sync functions don't have access to session data with real customer emails
             firebaseItems = await wishlistService.getWishlist(customerId, `sync-${customerId}@metallbude.internal`);
@@ -9793,7 +9767,6 @@ async function syncFirebaseToPublicStorage(customerId) {
         if (firebaseItems.length === 0) {
             try {
                 const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                console.log(`🔍 [SYNC] Trying full customer ID format: ${fullCustomerId}`);
                 firebaseItems = await wishlistService.getWishlist(fullCustomerId, `sync-${customerId}@metallbude.internal`);
                 if (firebaseItems.length > 0) {
                     foundFormat = 'full';
@@ -10021,22 +9994,18 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
             // Extract Shopify customer ID from the productId or customerId if it's a Shopify ID
             let shopifyCustomerId = null;
             
-            console.log(`🔍 [SYNC] Attempting to map session customer ID: "${customerId}"`);
             
             // Method 1: Check if customerId is already a Shopify customer ID format
             if (customerId && customerId.includes('gid://shopify/Customer/')) {
                 shopifyCustomerId = customerId.replace('gid://shopify/Customer/', '');
-                console.log(`🔍 [SYNC] Extracted from GID: ${shopifyCustomerId}`);
             } else if (customerId && /^\d+$/.test(customerId)) {
                 // Method 2: If it's just numeric, it might be a Shopify customer ID
                 shopifyCustomerId = customerId;
-                console.log(`🔍 [SYNC] Using numeric ID as Shopify customer ID: ${shopifyCustomerId}`);
             }
             
             // Method 3: Try to extract from session metadata (check if session has Shopify customer info)
             if (!shopifyCustomerId && req.session && req.session.shopifyCustomerId) {
                 shopifyCustomerId = req.session.shopifyCustomerId;
-                console.log(`🔍 [SYNC] Found in session metadata: ${shopifyCustomerId}`);
             }
             
             if (shopifyCustomerId) {
@@ -10198,20 +10167,15 @@ app.get('/api/public/wishlist/items', async (req, res) => {
         let customerWishlist = [];
 
         // Always try to sync from Firebase first to ensure we have the latest data
-        console.log(`🔍 [DEBUG] Firebase enabled: ${firebaseEnabled}, wishlistService available: ${!!wishlistService}`);
         if (firebaseEnabled && wishlistService) {
             try {
                 console.log(`[SHOPIFY] Syncing Firebase data for customer: ${customerId}`);
                 const syncSuccess = await syncFirebaseToPublicStorage(customerId);
-                console.log(`🔍 [DEBUG] Sync success: ${syncSuccess}`);
                 
                 if (syncSuccess) {
                     console.log(`[SHOPIFY] Successfully synced Firebase data, loading from public storage`);
                     const wishlistData = await loadWishlistData();
-                    console.log(`🔍 [DEBUG] Loaded wishlist data keys: ${Object.keys(wishlistData)}`);
                     customerWishlist = wishlistData[customerId] || [];
-                    console.log(`🔍 [DEBUG] Customer wishlist items: ${customerWishlist.length}`);
-                    console.log(`🔍 [DEBUG] First item:`, customerWishlist[0]);
                     console.log(`[SHOPIFY] Found ${customerWishlist.length} items after Firebase sync`);
                 } else {
                     console.log(`[SHOPIFY] Firebase sync failed, trying direct Firebase lookup`);
@@ -10376,7 +10340,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                                 // Find the matching variant by ID first
                                 if (wishlistItem.variantId) {
                                     selectedVariant = processedVariants.find(v => v.id === wishlistItem.variantId);
-                                    console.log(`🔍 [VARIANT] Searching for variant ID ${wishlistItem.variantId} in:`, processedVariants.map(v => v.id));
                                 }
                                 
                                 // If no variant ID match, try to match by selectedOptions
@@ -10392,7 +10355,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                                             variantOptions[key] === value
                                         );
                                     });
-                                    console.log(`🔍 [VARIANT] Searching by selectedOptions:`, wishlistItem.selectedOptions);
                                 }
                                 
                                 if (selectedVariant) {
@@ -10549,7 +10511,6 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                 
                 // ✅ NEW: Get real customer email from Shopify for proper identification
                 const customerEmail = await getRealCustomerEmail(customerId);
-                console.log(`🔍 [EMAIL_DEBUG] Customer ID: ${customerId}, Retrieved email: ${customerEmail}`);
                 
                 // Prepare enhanced product data for Firebase
                 const productData = {
@@ -11115,195 +11076,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   - Refresh Token Lifetime: ${Math.round(config.tokenLifetimes.refreshToken / (24 * 60 * 60))} days`);
   console.log(`   - Refresh Warning: ${config.refreshThresholds.warningDays} days before expiry`);
   console.log(`   - Users will stay logged in for MONTHS!`);
-});
-
-// 🔍 DEBUG: Find customer by email
-app.get('/debug/find-customer/:email', async (req, res) => {
-  try {
-    const { email } = req.params;
-    console.log(`🔍 [EMAIL_SEARCH] Searching for customer with email: ${email}`);
-    
-    const query = `
-        query getCustomerByEmail($query: String!) {
-            customers(first: 5, query: $query) {
-                edges {
-                    node {
-                        id
-                        email
-                        firstName
-                        lastName
-                        displayName
-                        state
-                        createdAt
-                    }
-                }
-            }
-        }
-    `;
-    
-    const response = await axios.post(
-        config.adminApiUrl,
-        {
-            query,
-            variables: { query: `email:${email}` }
-        },
-        {
-            headers: {
-                'X-Shopify-Access-Token': config.adminToken,
-                'Content-Type': 'application/json'
-            }
-        }
-    );
-    
-    const customers = response.data?.data?.customers?.edges || [];
-    
-    res.json({
-      success: true,
-      searchEmail: email,
-      foundCustomers: customers.map(edge => edge.node),
-      count: customers.length,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error(`❌ [EMAIL_SEARCH] Error searching for email ${req.params.email}:`, error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      searchEmail: req.params.email
-    });
-  }
-});
-
-// 🔍 DEBUG: Test endpoint to check email resolution
-app.get('/debug/raw-customer/:customerId', async (req, res) => {
-  try {
-    const { customerId } = req.params;
-    
-    // Extract numeric ID if it's a GID
-    const numericCustomerId = customerId.includes('gid://shopify/Customer/') 
-        ? customerId.replace('gid://shopify/Customer/', '') 
-        : customerId;
-    
-    console.log(`🔍 [RAW_TEST] Testing raw Shopify API for customer: ${numericCustomerId}`);
-    console.log(`🔍 [RAW_TEST] API URL: ${config.adminApiUrl}`);
-    console.log(`🔍 [RAW_TEST] Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
-    
-    // Test the Shopify API call directly
-    const query = `
-        query getCustomerEmail($id: ID!) {
-            customer(id: $id) {
-                id
-                email
-                firstName
-                lastName
-                displayName
-                state
-            }
-        }
-    `;
-    
-    console.log(`🔍 [RAW_TEST] Query:`, query);
-    
-    const response = await axios.post(
-        config.adminApiUrl,
-        {
-            query,
-            variables: { id: `gid://shopify/Customer/${numericCustomerId}` }
-        },
-        {
-            headers: {
-                'X-Shopify-Access-Token': config.adminToken,
-                'Content-Type': 'application/json'
-            }
-        }
-    );
-    
-    console.log(`🔍 [RAW_TEST] Response status: ${response.status}`);
-    console.log(`🔍 [RAW_TEST] Response data:`, JSON.stringify(response.data, null, 2));
-    
-    const customerData = response.data?.data?.customer;
-    
-    res.json({
-      success: true,
-      customerId: customerId,
-      numericId: numericCustomerId,
-      apiUrl: config.adminApiUrl,
-      hasAdminToken: !!config.adminToken,
-      responseStatus: response.status,
-      responseData: response.data,
-      customerData: customerData,
-      customerEmail: customerData?.email || 'NOT_FOUND',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error(`❌ [RAW_TEST] Error testing raw API for ${req.params.customerId}:`, error.message);
-    console.error(`❌ [RAW_TEST] Error response:`, error.response?.data);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      errorData: error.response?.data,
-      customerId: req.params.customerId
-    });
-  }
-});
-
-app.get('/debug/customer-email/:customerId', async (req, res) => {
-  try {
-    const { customerId } = req.params;
-    console.log(`🔍 [EMAIL_TEST] Testing email resolution for customer: ${customerId}`);
-    
-    // Extract numeric ID if it's a GID
-    const numericCustomerId = customerId.includes('gid://shopify/Customer/') 
-        ? customerId.replace('gid://shopify/Customer/', '') 
-        : customerId;
-    
-    console.log(`🔍 [EMAIL_TEST] Using numeric ID: ${numericCustomerId}`);
-    
-    // Test the Shopify API call directly
-    const query = `
-        query getCustomerEmail($id: ID!) {
-            customer(id: "gid://shopify/Customer/${numericCustomerId}") {
-                id
-                email
-                firstName
-                lastName
-                displayName
-                state
-            }
-        }
-    `;
-    
-    const response = await axios.post(
-        config.adminApiUrl,
-        {
-            query,
-            variables: { id: `gid://shopify/Customer/${numericCustomerId}` }
-        },
-        {
-            headers: {
-                'X-Shopify-Access-Token': config.adminToken,
-                'Content-Type': 'application/json'
-            }
-        }
-    );
-    
-    const customerData = response.data?.data?.customer;
-    const customerEmail = await getRealCustomerEmail(customerId);
-    
-    res.json({
-      success: true,
-      customerId: customerId,
-      numericId: numericCustomerId,
-      shopifyResponse: customerData,
-      resolvedEmail: customerEmail,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error(`❌ [EMAIL_TEST] Error testing email for ${req.params.customerId}:`, error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      customerId: req.params.customerId
-    });
-  }
 });
