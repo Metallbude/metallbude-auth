@@ -11112,11 +11112,49 @@ app.get('/debug/customer-email/:customerId', async (req, res) => {
     const { customerId } = req.params;
     console.log(`🔍 [EMAIL_TEST] Testing email resolution for customer: ${customerId}`);
     
+    // Extract numeric ID if it's a GID
+    const numericCustomerId = customerId.includes('gid://shopify/Customer/') 
+        ? customerId.replace('gid://shopify/Customer/', '') 
+        : customerId;
+    
+    console.log(`🔍 [EMAIL_TEST] Using numeric ID: ${numericCustomerId}`);
+    
+    // Test the Shopify API call directly
+    const query = `
+        query getCustomerEmail($id: ID!) {
+            customer(id: "gid://shopify/Customer/${numericCustomerId}") {
+                id
+                email
+                firstName
+                lastName
+                displayName
+                state
+            }
+        }
+    `;
+    
+    const response = await axios.post(
+        config.adminApiUrl,
+        {
+            query,
+            variables: { id: `gid://shopify/Customer/${numericCustomerId}` }
+        },
+        {
+            headers: {
+                'X-Shopify-Access-Token': config.adminToken,
+                'Content-Type': 'application/json'
+            }
+        }
+    );
+    
+    const customerData = response.data?.data?.customer;
     const customerEmail = await getRealCustomerEmail(customerId);
     
     res.json({
       success: true,
       customerId: customerId,
+      numericId: numericCustomerId,
+      shopifyResponse: customerData,
       resolvedEmail: customerEmail,
       timestamp: new Date().toISOString()
     });
