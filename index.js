@@ -1236,8 +1236,8 @@ app.post('/newsletter/subscribe', async (req, res) => {
               attributes: {
                 email: email,
                 first_name: first_name || '',
-                last_name: last_name || '',
                 properties: {
+                  last_name: last_name || '',
                   source: source || 'mobile_app',
                   platform: platform || 'flutter',
                   signup_timestamp: new Date().toISOString(),
