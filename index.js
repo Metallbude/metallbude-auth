@@ -1225,55 +1225,96 @@ app.post('/newsletter/subscribe', async (req, res) => {
 
     console.log(`📧 Subscribing email: ${email} to list: ${klaviyoListId}`);
 
-    // Directly subscribe to list using the newer API format
-    const subscriptionData = {
-      data: {
-        type: 'profile-subscription-bulk-create-job',
-        attributes: {
-          profiles: {
-            data: [{
-              type: 'profile',
-              attributes: {
-                email: email,
-                properties: {
-                  source: source || 'mobile_app',
-                  platform: platform || 'flutter',
-                  signup_timestamp: new Date().toISOString(),
-                  ...(first_name && { first_name }),
-                  ...(last_name && { last_name }),
-                  ...properties
+    // Try multiple methods like the original working code
+    
+    // Method 1: Standard API
+    try {
+      const subscriptionData = {
+        data: {
+          type: 'profile-subscription-bulk-create-job',
+          attributes: {
+            profiles: {
+              data: [{
+                type: 'profile',
+                attributes: {
+                  email: email,
+                  properties: {
+                    source: source || 'mobile_app',
+                    platform: platform || 'flutter',
+                    signup_timestamp: new Date().toISOString(),
+                    ...(first_name && { first_name }),
+                    ...(last_name && { last_name }),
+                    ...properties
+                  }
                 }
+              }]
+            },
+            historical_import: false
+          },
+          relationships: {
+            list: {
+              data: {
+                type: 'list',
+                id: klaviyoListId
               }
-            }]
-          }
-        },
-        relationships: {
-          list: {
-            data: {
-              type: 'list',
-              id: klaviyoListId
             }
           }
         }
-      }
-    };
+      };
 
-    console.log('📧 Klaviyo subscription data:', JSON.stringify(subscriptionData, null, 2));
-
-    const response = await axios.post(
-      'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
-      subscriptionData,
-      {
-        headers: {
-          'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
-          'Content-Type': 'application/json',
-          'revision': '2024-10-15'
+      const response = await axios.post(
+        'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
+        subscriptionData,
+        {
+          headers: {
+            'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
+            'Content-Type': 'application/json',
+            'revision': '2024-10-15'
+          }
         }
-      }
-    );
+      );
 
-    console.log(`✅ Newsletter subscription successful: ${email}`);
-    res.json({ success: true, message: 'Successfully subscribed to newsletter' });
+      if (response.status === 202) {
+        console.log(`✅ Newsletter subscription successful: ${email}`);
+        return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
+      }
+    } catch (standardError) {
+      console.log('📧 Standard API failed, trying legacy method...', standardError.response?.data);
+    }
+
+    // Method 2: Legacy form submission (like your working code)
+    try {
+      const legacyResponse = await axios.post(
+        'https://manage.kmail-lists.com/ajax/subscriptions/subscribe',
+        new URLSearchParams({
+          'g': klaviyoListId,
+          'email': email,
+          '$fields': 'email',
+          '$source': source || 'Metallbude Mobile App',
+          'platform': platform || 'Flutter',
+          'device_type': 'Mobile',
+          'signup_location': 'Sidebar Newsletter',
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          }
+        }
+      );
+
+      if (legacyResponse.status === 200) {
+        console.log(`✅ Newsletter subscription successful (legacy): ${email}`);
+        return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
+      }
+    } catch (legacyError) {
+      console.log('📧 Legacy API also failed:', legacyError.response?.data);
+    }
+
+    console.log(`❌ All subscription methods failed for: ${email}`);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to subscribe to newsletter - all methods failed'
+    });
 
   } catch (error) {
     console.error('❌ Newsletter subscription error:', error.response?.data || error.message);
