@@ -1228,6 +1228,28 @@ app.post('/newsletter/subscribe', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Newsletter service not configured' });
     }
 
+    // First, let's test if we can access the list to verify credentials
+    try {
+      console.log('📧 Testing Klaviyo credentials by fetching list info...');
+      const listResponse = await axios.get(
+        `https://a.klaviyo.com/api/lists/${klaviyoListId}`,
+        {
+          headers: {
+            'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
+            'revision': '2024-10-15'
+          }
+        }
+      );
+      console.log('📧 List info response:', JSON.stringify(listResponse.data, null, 2));
+    } catch (listError) {
+      console.error('❌ Failed to access Klaviyo list:', listError.response?.status, listError.response?.data);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Invalid Klaviyo credentials or list ID',
+        details: listError.response?.data
+      });
+    }
+
     console.log(`📧 Subscribing email: ${email} to list: ${klaviyoListId}`);
 
     // Try multiple methods like the original working code
