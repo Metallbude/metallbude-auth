@@ -1267,6 +1267,8 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       };
 
+      console.log('📧 Sending to Klaviyo API:', JSON.stringify(subscriptionData, null, 2));
+
       const response = await axios.post(
         'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
         subscriptionData,
@@ -1279,16 +1281,23 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
+      console.log('📧 Klaviyo API response status:', response.status);
+      console.log('📧 Klaviyo API response data:', JSON.stringify(response.data, null, 2));
+
       if (response.status === 202) {
         console.log(`✅ Newsletter subscription successful: ${email}`);
         return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
       }
     } catch (standardError) {
-      console.log('📧 Standard API failed, trying legacy method...', standardError.response?.data);
+      console.log('📧 Standard API failed with status:', standardError.response?.status);
+      console.log('📧 Standard API error data:', JSON.stringify(standardError.response?.data, null, 2));
+      console.log('📧 Trying legacy method...');
     }
 
     // Method 2: Legacy form submission (like your working code)
     try {
+      console.log('📧 Trying legacy form submission method...');
+      
       const legacyResponse = await axios.post(
         'https://manage.kmail-lists.com/ajax/subscriptions/subscribe',
         new URLSearchParams({
@@ -1307,12 +1316,16 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
+      console.log('📧 Legacy API response status:', legacyResponse.status);
+      console.log('📧 Legacy API response data:', JSON.stringify(legacyResponse.data, null, 2));
+
       if (legacyResponse.status === 200) {
         console.log(`✅ Newsletter subscription successful (legacy): ${email}`);
         return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
       }
     } catch (legacyError) {
-      console.log('📧 Legacy API also failed:', legacyError.response?.data);
+      console.log('📧 Legacy API failed with status:', legacyError.response?.status);
+      console.log('📧 Legacy API error data:', JSON.stringify(legacyError.response?.data, null, 2));
     }
 
     console.log(`❌ All subscription methods failed for: ${email}`);
