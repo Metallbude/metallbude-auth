@@ -1393,10 +1393,10 @@ app.get('/config/storefront-token', (req, res) => {
 // Reviews endpoints (Judge.me proxy)
 app.get('/reviews', async (req, res) => {
   try {
-    const { product, page = 1, per_page = 20, sort_by = 'date', order = 'desc' } = req.query;
+    const { product, handle, page = 1, per_page = 20, sort_by = 'date', order = 'desc', email } = req.query;
 
-    if (!product) {
-      return res.status(400).json({ success: false, error: 'Product ID required' });
+    if (!product && !handle && !email) {
+      return res.status(400).json({ success: false, error: 'Product ID, handle, or email required' });
     }
 
     const judgemeToken = process.env.JUDGEME_API_TOKEN;
@@ -1407,17 +1407,27 @@ app.get('/reviews', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    const response = await axios.get('https://judge.me/api/v1/reviews', {
-      params: {
-        api_token: judgemeToken,
-        shop_domain: shopDomain,
-        product_id: product,
-        page: page,
-        per_page: per_page,
-        sort_by: sort_by,
-        order: order
-      }
-    });
+    // Build params based on what was provided
+    const params = {
+      api_token: judgemeToken,
+      shop_domain: shopDomain,
+      page: page,
+      per_page: per_page,
+      sort_by: sort_by,
+      order: order,
+      published: 'true'
+    };
+
+    // Add the appropriate filter
+    if (product) {
+      params.product_id = product;
+    } else if (handle) {
+      params.product_handle = handle;
+    } else if (email) {
+      params.email = email;
+    }
+
+    const response = await axios.get('https://judge.me/api/v1/reviews', { params });
 
     res.json({
       success: true,
