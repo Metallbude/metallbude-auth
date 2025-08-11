@@ -1315,35 +1315,34 @@ app.post('/newsletter/subscribe', async (req, res) => {
 
     console.log(`📧 Subscribing email: ${email} to list: ${klaviyoListId}`);
 
-    // Method 1: Use the correct Klaviyo API for list subscription (POST to list relationships)
+    // Method 1: First create/update the profile, then add to list (correct approach)
     try {
-      console.log('📧 Method 1: Direct list subscription using correct API...');
+      console.log('📧 Method 1: Create profile and add to list...');
       
-      const listSubscriptionData = {
-        data: [
-          {
-            type: 'profile',
-            attributes: {
-              email: email,
-              ...(first_name && { first_name }),
-              ...(last_name && { last_name }),
-              properties: {
-                source: source || 'mobile_app',
-                platform: platform || 'flutter',
-                signup_timestamp: new Date().toISOString(),
-                ...properties
-              }
+      // Step 1: Create or update the profile
+      const profileData = {
+        data: {
+          type: 'profile',
+          attributes: {
+            email: email,
+            ...(first_name && { first_name }),
+            ...(last_name && { last_name }),
+            properties: {
+              source: source || 'mobile_app',
+              platform: platform || 'flutter',
+              signup_timestamp: new Date().toISOString(),
+              ...properties
             }
           }
-        ]
+        }
       };
 
-      console.log('📧 Subscribing to list:', klaviyoListId);
-      console.log('📧 Subscription data:', JSON.stringify(listSubscriptionData, null, 2));
+      console.log('📧 Step 1: Creating/updating profile...');
+      console.log('📧 Profile data:', JSON.stringify(profileData, null, 2));
 
-      const listResponse = await axios.post(
-        `https://a.klaviyo.com/api/lists/${klaviyoListId}/relationships/profiles/`,
-        listSubscriptionData,
+      const profileResponse = await axios.post(
+        'https://a.klaviyo.com/api/profiles/',
+        profileData,
         {
           headers: {
             'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
@@ -1353,16 +1352,51 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
-      console.log('📧 List subscription response status:', listResponse.status);
-      console.log('📧 List subscription response data:', JSON.stringify(listResponse.data, null, 2));
+      console.log('📧 Profile response status:', profileResponse.status);
+      console.log('📧 Profile response data:', JSON.stringify(profileResponse.data, null, 2));
 
-      if (listResponse.status >= 200 && listResponse.status < 300) {
-        console.log(`✅ Newsletter subscription successful: ${email} -> List: ${klaviyoListId}`);
-        return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
+      const profileId = profileResponse.data?.data?.id;
+      console.log('📧 Profile ID:', profileId);
+
+      if (profileId) {
+        // Step 2: Add profile to list using relationships endpoint
+        console.log('📧 Step 2: Adding profile to list...');
+        
+        const listSubscriptionData = {
+          data: [
+            {
+              type: 'profile',
+              id: profileId
+            }
+          ]
+        };
+
+        console.log('📧 Adding profile to list:', klaviyoListId);
+        console.log('📧 List subscription data:', JSON.stringify(listSubscriptionData, null, 2));
+
+        const listResponse = await axios.post(
+          `https://a.klaviyo.com/api/lists/${klaviyoListId}/relationships/profiles/`,
+          listSubscriptionData,
+          {
+            headers: {
+              'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
+              'Content-Type': 'application/json',
+              'revision': '2024-10-15'
+            }
+          }
+        );
+
+        console.log('📧 List subscription response status:', listResponse.status);
+        console.log('📧 List subscription response data:', JSON.stringify(listResponse.data, null, 2));
+
+        if (listResponse.status >= 200 && listResponse.status < 300) {
+          console.log(`✅ Newsletter subscription successful: ${email} -> List: ${klaviyoListId}`);
+          return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
+        }
       }
-    } catch (listError) {
-      console.log('📧 List subscription failed with status:', listError.response?.status);
-      console.log('📧 List subscription error data:', JSON.stringify(listError.response?.data, null, 2));
+    } catch (profileError) {
+      console.log('📧 Profile creation/list subscription failed with status:', profileError.response?.status);
+      console.log('📧 Profile creation error data:', JSON.stringify(profileError.response?.data, null, 2));
       console.log('📧 Trying legacy method...');
     }
 
