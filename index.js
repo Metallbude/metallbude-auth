@@ -140,7 +140,7 @@ const config = {
   publicKey,
   clients: {
     'shopify_client_id': {
-      client_secret: process.env.SHOPIFY_CLIENT_SECRET || 'b079a4c59a9b24f43971a95abaa6b0e2c384b597275d477b1ee8444e26db81ec',
+      client_secret: process.env.SHOPIFY_CLIENT_SECRET,
       redirect_uris: [
         'https://account.metallbude.com/authentication/login/external/callback',
         'https://shopify.com/authentication/48343744676/login/external/callback',
