@@ -1252,24 +1252,22 @@ app.post('/newsletter/subscribe', async (req, res) => {
 
     console.log(`📧 Subscribing email: ${email} to list: ${klaviyoListId}`);
 
-    // Try multiple methods like the original working code
-    
-    // Method 1: Simple list subscription using email (most reliable)
+    // Method 1: Use the correct Klaviyo API for list subscription (POST to list relationships)
     try {
-      console.log('📧 Method 1: Simple email subscription to list...');
+      console.log('📧 Method 1: Direct list subscription using correct API...');
       
-      const emailSubscriptionData = {
+      const listSubscriptionData = {
         data: [
           {
             type: 'profile',
             attributes: {
               email: email,
+              ...(first_name && { first_name }),
+              ...(last_name && { last_name }),
               properties: {
                 source: source || 'mobile_app',
                 platform: platform || 'flutter',
                 signup_timestamp: new Date().toISOString(),
-                ...(first_name && { first_name }),
-                ...(last_name && { last_name }),
                 ...properties
               }
             }
@@ -1277,9 +1275,12 @@ app.post('/newsletter/subscribe', async (req, res) => {
         ]
       };
 
-      const emailResponse = await axios.post(
+      console.log('📧 Subscribing to list:', klaviyoListId);
+      console.log('📧 Subscription data:', JSON.stringify(listSubscriptionData, null, 2));
+
+      const listResponse = await axios.post(
         `https://a.klaviyo.com/api/lists/${klaviyoListId}/relationships/profiles/`,
-        emailSubscriptionData,
+        listSubscriptionData,
         {
           headers: {
             'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
@@ -1289,16 +1290,16 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
-      console.log('📧 Email subscription response status:', emailResponse.status);
-      console.log('📧 Email subscription response data:', JSON.stringify(emailResponse.data, null, 2));
+      console.log('📧 List subscription response status:', listResponse.status);
+      console.log('📧 List subscription response data:', JSON.stringify(listResponse.data, null, 2));
 
-      if (emailResponse.status === 200 || emailResponse.status === 201 || emailResponse.status === 204) {
-        console.log(`✅ Newsletter subscription successful (simple): ${email} -> List: ${klaviyoListId}`);
+      if (listResponse.status >= 200 && listResponse.status < 300) {
+        console.log(`✅ Newsletter subscription successful: ${email} -> List: ${klaviyoListId}`);
         return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
       }
-    } catch (simpleError) {
-      console.log('📧 Simple subscription failed with status:', simpleError.response?.status);
-      console.log('📧 Simple subscription error data:', JSON.stringify(simpleError.response?.data, null, 2));
+    } catch (listError) {
+      console.log('📧 List subscription failed with status:', listError.response?.status);
+      console.log('📧 List subscription error data:', JSON.stringify(listError.response?.data, null, 2));
       console.log('📧 Trying legacy method...');
     }
 
