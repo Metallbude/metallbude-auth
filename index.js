@@ -1216,7 +1216,12 @@ app.post('/newsletter/subscribe', async (req, res) => {
 
     // Use Klaviyo private key from environment
     const klaviyoPrivateKey = process.env.KLAVIYO_PRIVATE_KEY;
+    // Use the correct List ID from your app config
     const klaviyoListId = process.env.KLAVIYO_LIST_ID || 'XebiKL';
+
+    console.log(`📧 Using Klaviyo List ID: ${klaviyoListId}`);
+    console.log(`📧 Klaviyo Private Key configured: ${klaviyoPrivateKey ? 'Yes' : 'No'}`);
+    console.log(`📧 Subscribing ${email} to list ${klaviyoListId}`);
 
     if (!klaviyoPrivateKey) {
       console.error('❌ KLAVIYO_PRIVATE_KEY not configured');
