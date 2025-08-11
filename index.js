@@ -1223,48 +1223,27 @@ app.post('/newsletter/subscribe', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Newsletter service not configured' });
     }
 
-    // Create profile and subscribe to list
-    const profileData = {
-      data: {
-        type: 'profile',
-        attributes: {
-          email: email,
-          first_name: first_name || '',
-          last_name: last_name || '',
-          properties: {
-            source: source || 'mobile_app',
-            platform: platform || 'flutter',
-            signup_timestamp: new Date().toISOString(),
-            ...properties
-          }
-        }
-      }
-    };
+    console.log(`📧 Subscribing email: ${email} to list: ${klaviyoListId}`);
 
-    // Create/update profile
-    const profileResponse = await axios.post(
-      'https://a.klaviyo.com/api/profiles/',
-      profileData,
-      {
-        headers: {
-          'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
-          'Content-Type': 'application/json',
-          'revision': '2024-10-15'
-        }
-      }
-    );
-
-    const profileId = profileResponse.data.data.id;
-
-    // Add to list
-    const listSubscription = {
+    // Directly subscribe to list using the newer API format
+    const subscriptionData = {
       data: {
         type: 'profile-subscription-bulk-create-job',
         attributes: {
           profiles: {
             data: [{
               type: 'profile',
-              id: profileId
+              attributes: {
+                email: email,
+                first_name: first_name || '',
+                last_name: last_name || '',
+                properties: {
+                  source: source || 'mobile_app',
+                  platform: platform || 'flutter',
+                  signup_timestamp: new Date().toISOString(),
+                  ...properties
+                }
+              }
             }]
           }
         },
@@ -1279,9 +1258,11 @@ app.post('/newsletter/subscribe', async (req, res) => {
       }
     };
 
-    await axios.post(
+    console.log('📧 Klaviyo subscription data:', JSON.stringify(subscriptionData, null, 2));
+
+    const response = await axios.post(
       'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
-      listSubscription,
+      subscriptionData,
       {
         headers: {
           'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
