@@ -1254,31 +1254,32 @@ app.post('/newsletter/subscribe', async (req, res) => {
 
     // Try multiple methods like the original working code
     
-    // Method 1: Create or update profile first, then subscribe to list
+    // Method 1: Simple list subscription using email (most reliable)
     try {
-      // Step 1: Create/update the profile
-      const profileData = {
-        data: {
-          type: 'profile',
-          attributes: {
-            email: email,
-            properties: {
-              source: source || 'mobile_app',
-              platform: platform || 'flutter',
-              signup_timestamp: new Date().toISOString(),
-              ...(first_name && { first_name }),
-              ...(last_name && { last_name }),
-              ...properties
+      console.log('📧 Method 1: Simple email subscription to list...');
+      
+      const emailSubscriptionData = {
+        data: [
+          {
+            type: 'profile',
+            attributes: {
+              email: email,
+              properties: {
+                source: source || 'mobile_app',
+                platform: platform || 'flutter',
+                signup_timestamp: new Date().toISOString(),
+                ...(first_name && { first_name }),
+                ...(last_name && { last_name }),
+                ...properties
+              }
             }
           }
-        }
+        ]
       };
 
-      console.log('📧 Step 1: Creating/updating profile...');
-      
-      const profileResponse = await axios.post(
-        'https://a.klaviyo.com/api/profiles/',
-        profileData,
+      const emailResponse = await axios.post(
+        `https://a.klaviyo.com/api/lists/${klaviyoListId}/relationships/profiles/`,
+        emailSubscriptionData,
         {
           headers: {
             'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
@@ -1288,59 +1289,16 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
-      const profileId = profileResponse.data?.data?.id;
-      console.log('📧 Profile created/updated with ID:', profileId);
+      console.log('📧 Email subscription response status:', emailResponse.status);
+      console.log('📧 Email subscription response data:', JSON.stringify(emailResponse.data, null, 2));
 
-      if (profileId) {
-        // Step 2: Subscribe the profile to the list
-        console.log('📧 Step 2: Subscribing profile to list...');
-        
-        const subscriptionData = {
-          data: {
-            type: 'profile-subscription-bulk-create-job',
-            attributes: {
-              profiles: {
-                data: [{
-                  type: 'profile',
-                  id: profileId
-                }]
-              },
-              historical_import: false
-            },
-            relationships: {
-              list: {
-                data: {
-                  type: 'list',
-                  id: klaviyoListId
-                }
-              }
-            }
-          }
-        };
-
-        const subscriptionResponse = await axios.post(
-          'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
-          subscriptionData,
-          {
-            headers: {
-              'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
-              'Content-Type': 'application/json',
-              'revision': '2024-10-15'
-            }
-          }
-        );
-
-        console.log('📧 Subscription response status:', subscriptionResponse.status);
-        console.log('📧 Subscription response data:', JSON.stringify(subscriptionResponse.data, null, 2));
-
-        if (subscriptionResponse.status === 202) {
-          console.log(`✅ Newsletter subscription successful: ${email} -> List: ${klaviyoListId}`);
-          return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
-        }
+      if (emailResponse.status === 200 || emailResponse.status === 201 || emailResponse.status === 204) {
+        console.log(`✅ Newsletter subscription successful (simple): ${email} -> List: ${klaviyoListId}`);
+        return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
       }
-    } catch (modernError) {
-      console.log('📧 Modern API failed with status:', modernError.response?.status);
-      console.log('📧 Modern API error data:', JSON.stringify(modernError.response?.data, null, 2));
+    } catch (simpleError) {
+      console.log('📧 Simple subscription failed with status:', simpleError.response?.status);
+      console.log('📧 Simple subscription error data:', JSON.stringify(simpleError.response?.data, null, 2));
       console.log('📧 Trying legacy method...');
     }
 
