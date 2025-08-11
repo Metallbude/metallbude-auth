@@ -1254,11 +1254,103 @@ app.post('/newsletter/subscribe', async (req, res) => {
 
     // Try multiple methods like the original working code
     
-    // Method 1: Standard API
+    // Method 1: Create or update profile first, then subscribe to list
     try {
-      const subscriptionData = {
+      // Step 1: Create/update the profile
+      const profileData = {
         data: {
-          type: 'profile-subscription-bulk-create-job',
+          type: 'profile',
+          attributes: {
+            email: email,
+            properties: {
+              source: source || 'mobile_app',
+              platform: platform || 'flutter',
+              signup_timestamp: new Date().toISOString(),
+              ...(first_name && { first_name }),
+              ...(last_name && { last_name }),
+              ...properties
+            }
+          }
+        }
+      };
+
+      console.log('📧 Step 1: Creating/updating profile...');
+      
+      const profileResponse = await axios.post(
+        'https://a.klaviyo.com/api/profiles/',
+        profileData,
+        {
+          headers: {
+            'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
+            'Content-Type': 'application/json',
+            'revision': '2024-10-15'
+          }
+        }
+      );
+
+      const profileId = profileResponse.data?.data?.id;
+      console.log('📧 Profile created/updated with ID:', profileId);
+
+      if (profileId) {
+        // Step 2: Subscribe the profile to the list
+        console.log('📧 Step 2: Subscribing profile to list...');
+        
+        const subscriptionData = {
+          data: {
+            type: 'profile-subscription-bulk-create-job',
+            attributes: {
+              profiles: {
+                data: [{
+                  type: 'profile',
+                  id: profileId
+                }]
+              },
+              historical_import: false
+            },
+            relationships: {
+              list: {
+                data: {
+                  type: 'list',
+                  id: klaviyoListId
+                }
+              }
+            }
+          }
+        };
+
+        const subscriptionResponse = await axios.post(
+          'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
+          subscriptionData,
+          {
+            headers: {
+              'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
+              'Content-Type': 'application/json',
+              'revision': '2024-10-15'
+            }
+          }
+        );
+
+        console.log('📧 Subscription response status:', subscriptionResponse.status);
+        console.log('📧 Subscription response data:', JSON.stringify(subscriptionResponse.data, null, 2));
+
+        if (subscriptionResponse.status === 202) {
+          console.log(`✅ Newsletter subscription successful: ${email} -> List: ${klaviyoListId}`);
+          return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
+        }
+      }
+    } catch (modernError) {
+      console.log('📧 Modern API failed with status:', modernError.response?.status);
+      console.log('📧 Modern API error data:', JSON.stringify(modernError.response?.data, null, 2));
+      console.log('📧 Trying legacy method...');
+    }
+
+    // Method 2: Direct list subscription API (alternative approach)
+    try {
+      console.log('📧 Trying direct list subscription API...');
+      
+      const directSubscriptionData = {
+        data: {
+          type: 'subscription',
           attributes: {
             profiles: {
               data: [{
@@ -1275,8 +1367,7 @@ app.post('/newsletter/subscribe', async (req, res) => {
                   }
                 }
               }]
-            },
-            historical_import: false
+            }
           },
           relationships: {
             list: {
@@ -1289,11 +1380,9 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       };
 
-      console.log('📧 Sending to Klaviyo API:', JSON.stringify(subscriptionData, null, 2));
-
-      const response = await axios.post(
-        'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
-        subscriptionData,
+      const directResponse = await axios.post(
+        `https://a.klaviyo.com/api/lists/${klaviyoListId}/relationships/profiles/`,
+        directSubscriptionData,
         {
           headers: {
             'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
@@ -1303,51 +1392,16 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
-      console.log('📧 Klaviyo API response status:', response.status);
-      console.log('📧 Klaviyo API response data:', JSON.stringify(response.data, null, 2));
+      console.log('📧 Direct subscription response status:', directResponse.status);
+      console.log('📧 Direct subscription response data:', JSON.stringify(directResponse.data, null, 2));
 
-      if (response.status === 202) {
-        console.log(`✅ Newsletter subscription successful: ${email}`);
+      if (directResponse.status === 200 || directResponse.status === 201 || directResponse.status === 204) {
+        console.log(`✅ Newsletter subscription successful (direct): ${email} -> List: ${klaviyoListId}`);
         return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
       }
-    } catch (standardError) {
-      console.log('📧 Standard API failed with status:', standardError.response?.status);
-      console.log('📧 Standard API error data:', JSON.stringify(standardError.response?.data, null, 2));
-      console.log('📧 Trying legacy method...');
-    }
-
-    // Method 2: Legacy form submission (like your working code)
-    try {
-      console.log('📧 Trying legacy form submission method...');
-      
-      const legacyResponse = await axios.post(
-        'https://manage.kmail-lists.com/ajax/subscriptions/subscribe',
-        new URLSearchParams({
-          'g': klaviyoListId,
-          'email': email,
-          '$fields': 'email',
-          '$source': source || 'Metallbude Mobile App',
-          'platform': platform || 'Flutter',
-          'device_type': 'Mobile',
-          'signup_location': 'Sidebar Newsletter',
-        }),
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          }
-        }
-      );
-
-      console.log('📧 Legacy API response status:', legacyResponse.status);
-      console.log('📧 Legacy API response data:', JSON.stringify(legacyResponse.data, null, 2));
-
-      if (legacyResponse.status === 200) {
-        console.log(`✅ Newsletter subscription successful (legacy): ${email}`);
-        return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
-      }
-    } catch (legacyError) {
-      console.log('📧 Legacy API failed with status:', legacyError.response?.status);
-      console.log('📧 Legacy API error data:', JSON.stringify(legacyError.response?.data, null, 2));
+    } catch (directError) {
+      console.log('📧 Direct subscription failed with status:', directError.response?.status);
+      console.log('📧 Direct subscription error data:', JSON.stringify(directError.response?.data, null, 2));
     }
 
     console.log(`❌ All subscription methods failed for: ${email}`);
