@@ -1205,6 +1205,69 @@ app.get('/authorize', async (req, res) => {
 // SECURE API ENDPOINTS (NO SECRETS IN APP)
 // ============================================================================
 
+// Test endpoint to verify Klaviyo credentials
+app.get('/test/klaviyo', async (req, res) => {
+  try {
+    console.log('🧪 Testing Klaviyo credentials...');
+    
+    const klaviyoPrivateKey = process.env.KLAVIYO_PRIVATE_KEY;
+    const klaviyoListId = process.env.KLAVIYO_LIST_ID || 'XebiKL';
+    
+    if (!klaviyoPrivateKey || !klaviyoListId) {
+      return res.json({ 
+        success: false, 
+        error: 'Missing credentials',
+        hasPrivateKey: !!klaviyoPrivateKey,
+        hasListId: !!klaviyoListId
+      });
+    }
+    
+    // Test 1: Get the list to verify it exists
+    console.log('🧪 Test 1: Getting list info...');
+    const listResponse = await axios.get(
+      `https://a.klaviyo.com/api/lists/${klaviyoListId}`,
+      {
+        headers: {
+          'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
+          'revision': '2024-10-15'
+        }
+      }
+    );
+    
+    console.log('🧪 List response:', listResponse.status, listResponse.data?.data?.attributes?.name);
+    
+    // Test 2: Try to get profiles in the list
+    console.log('🧪 Test 2: Getting profiles in list...');
+    const profilesResponse = await axios.get(
+      `https://a.klaviyo.com/api/lists/${klaviyoListId}/profiles/`,
+      {
+        headers: {
+          'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
+          'revision': '2024-10-15'
+        }
+      }
+    );
+    
+    console.log('🧪 Profiles response:', profilesResponse.status, 'Count:', profilesResponse.data?.data?.length);
+    
+    res.json({ 
+      success: true, 
+      listName: listResponse.data?.data?.attributes?.name,
+      listId: klaviyoListId,
+      profileCount: profilesResponse.data?.data?.length || 0
+    });
+    
+  } catch (error) {
+    console.error('🧪 Klaviyo test error:', error.response?.status, error.response?.data);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      statusCode: error.response?.status,
+      errorData: error.response?.data
+    });
+  }
+});
+
 // Newsletter endpoints (Klaviyo proxy)
 app.post('/newsletter/subscribe', async (req, res) => {
   try {
