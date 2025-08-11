@@ -1201,406 +1201,6 @@ app.get('/authorize', async (req, res) => {
   `);
 });
 
-// ============================================================================
-// SECURE API ENDPOINTS (NO SECRETS IN APP)
-// ============================================================================
-
-// Newsletter endpoints (Klaviyo proxy)
-app.post('/newsletter/subscribe', async (req, res) => {
-  try {
-    const { email, first_name, last_name, source, platform, properties } = req.body;
-
-    if (!email) {
-      return res.status(400).json({ success: false, error: 'Email required' });
-    }
-
-    // Use Klaviyo private key from environment
-    const klaviyoPrivateKey = process.env.KLAVIYO_PRIVATE_KEY;
-    const klaviyoListId = process.env.KLAVIYO_LIST_ID || 'XebiKL';
-
-    if (!klaviyoPrivateKey) {
-      console.error('❌ KLAVIYO_PRIVATE_KEY not configured');
-      return res.status(500).json({ success: false, error: 'Newsletter service not configured' });
-    }
-
-    // Create profile and subscribe to list
-    const profileData = {
-      data: {
-        type: 'profile',
-        attributes: {
-          email: email,
-          first_name: first_name || '',
-          last_name: last_name || '',
-          properties: {
-            source: source || 'mobile_app',
-            platform: platform || 'flutter',
-            signup_timestamp: new Date().toISOString(),
-            ...properties
-          }
-        }
-      }
-    };
-
-    // Create/update profile
-    const profileResponse = await axios.post(
-      'https://a.klaviyo.com/api/profiles/',
-      profileData,
-      {
-        headers: {
-          'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
-          'Content-Type': 'application/json',
-          'revision': '2024-10-15'
-        }
-      }
-    );
-
-    const profileId = profileResponse.data.data.id;
-
-    // Add to list
-    const listSubscription = {
-      data: {
-        type: 'profile-subscription-bulk-create-job',
-        attributes: {
-          profiles: {
-            data: [{
-              type: 'profile',
-              id: profileId
-            }]
-          }
-        },
-        relationships: {
-          list: {
-            data: {
-              type: 'list',
-              id: klaviyoListId
-            }
-          }
-        }
-      }
-    };
-
-    await axios.post(
-      'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/',
-      listSubscription,
-      {
-        headers: {
-          'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
-          'Content-Type': 'application/json',
-          'revision': '2024-10-15'
-        }
-      }
-    );
-
-    console.log(`✅ Newsletter subscription successful: ${email}`);
-    res.json({ success: true, message: 'Successfully subscribed to newsletter' });
-
-  } catch (error) {
-    console.error('❌ Newsletter subscription error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to subscribe to newsletter',
-      details: error.response?.data?.errors || error.message
-    });
-  }
-});
-
-app.post('/newsletter/track-event', async (req, res) => {
-  try {
-    const { email, event_name, properties } = req.body;
-
-    if (!email || !event_name) {
-      return res.status(400).json({ success: false, error: 'Email and event_name required' });
-    }
-
-    const klaviyoPrivateKey = process.env.KLAVIYO_PRIVATE_KEY;
-
-    if (!klaviyoPrivateKey) {
-      console.error('❌ KLAVIYO_PRIVATE_KEY not configured');
-      return res.status(500).json({ success: false, error: 'Tracking service not configured' });
-    }
-
-    const eventData = {
-      data: {
-        type: 'event',
-        attributes: {
-          profile: {
-            email: email
-          },
-          metric: {
-            name: event_name
-          },
-          properties: {
-            timestamp: new Date().toISOString(),
-            ...properties
-          }
-        }
-      }
-    };
-
-    await axios.post(
-      'https://a.klaviyo.com/api/events/',
-      eventData,
-      {
-        headers: {
-          'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
-          'Content-Type': 'application/json',
-          'revision': '2024-10-15'
-        }
-      }
-    );
-
-    console.log(`✅ Event tracked: ${event_name} for ${email}`);
-    res.json({ success: true, message: 'Event tracked successfully' });
-
-  } catch (error) {
-    console.error('❌ Event tracking error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to track event',
-      details: error.response?.data?.errors || error.message
-    });
-  }
-});
-
-// Configuration endpoints (public, non-sensitive values)
-app.get('/config/storefront-token', (req, res) => {
-  try {
-    const token = config.storefrontToken;
-    
-    if (!token) {
-      console.error('❌ SHOPIFY_STOREFRONT_TOKEN not configured');
-      return res.status(500).json({ 
-        success: false, 
-        error: 'Storefront token not configured' 
-      });
-    }
-
-    res.json({ 
-      success: true, 
-      storefrontToken: token,
-      shopUrl: config.apiUrl
-    });
-
-  } catch (error) {
-    console.error('❌ Config endpoint error:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to get configuration'
-    });
-  }
-});
-
-// Reviews endpoints (Judge.me proxy)
-app.get('/reviews', async (req, res) => {
-  try {
-    const { product, page = 1, per_page = 20, sort_by = 'date', order = 'desc' } = req.query;
-
-    if (!product) {
-      return res.status(400).json({ success: false, error: 'Product ID required' });
-    }
-
-    const judgemeToken = process.env.JUDGEME_API_TOKEN;
-    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
-
-    if (!judgemeToken) {
-      console.error('❌ JUDGEME_API_TOKEN not configured');
-      return res.status(500).json({ success: false, error: 'Reviews service not configured' });
-    }
-
-    const response = await axios.get('https://judge.me/api/v1/reviews', {
-      params: {
-        api_token: judgemeToken,
-        shop_domain: shopDomain,
-        product_id: product,
-        page: page,
-        per_page: per_page,
-        sort_by: sort_by,
-        order: order
-      }
-    });
-
-    res.json({
-      success: true,
-      reviews: response.data.reviews,
-      pagination: {
-        current_page: response.data.current_page,
-        per_page: response.data.per_page,
-        total_pages: response.data.total_pages,
-        total_count: response.data.total_count
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Reviews fetch error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch reviews',
-      details: error.response?.data || error.message
-    });
-  }
-});
-
-app.get('/reviews/stats', async (req, res) => {
-  try {
-    const { product } = req.query;
-
-    if (!product) {
-      return res.status(400).json({ success: false, error: 'Product ID required' });
-    }
-
-    const judgemeToken = process.env.JUDGEME_API_TOKEN;
-    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
-
-    if (!judgemeToken) {
-      console.error('❌ JUDGEME_API_TOKEN not configured');
-      return res.status(500).json({ success: false, error: 'Reviews service not configured' });
-    }
-
-    const response = await axios.get('https://judge.me/api/v1/reviews', {
-      params: {
-        api_token: judgemeToken,
-        shop_domain: shopDomain,
-        product_id: product,
-        per_page: 1  // Just get stats, not all reviews
-      }
-    });
-
-    res.json({
-      success: true,
-      stats: {
-        total_reviews: response.data.total_count,
-        average_rating: response.data.average_rating,
-        rating_distribution: response.data.rating_distribution
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Review stats error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch review stats',
-      details: error.response?.data || error.message
-    });
-  }
-});
-
-app.post('/reviews/submit', async (req, res) => {
-  try {
-    const { 
-      product_id, 
-      customer_email, 
-      customer_name, 
-      rating, 
-      title, 
-      body, 
-      image_urls = [] 
-    } = req.body;
-
-    if (!product_id || !customer_email || !customer_name || !rating || !title || !body) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing required fields: product_id, customer_email, customer_name, rating, title, body' 
-      });
-    }
-
-    const judgemeToken = process.env.JUDGEME_API_TOKEN;
-    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
-
-    if (!judgemeToken) {
-      console.error('❌ JUDGEME_API_TOKEN not configured');
-      return res.status(500).json({ success: false, error: 'Reviews service not configured' });
-    }
-
-    const reviewData = {
-      api_token: judgemeToken,
-      shop_domain: shopDomain,
-      platform: 'general',
-      id: product_id,
-      email: customer_email,
-      name: customer_name,
-      rating: rating,
-      title: title,
-      body: body,
-      picture_urls: image_urls.join(',')
-    };
-
-    const response = await axios.post('https://judge.me/api/v1/reviews', reviewData);
-
-    console.log(`✅ Review submitted for product ${product_id} by ${customer_email}`);
-    res.json({ 
-      success: true, 
-      message: 'Review submitted successfully',
-      review_id: response.data.review?.id
-    });
-
-  } catch (error) {
-    console.error('❌ Review submission error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to submit review',
-      details: error.response?.data || error.message
-    });
-  }
-});
-
-// Email endpoints (MailerSend proxy)
-app.post('/email/send-code', async (req, res) => {
-  try {
-    const { email, code, type = 'verification' } = req.body;
-
-    if (!email || !code) {
-      return res.status(400).json({ success: false, error: 'Email and code required' });
-    }
-
-    const mailerSendKey = process.env.MAILERSEND_API_KEY;
-
-    if (!mailerSendKey) {
-      console.error('❌ MAILERSEND_API_KEY not configured');
-      return res.status(500).json({ success: false, error: 'Email service not configured' });
-    }
-
-    const emailData = {
-      from: {
-        email: 'noreply@metallbude.com',
-        name: 'Metallbude'
-      },
-      to: [{
-        email: email
-      }],
-      subject: type === 'verification' ? 'Dein Verifizierungscode' : 'Dein Code',
-      html: `
-        <h2>Dein ${type === 'verification' ? 'Verifizierungs' : ''}code</h2>
-        <p>Dein Code lautet: <strong>${code}</strong></p>
-        <p>Dieser Code ist 10 Minuten gültig.</p>
-        <p>Falls du diesen Code nicht angefordert hast, ignoriere diese E-Mail.</p>
-      `,
-      text: `Dein ${type === 'verification' ? 'Verifizierungs' : ''}code lautet: ${code}. Dieser Code ist 10 Minuten gültig.`
-    };
-
-    await axios.post('https://api.mailersend.com/v1/email', emailData, {
-      headers: {
-        'Authorization': `Bearer ${mailerSendKey}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    console.log(`✅ ${type} code sent to ${email}`);
-    res.json({ success: true, message: `${type} code sent successfully` });
-
-  } catch (error) {
-    console.error('❌ Email sending error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to send email',
-      details: error.response?.data || error.message
-    });
-  }
-});
-
-// ============================================================================
-// END SECURE API ENDPOINTS
-// ============================================================================
-
 // Request code endpoint for web OAuth flow
 app.post('/auth/request-code-web', async (req, res) => {
   const { email, oauthSessionId } = req.body;
@@ -4289,16 +3889,19 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         const wishlistExists = await wishlistService.wishlistExists(req.session.customerId);
         
         if (!wishlistExists) {
+          console.log(`🔍 [DEBUG] No Firebase wishlist document found, will sync from Shopify if available`);
           shouldSyncFromShopify = true;
         }
 
         // Try Firebase first
+        console.log(`🔍 [DEBUG] Attempting Firebase lookup for customer: ${req.session.customerId}, email: ${req.session.email}`);
         wishlistItems = await wishlistService.getWishlist(
           req.session.customerId, 
           req.session.email
         );
         wishlistProductIds = wishlistItems.map(item => item.productId);
         console.log(`🔥 Firebase returned ${wishlistItems.length} wishlist items`);
+        console.log(`🔍 [DEBUG] Firebase wishlist items with variant info:`, wishlistItems);
       } catch (firebaseError) {
         console.error('❌ Firebase wishlist fetch failed, falling back to Shopify:', firebaseError.message);
         useFirebase = false;
@@ -4380,8 +3983,10 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       }
     }
 
+    console.log(`🔍 [DEBUG] Final wishlistProductIds before product lookup:`, wishlistProductIds);
 
     if (wishlistProductIds.length === 0) {
+      console.log(`🔍 [DEBUG] No wishlist items found, returning empty array`);
       return res.json({ wishlist: [] });
     }
 
@@ -4468,9 +4073,12 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       }
     );
 
+    console.log(`🔍 [DEBUG] Shopify products query response status:`, productsResponse.status);
     // Avoid logging massive response data that can cause JSON corruption
+    console.log(`🔍 [DEBUG] Shopify products query result: ${productsResponse.data?.data?.nodes?.length || 0} products returned`);
 
     const products = productsResponse.data.data?.nodes || [];
+    console.log(`🔍 [DEBUG] Extracted products:`, products.length, 'products');
     
     const wishlist = products.filter(product => product !== null).map(product => {
       // Find the matching wishlist item with variant information
@@ -4507,6 +4115,7 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         // Find the matching variant by ID first
         if (wishlistItem.variantId) {
           selectedVariant = processedVariants.find(v => v.id === wishlistItem.variantId);
+          console.log(`🔍 [VARIANT] Searching for variant ID ${wishlistItem.variantId} in:`, processedVariants.map(v => v.id));
         }
         
         // If no variant ID match, try to match by selectedOptions
@@ -4522,6 +4131,7 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
               variantOptions[key] === value
             );
           });
+          console.log(`🔍 [VARIANT] Searching by selectedOptions:`, wishlistItem.selectedOptions);
         }
         
         if (selectedVariant) {
@@ -10152,6 +9762,7 @@ async function syncFirebaseToPublicStorage(customerId) {
         
         // Try simple format first (this is what gets stored when adding from Flutter)
         try {
+            console.log(`🔍 [SYNC] Trying simple customer ID format: ${customerId}`);
             // Note: For sync operations, we use a customer-specific placeholder email
             // since sync functions don't have access to session data with real customer emails
             firebaseItems = await wishlistService.getWishlist(customerId, `sync-${customerId}@metallbude.internal`);
@@ -10167,6 +9778,7 @@ async function syncFirebaseToPublicStorage(customerId) {
         if (firebaseItems.length === 0) {
             try {
                 const fullCustomerId = `gid://shopify/Customer/${customerId}`;
+                console.log(`🔍 [SYNC] Trying full customer ID format: ${fullCustomerId}`);
                 firebaseItems = await wishlistService.getWishlist(fullCustomerId, `sync-${customerId}@metallbude.internal`);
                 if (firebaseItems.length > 0) {
                     foundFormat = 'full';
@@ -10394,18 +10006,22 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
             // Extract Shopify customer ID from the productId or customerId if it's a Shopify ID
             let shopifyCustomerId = null;
             
+            console.log(`🔍 [SYNC] Attempting to map session customer ID: "${customerId}"`);
             
             // Method 1: Check if customerId is already a Shopify customer ID format
             if (customerId && customerId.includes('gid://shopify/Customer/')) {
                 shopifyCustomerId = customerId.replace('gid://shopify/Customer/', '');
+                console.log(`🔍 [SYNC] Extracted from GID: ${shopifyCustomerId}`);
             } else if (customerId && /^\d+$/.test(customerId)) {
                 // Method 2: If it's just numeric, it might be a Shopify customer ID
                 shopifyCustomerId = customerId;
+                console.log(`🔍 [SYNC] Using numeric ID as Shopify customer ID: ${shopifyCustomerId}`);
             }
             
             // Method 3: Try to extract from session metadata (check if session has Shopify customer info)
             if (!shopifyCustomerId && req.session && req.session.shopifyCustomerId) {
                 shopifyCustomerId = req.session.shopifyCustomerId;
+                console.log(`🔍 [SYNC] Found in session metadata: ${shopifyCustomerId}`);
             }
             
             if (shopifyCustomerId) {
@@ -10567,15 +10183,20 @@ app.get('/api/public/wishlist/items', async (req, res) => {
         let customerWishlist = [];
 
         // Always try to sync from Firebase first to ensure we have the latest data
+        console.log(`🔍 [DEBUG] Firebase enabled: ${firebaseEnabled}, wishlistService available: ${!!wishlistService}`);
         if (firebaseEnabled && wishlistService) {
             try {
                 console.log(`[SHOPIFY] Syncing Firebase data for customer: ${customerId}`);
                 const syncSuccess = await syncFirebaseToPublicStorage(customerId);
+                console.log(`🔍 [DEBUG] Sync success: ${syncSuccess}`);
                 
                 if (syncSuccess) {
                     console.log(`[SHOPIFY] Successfully synced Firebase data, loading from public storage`);
                     const wishlistData = await loadWishlistData();
+                    console.log(`🔍 [DEBUG] Loaded wishlist data keys: ${Object.keys(wishlistData)}`);
                     customerWishlist = wishlistData[customerId] || [];
+                    console.log(`🔍 [DEBUG] Customer wishlist items: ${customerWishlist.length}`);
+                    console.log(`🔍 [DEBUG] First item:`, customerWishlist[0]);
                     console.log(`[SHOPIFY] Found ${customerWishlist.length} items after Firebase sync`);
                 } else {
                     console.log(`[SHOPIFY] Firebase sync failed, trying direct Firebase lookup`);
@@ -10740,6 +10361,7 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                                 // Find the matching variant by ID first
                                 if (wishlistItem.variantId) {
                                     selectedVariant = processedVariants.find(v => v.id === wishlistItem.variantId);
+                                    console.log(`🔍 [VARIANT] Searching for variant ID ${wishlistItem.variantId} in:`, processedVariants.map(v => v.id));
                                 }
                                 
                                 // If no variant ID match, try to match by selectedOptions
@@ -10755,6 +10377,7 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                                             variantOptions[key] === value
                                         );
                                     });
+                                    console.log(`🔍 [VARIANT] Searching by selectedOptions:`, wishlistItem.selectedOptions);
                                 }
                                 
                                 if (selectedVariant) {
@@ -10911,6 +10534,7 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                 
                 // ✅ NEW: Get real customer email from Shopify for proper identification
                 const customerEmail = await getRealCustomerEmail(customerId);
+                console.log(`🔍 [EMAIL_DEBUG] Customer ID: ${customerId}, Retrieved email: ${customerEmail}`);
                 
                 // Prepare enhanced product data for Firebase
                 const productData = {
