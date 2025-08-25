@@ -1055,7 +1055,7 @@ async function getAdminApiReturns(customerEmail) {
     const customerReturn = {
       id: returnData.id,
       orderId: returnData.order?.id || '',
-      orderNumber: returnData.order?.name || '',
+      orderNumber: (returnData.order?.name || '').replace('#', ''), // Remove # from order name
       items: processedItems,
       reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
       additionalNotes: processedItems[0]?.customerNote || '',
