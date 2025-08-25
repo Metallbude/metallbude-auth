@@ -25,41 +25,6 @@ try {
   // Don't throw error - continue with fallback
 }
 
-// DEBUG: Map return items to fulfillmentLineItemIds using Admin API
-app.get('/debug/returns/map', authenticateAppToken, async (req, res) => {
-  try {
-    const { orderId } = req.query;
-    if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
-    if (!config.adminToken) return res.status(400).json({ success: false, error: 'Admin token not configured' });
-
-    const adminGraphql = async (query, variables) => {
-      const r = await axios.post(config.adminApiUrl, { query, variables }, {
-        headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.adminToken }
-      });
-      return r.data;
-    };
-
-    const orderQuery = `query orderFulfillments($orderId: ID!) {\n  order(id: $orderId) {\n    id\n    name\n    fulfillments(first:50) {\n      nodes {\n        id\n        fulfillmentLineItems(first:50) {\n          edges { node { id quantity lineItem { id title } } }\n        }\n      }\n    }\n  }\n}`;
-
-    const orderResp = await adminGraphql(orderQuery, { orderId });
-    if (!orderResp || orderResp.errors) return res.status(502).json({ success: false, error: 'Admin API error', details: orderResp });
-
-    const fulfillments = orderResp.data.order.fulfillments.nodes || [];
-    const items = [];
-    for (const f of fulfillments) {
-      const flis = f.fulfillmentLineItems.edges || [];
-      for (const e of flis) {
-        if (e.node) items.push({ fulfillmentLineItemId: e.node.id, quantity: e.node.quantity, lineItemId: e.node.lineItem?.id, title: e.node.lineItem?.title });
-      }
-    }
-
-    res.json({ success: true, items });
-  } catch (err) {
-    console.error('debug map error', err?.response?.data || err.message);
-    res.status(500).json({ success: false, error: err.message, details: err?.response?.data });
-  }
-});
-
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8406,119 +8371,20 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       orderNumber: returnRequest.orderNumber,
       itemCount: returnRequest.items?.length,
       reason: returnRequest.reason,
-      customer: customerEmail,
-      usingAdminApi: !!config.adminToken
+      customer: customerEmail
     });
 
-    // If we have an admin token configured on the server, use Admin GraphQL to create the return
-    if (config.adminToken) {
-      // helper for Admin GraphQL calls
-      const adminGraphql = async (query, variables) => {
-        try {
-          const resp = await axios.post(config.adminApiUrl, { query, variables }, {
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Shopify-Access-Token': config.adminToken,
-            },
-            timeout: 15000,
-          });
-          return resp.data;
-        } catch (err) {
-          console.error('❌ Admin GraphQL request failed', err?.response?.data || err.message);
-          throw err;
-        }
-      };
-
-      // 1) Fetch order fulfillments to map fulfillmentLineItemIds
-  const orderQuery = `query orderFulfillments($orderId: ID!) {\n  order(id: $orderId) {\n    id\n    name\n    fulfillments(first:50) {\n      nodes {\n        id\n        fulfillmentLineItems(first:50) {\n          edges {\n            node {\n              id\n              quantity\n              lineItem { id title variant { id } }\n            }\n          }\n        }\n      }\n    }\n  }\n}`;
-
-      const orderResp = await adminGraphql(orderQuery, { orderId: returnRequest.orderId });
-      if (!orderResp || orderResp.errors) {
-        console.error('❌ Failed to fetch order fulfillments', orderResp);
-        // Fall back to Customer Account API path if available
-        if (typeof submitShopifyReturnRequest === 'function') {
-          const fallback = await submitShopifyReturnRequest(returnRequest, customerToken);
-          if (fallback.success) {
-            return res.json({ success: true, returnId: fallback.shopifyReturnRequestId, status: fallback.status });
-          }
-          return res.status(502).json({ success: false, error: 'Failed to fetch order from Admin API', details: orderResp });
-        }
-        return res.status(502).json({ success: false, error: 'Failed to fetch order from Admin API' });
-      }
-
-      const fulfillments = (orderResp.data?.order?.fulfillments?.nodes) || [];
-      const fulfillmentItems = [];
-      for (const f of fulfillments) {
-        if (!f) continue;
-        const flis = f.fulfillmentLineItems?.edges || [];
-        for (const e of flis) if (e?.node) fulfillmentItems.push(e.node);
-      }
-
-      // Map client items to fulfillmentLineItemIds
-      const returnLineItemsPayload = [];
-      for (const it of returnRequest.items || []) {
-        // if client already supplied fulfillmentLineItemId, use it
-        if (it.fulfillmentLineItemId) {
-          returnLineItemsPayload.push({ fulfillmentLineItemId: it.fulfillmentLineItemId, quantity: it.quantity || 1, returnReason: mapReasonToShopify(returnRequest.reason) });
-          continue;
-        }
-        // otherwise match by order lineItem id
-        const match = fulfillmentItems.find(fi => fi.lineItem?.id === it.lineItemId || fi.lineItem?.id === it.orderLineItemId || fi.lineItem?.id === it.lineItemId);
-        if (match) {
-          returnLineItemsPayload.push({ fulfillmentLineItemId: match.id, quantity: it.quantity || 1, returnReason: mapReasonToShopify(returnRequest.reason) });
-        }
-      }
-
-      if (returnLineItemsPayload.length === 0) {
-        console.error('❌ Could not map any items to fulfillmentLineItemIds', returnRequest.items, fulfillmentItems);
-        return res.status(400).json({ success: false, error: 'Could not map return items to fulfillmentLineItemIds' });
-      }
-
-      const createReturnMutation = `mutation ReturnCreate($returnInput: ReturnInput!) {\n  returnCreate(returnInput: $returnInput) {\n    userErrors { field message }\n    return { id order { id } status totalQuantity }\n  }\n}`;
-
-      const returnInput = {
-        orderId: returnRequest.orderId,
-        returnLineItems: returnLineItemsPayload,
-        customerNote: returnRequest.note || '',
-        contact: { email: customerEmail || returnRequest.email || '' }
-      };
-
-      const createResp = await adminGraphql(createReturnMutation, { returnInput });
-      if (!createResp || createResp.errors) {
-        console.error('❌ returnCreate error', createResp);
-        return res.status(502).json({ success: false, error: 'Shopify Admin API error', details: createResp });
-      }
-
-      const payload = createResp.data.returnCreate;
-      if (payload.userErrors && payload.userErrors.length) {
-        console.error('❌ returnCreate userErrors', payload.userErrors);
-        return res.status(400).json({ success: false, error: 'Shopify returned userErrors', details: payload.userErrors });
-      }
-
-      const shopifyReturnId = payload.return.id;
-      const shopifyStatus = payload.return.status || 'OPEN';
-
-      const backendReturnData = {
-        ...returnRequest,
-        shopifyReturnRequestId: shopifyReturnId,
-        shopifyStatus,
-        customerEmail: customerEmail,
-        requestDate: new Date().toISOString(),
-        status: mapShopifyStatusToInternal(shopifyStatus) || 'pending'
-      };
-
-      // TODO: persist backendReturnData to DB if needed
-
-      console.log('✅ Return request submitted via Admin API:', shopifyReturnId);
-      return res.json({ success: true, returnId: shopifyReturnId, status: shopifyStatus, message: 'Return request created via Admin API' });
-    }
-
-    // If no admin token, fall back to Customer Account API path
+    // Step 1: Submit to Shopify using Customer Account API
     const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+    
     if (!shopifyResult.success) {
-      return res.status(400).json({ success: false, error: shopifyResult.error });
+      return res.status(400).json({
+        success: false,
+        error: shopifyResult.error
+      });
     }
 
+    // Step 2: Save to backend database for additional tracking
     const backendReturnData = {
       ...returnRequest,
       shopifyReturnRequestId: shopifyResult.shopifyReturnRequestId,
@@ -8531,12 +8397,21 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     // Here you would save to your database
     // await saveReturnToDatabase(backendReturnData);
 
-    console.log('✅ Return request submitted successfully via Customer Account API:', shopifyResult.shopifyReturnRequestId);
-    res.json({ success: true, returnId: shopifyResult.shopifyReturnRequestId, status: shopifyResult.status, message: 'Return request submitted successfully' });
+    console.log('✅ Return request submitted successfully:', shopifyResult.shopifyReturnRequestId);
+
+    res.json({
+      success: true,
+      returnId: shopifyResult.shopifyReturnRequestId,
+      status: shopifyResult.status,
+      message: 'Return request submitted successfully'
+    });
 
   } catch (error) {
     console.error('❌ Error processing return request:', error);
-    res.status(500).json({ success: false, error: 'Failed to process return request', details: error?.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process return request'
+    });
   }
 });
 
