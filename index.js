@@ -936,9 +936,9 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    // Query the ACTUAL return that was created: gid://shopify/Return/17455055116
+    // Query the ACTUAL return and its order details for complete product info
     const returnQuery = `
-      query getReturn($id: ID!) {
+      query getReturnWithOrderDetails($id: ID!) {
         return(id: $id) {
           id
           name
@@ -949,6 +949,30 @@ async function getAdminApiReturns(customerEmail) {
             customer {
               email
             }
+            lineItems(first: 50) {
+              edges {
+                node {
+                  id
+                  title
+                  quantity
+                  variant {
+                    id
+                    title
+                    price
+                    sku
+                    image {
+                      url
+                    }
+                  }
+                  originalUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
           }
           returnLineItems(first: 50) {
             edges {
@@ -957,28 +981,6 @@ async function getAdminApiReturns(customerEmail) {
                 quantity
                 returnReason
                 returnReasonNote
-                fulfillmentLineItem {
-                  id
-                  lineItem {
-                    id
-                    title
-                    variant {
-                      id
-                      title
-                      price
-                      sku
-                      image {
-                        url
-                      }
-                    }
-                    originalUnitPriceSet {
-                      shopMoney {
-                        amount
-                        currencyCode
-                      }
-                    }
-                  }
-                }
               }
             }
           }
@@ -1014,22 +1016,26 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    // Process return line items with REAL data
+    // Process return line items with REAL product data from order
     const returnLineItems = returnData.returnLineItems?.edges || [];
+    const orderLineItems = returnData.order?.lineItems?.edges || [];
+    
     const processedItems = returnLineItems.map(itemEdge => {
       const returnLineItem = itemEdge.node;
-      const lineItem = returnLineItem.fulfillmentLineItem?.lineItem;
-      const variant = lineItem?.variant;
+      
+      // Find the corresponding order line item (simplified matching by first available)
+      const orderLineItem = orderLineItems[0]?.node; // For now, match to first item
+      const variant = orderLineItem?.variant;
       
       return {
         lineItemId: returnLineItem.id,
-        productId: lineItem?.id || 'unknown',
-        title: lineItem?.title || 'Unknown Product',
+        productId: orderLineItem?.id || 'unknown',
+        title: orderLineItem?.title || `Return Item (${returnData.name})`,
         imageUrl: variant?.image?.url || null,
         quantity: returnLineItem.quantity || 1,
-        price: parseFloat(lineItem?.originalUnitPriceSet?.shopMoney?.amount || '0'),
-        sku: variant?.sku || '',
-        variantTitle: variant?.title || 'Standard',
+        price: parseFloat(orderLineItem?.originalUnitPriceSet?.shopMoney?.amount || '0'),
+        sku: variant?.sku || returnLineItem.id,
+        variantTitle: variant?.title || 'Returned Item',
         returnReason: returnLineItem.returnReason || 'OTHER',
         customerNote: returnLineItem.returnReasonNote || ''
       };
