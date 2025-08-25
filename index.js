@@ -8374,6 +8374,139 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       customer: customerEmail
     });
 
+    // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
+    if (config.adminToken) {
+      console.log('🚀 Using Admin API for return creation...');
+      
+      try {
+        // Step 1: Fetch order fulfillments via Admin API
+        const orderQuery = `
+          query getOrderFulfillments($orderId: ID!) {
+            order(id: $orderId) {
+              id
+              name
+              fulfillments {
+                id
+                status
+                fulfillmentLineItems(first: 50) {
+                  edges {
+                    node {
+                      id
+                      quantity
+                      lineItem {
+                        id
+                        title
+                        variant {
+                          id
+                          title
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }`;
+        
+        const orderResponse = await axios.post(config.adminApiUrl, {
+          query: orderQuery,
+          variables: { orderId: returnRequest.orderId }
+        }, {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (orderResponse.data.errors) {
+          throw new Error('GraphQL errors: ' + JSON.stringify(orderResponse.data.errors));
+        }
+
+        const order = orderResponse.data.data.order;
+        if (!order) {
+          throw new Error('Order not found');
+        }
+
+        // Step 2: Map items to fulfillmentLineItemIds
+        const returnLineItems = [];
+        for (const requestedItem of returnRequest.items) {
+          for (const fulfillment of order.fulfillments) {
+            for (const fulfillmentLineItemEdge of fulfillment.fulfillmentLineItems.edges) {
+              const fulfillmentLineItem = fulfillmentLineItemEdge.node;
+              if (fulfillmentLineItem.lineItem.id === requestedItem.lineItemId) {
+                returnLineItems.push({
+                  fulfillmentLineItemId: fulfillmentLineItem.id,
+                  quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity)
+                });
+              }
+            }
+          }
+        }
+
+        if (returnLineItems.length === 0) {
+          throw new Error('No matching fulfillment line items found for return');
+        }
+
+        // Step 3: Create return via Admin API returnCreate mutation
+        const returnMutation = `
+          mutation returnCreate($input: ReturnInput!) {
+            returnCreate(return: $input) {
+              return {
+                id
+                name
+                status
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }`;
+
+        const returnInput = {
+          orderId: returnRequest.orderId,
+          returnLineItems: returnLineItems,
+          notifyCustomer: true,
+          note: `Return reason: ${returnRequest.reason}. Notes: ${returnRequest.notes || 'No additional notes'}`
+        };
+
+        const returnResponse = await axios.post(config.adminApiUrl, {
+          query: returnMutation,
+          variables: { input: returnInput }
+        }, {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (returnResponse.data.errors) {
+          throw new Error('GraphQL errors: ' + JSON.stringify(returnResponse.data.errors));
+        }
+
+        const returnResult = returnResponse.data.data.returnCreate;
+        if (returnResult.userErrors && returnResult.userErrors.length > 0) {
+          throw new Error('Return creation failed: ' + returnResult.userErrors.map(e => e.message).join(', '));
+        }
+
+        const createdReturn = returnResult.return;
+        console.log('✅ Return created via Admin API:', createdReturn.id);
+
+        return res.json({
+          success: true,
+          returnId: createdReturn.id,
+          returnName: createdReturn.name,
+          status: createdReturn.status,
+          method: 'admin_api'
+        });
+
+      } catch (adminError) {
+        console.error('❌ Admin API failed:', adminError.message);
+        console.log('🔄 Falling back to Customer Account API...');
+        // Fall through to Customer Account API
+      }
+    }
+
     // Step 1: Submit to Shopify using Customer Account API
     const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
     
