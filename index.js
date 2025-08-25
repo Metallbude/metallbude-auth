@@ -8449,8 +8449,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
         // Step 3: Create return via Admin API returnCreate mutation
         const returnMutation = `
-          mutation returnCreate($input: ReturnInput!) {
-            returnCreate(return: $input) {
+          mutation returnCreate($returnInput: ReturnInput!) {
+            returnCreate(returnInput: $returnInput) {
               return {
                 id
                 name
@@ -8472,7 +8472,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
         const returnResponse = await axios.post(config.adminApiUrl, {
           query: returnMutation,
-          variables: { input: returnInput }
+          variables: { returnInput: returnInput }
         }, {
           headers: {
             'X-Shopify-Access-Token': config.adminToken,
