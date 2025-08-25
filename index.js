@@ -10918,82 +10918,205 @@ app.get('/api/public/wishlist/items', async (req, res) => {
 
         // ✅ CRITICAL FIX: Process wishlist items through Shopify GraphQL to get proper variant images
         // This ensures the public API returns the same rich data as the mobile API
-    if (customerWishlist.length > 0) {
-      // Robust Shopify enrichment with batching and strict error handling
-      const wishlistProductIds = customerWishlist.map(item => item.productId).filter(Boolean);
-      if (wishlistProductIds.length === 0) {
-        console.log('[SHOPIFY] No product IDs found in wishlist items, skipping Shopify lookup');
-      } else if (!config.adminToken) {
-        console.log('[SHOPIFY] Admin token not configured, skipping Shopify enrichment');
-      } else {
-        try {
-          console.log(`[SHOPIFY] Fetching product details from Shopify for ${wishlistProductIds.length} products (batched)`);
-          const batchSize = 50;
-          const productsMap = new Map();
-
-          // GraphQL node query to fetch product nodes by ids
-          const productsQuery = `query getWishlistProducts($productIds: [ID!]!) { nodes(ids: $productIds) { ... on Product { id title handle featuredImage { url altText } variants(first: 10) { edges { node { id title sku price compareAtPrice selectedOptions { name value } image { url } } } } priceRange { minVariantPrice { amount } } } } }`;
-
-          for (let i = 0; i < wishlistProductIds.length; i += batchSize) {
-            const chunk = wishlistProductIds.slice(i, i + batchSize);
+        if (customerWishlist.length > 0) {
             try {
-              const productsResponse = await axios.post(
-                config.adminApiUrl,
-                { query: productsQuery, variables: { productIds: chunk } },
-                { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' }, timeout: 10000 }
-              );
+                // Extract product IDs for Shopify lookup
+                const wishlistProductIds = customerWishlist.map(item => item.productId).filter(Boolean);
+                
+                if (wishlistProductIds.length > 0) {
+                    console.log(`[SHOPIFY] Fetching product details from Shopify for ${wishlistProductIds.length} products`);
+                    
+                    // Use the same GraphQL query as the mobile API
+                    const productsQuery = `
+                      query getWishlistProducts($productIds: [ID!]!) {
+                        nodes(ids: $productIds) {
+                          ... on Product {
+                            id
+                            title
+                            handle
+                            description
+                            productType
+                            vendor
+                            tags
+                            createdAt
+                            priceRange {
+                              maxVariantPrice {
+                                amount
+                                currencyCode
+                              }
+                              minVariantPrice {
+                                amount
+                                currencyCode
+                              }
+                            }
+                            compareAtPriceRange {
+                              maxVariantCompareAtPrice {
+                                amount
+                                currencyCode
+                              }
+                              minVariantCompareAtPrice {
+                                amount
+                                currencyCode
+                              }
+                            }
+                            featuredImage {
+                              url
+                              altText
+                            }
+                            images(first: 5) {
+                              edges {
+                                node {
+                                  url
+                                  altText
+                                }
+                              }
+                            }
+                            variants(first: 10) {
+                              edges {
+                                node {
+                                  id
+                                  title
+                                  sku
+                                  price
+                                  compareAtPrice
+                                  selectedOptions {
+                                    name
+                                    value
+                                  }
+                                  image {
+                                    url
+                                  }
+                                }
+                              }
+                            }
+                            totalInventory
+                          }
+                        }
+                      }
+                    `;
 
-              if (productsResponse?.data?.errors) {
-                console.error('[SHOPIFY] GraphQL errors while fetching wishlist products:', productsResponse.data.errors);
-                continue; // skip this chunk but continue others
-              }
+                    const productsResponse = await axios.post(
+                      config.adminApiUrl,
+                      {
+                        query: productsQuery,
+                        variables: { productIds: wishlistProductIds }
+                      },
+                      {
+                        headers: {
+                          'X-Shopify-Access-Token': config.adminToken,
+                          'Content-Type': 'application/json'
+                        }
+                      }
+                    );
 
-              const nodes = productsResponse.data.data?.nodes || [];
-              for (const p of nodes) if (p && p.id) productsMap.set(p.id, p);
-              console.log(`[SHOPIFY] Fetched ${nodes.length} products in batch ${Math.floor(i / batchSize) + 1}`);
-            } catch (err) {
-              console.error('[SHOPIFY] Error fetching product batch:', err?.response?.data || err.message);
-              // continue with next chunks, do not throw
-              continue;
+                    const products = productsResponse.data.data?.nodes || [];
+                    console.log(`[SHOPIFY] Fetched details for ${products.length} products from Shopify`);
+                    
+                    // Process each wishlist item with its corresponding product data
+                    const enhancedWishlist = [];
+                    
+                    for (const wishlistItem of customerWishlist) {
+                        const product = products.find(p => p && p.id === wishlistItem.productId);
+                        
+                        if (product) {
+                            // Use the same variant processing logic as the mobile API
+                            const processedVariants = product.variants.edges.map(edge => ({
+                                id: edge.node.id,
+                                title: edge.node.title,
+                                sku: edge.node.sku,
+                                price: edge.node.price,
+                                compareAtPrice: edge.node.compareAtPrice,
+                                selectedOptions: edge.node.selectedOptions,
+                                image: edge.node.image
+                            }));
+                            
+                            let selectedVariant = null;
+                            let selectedOptions = {};
+                            let selectedSku = null;
+                            let selectedPrice = null;
+                            let selectedCompareAtPrice = null;
+                            let selectedImage = null;
+                            
+                            if (wishlistItem.selectedOptions || wishlistItem.variantId) {
+                                console.log(`🔍 [VARIANT] Processing public wishlist item:`, {
+                                    productId: product.id,
+                                    variantId: wishlistItem.variantId,
+                                    selectedOptions: wishlistItem.selectedOptions
+                                });
+                                
+                                // Find the matching variant by ID first
+                                if (wishlistItem.variantId) {
+                                    selectedVariant = processedVariants.find(v => v.id === wishlistItem.variantId);
+                                }
+                                
+                                // If no variant ID match, try to match by selectedOptions
+                                if (!selectedVariant && wishlistItem.selectedOptions) {
+                                    selectedVariant = processedVariants.find(variant => {
+                                        const variantOptions = {};
+                                        variant.selectedOptions.forEach(opt => {
+                                            variantOptions[opt.name] = opt.value;
+                                        });
+                                        
+                                        // Check if all stored options match this variant
+                                        return Object.entries(wishlistItem.selectedOptions).every(([key, value]) => 
+                                            variantOptions[key] === value
+                                        );
+                                    });
+                                }
+                                
+                                if (selectedVariant) {
+                                    console.log(`✅ [VARIANT] Found matching variant:`, {
+                                        variantId: selectedVariant.id,
+                                        title: selectedVariant.title,
+                                        selectedOptions: selectedVariant.selectedOptions,
+                                        image: selectedVariant.image?.url
+                                    });
+                                    
+                                    selectedOptions = {};
+                                    selectedVariant.selectedOptions.forEach(opt => {
+                                        selectedOptions[opt.name] = opt.value;
+                                    });
+                                    selectedSku = selectedVariant.sku;
+                                    selectedPrice = selectedVariant.price;
+                                    selectedCompareAtPrice = selectedVariant.compareAtPrice;
+                                    selectedImage = selectedVariant.image?.url || product.featuredImage?.url;
+                                } else {
+                                    console.log(`⚠️ [VARIANT] No matching variant found, using stored options:`, wishlistItem.selectedOptions);
+                                    selectedOptions = wishlistItem.selectedOptions || {};
+                                    selectedImage = product.featuredImage?.url;
+                                }
+                            }
+                            
+                            // Create enhanced item with proper variant image
+                            const enhancedItem = {
+                                productId: wishlistItem.productId,
+                                variantId: selectedVariant?.id || wishlistItem.variantId || wishlistItem.productId,
+                                title: product.title,
+                                imageUrl: selectedImage || product.featuredImage?.url || '', // ✅ CRITICAL: Use variant image
+                                price: parseFloat(selectedPrice || product.priceRange.minVariantPrice.amount) || 0,
+                                compareAtPrice: selectedCompareAtPrice ? parseFloat(selectedCompareAtPrice) : null,
+                                sku: selectedSku || '',
+                                selectedOptions: selectedOptions, // ✅ CRITICAL: Include selected options
+                                handle: product.handle,
+                                addedAt: wishlistItem.addedAt,
+                                syncedFromFirebase: wishlistItem.syncedFromFirebase || false
+                            };
+                            
+                            enhancedWishlist.push(enhancedItem);
+                        } else {
+                            // Keep original item if product not found
+                            enhancedWishlist.push(wishlistItem);
+                        }
+                    }
+                    
+                    console.log(`[SHOPIFY] Enhanced ${enhancedWishlist.length} wishlist items with variant data`);
+                    customerWishlist = enhancedWishlist;
+                }
+            } catch (shopifyError) {
+                console.error('[SHOPIFY] Error fetching product details from Shopify:', shopifyError.message);
+                // Continue with original data if Shopify lookup fails
             }
-          }
-
-          // Build enhanced wishlist using fetched product data where available
-          const enhancedWishlist = customerWishlist.map(wishlistItem => {
-            const product = productsMap.get(wishlistItem.productId);
-            if (!product) return wishlistItem; // keep original
-
-            // Simplified variant mapping: prefer exact variantId, fallback to first variant
-            const variants = (product.variants?.edges || []).map(e => e.node).filter(Boolean);
-            let selectedVariant = null;
-            if (wishlistItem.variantId) selectedVariant = variants.find(v => v.id === wishlistItem.variantId);
-            if (!selectedVariant) selectedVariant = variants[0] || null;
-
-            const selectedImage = selectedVariant?.image?.url || product.featuredImage?.url || '';
-            const price = selectedVariant?.price || product.priceRange?.minVariantPrice?.amount || 0;
-
-            return {
-              productId: wishlistItem.productId,
-              variantId: selectedVariant?.id || wishlistItem.variantId || wishlistItem.productId,
-              title: product.title,
-              imageUrl: selectedImage,
-              price: parseFloat(price) || 0,
-              sku: selectedVariant?.sku || '',
-              selectedOptions: wishlistItem.selectedOptions || {},
-              handle: product.handle,
-              addedAt: wishlistItem.addedAt,
-              syncedFromFirebase: wishlistItem.syncedFromFirebase || false
-            };
-          });
-
-          console.log(`[SHOPIFY] Enhanced ${enhancedWishlist.length} wishlist items with variant data`);
-          customerWishlist = enhancedWishlist;
-        } catch (outerErr) {
-          console.error('[SHOPIFY] Unexpected error during wishlist enrichment:', outerErr?.message || outerErr);
-          // Do not fail the request; use the original wishlist
         }
-      }
-    }
 
         res.json({
             success: true,
