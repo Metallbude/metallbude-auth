@@ -8427,6 +8427,24 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           throw new Error('Order not found');
         }
 
+        // Map return reason to Shopify enum values
+        const mapReturnReason = (reason) => {
+          switch (reason) {
+            case 'defective':
+            case 'damage':
+              return 'DEFECTIVE';
+            case 'color_finish':
+            case 'wrong_item':
+              return 'NOT_AS_DESCRIBED';
+            case 'size':
+              return 'SIZE_TOO_LARGE'; // or SIZE_TOO_SMALL
+            case 'unwanted':
+            case 'changed_mind':
+            default:
+              return 'UNWANTED';
+          }
+        };
+
         // Step 2: Map items to fulfillmentLineItemIds
         const returnLineItems = [];
         for (const requestedItem of returnRequest.items) {
@@ -8436,7 +8454,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
               if (fulfillmentLineItem.lineItem.id === requestedItem.lineItemId) {
                 returnLineItems.push({
                   fulfillmentLineItemId: fulfillmentLineItem.id,
-                  quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity)
+                  quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity),
+                  returnReason: mapReturnReason(returnRequest.reason)
                 });
               }
             }
@@ -8466,8 +8485,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         const returnInput = {
           orderId: returnRequest.orderId,
           returnLineItems: returnLineItems,
-          notifyCustomer: true,
-          note: `Return reason: ${returnRequest.reason}. Notes: ${returnRequest.notes || 'No additional notes'}`
+          notifyCustomer: true
         };
 
         const returnResponse = await axios.post(config.adminApiUrl, {
