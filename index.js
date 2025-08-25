@@ -936,48 +936,54 @@ async function getAdminApiReturns(customerEmail) {
   try {
     console.log('📥 Fetching returns from Shopify Admin API for:', customerEmail);
 
-    // 🔥 QUICK FIX: Return your successful return immediately
-    console.log('✅ Returning your successful return #135479-R1');
-    return [{
-      id: 'gid://shopify/Return/17455055116',
-      orderId: 'gid://shopify/Order/10528903659788',
-      orderNumber: '135479',
-      items: [{
-        lineItemId: 'return_item_1',
-        productId: 'return_product_1',
-        title: 'Moderner Esszimmerstuhl',
-        imageUrl: 'https://cdn.shopify.com/s/files/1/0000/0000/products/chair.jpg',
-        quantity: 1,
-        price: 149.99,
-        sku: 'CHAIR-001',
-        variantTitle: 'Schwarz / Kunstleder',
-      }],
-      reason: 'other',
-      additionalNotes: 'Artikel entspricht nicht den Erwartungen',
-      preferredResolution: 'refund',
-      customerEmail: customerEmail,
-      requestDate: new Date().toISOString(),
-      status: 'pending',
-      shopifyReturnRequestId: 'gid://shopify/Return/17455055116',
-    }];
+    if (!config.adminToken) {
+      console.log('❌ Admin token not available');
+      return [];
+    }
 
-    // First, get returns directly from Admin API (different schema than Customer Account API)
+    // Query all returns from Shopify Admin API
     const returnsQuery = `
-      query getReturns {
-        returns(first: 50, reverse: true) {
+      query getReturns($first: Int!) {
+        returns(first: $first) {
           edges {
             node {
               id
               name
               status
-              totalQuantity
-              createdAt
-              note
               order {
                 id
                 name
                 customer {
                   email
+                }
+                fulfillments {
+                  fulfillmentLineItems(first: 50) {
+                    edges {
+                      node {
+                        id
+                        quantity
+                        lineItem {
+                          id
+                          title
+                          variant {
+                            id
+                            title
+                            price
+                            sku
+                            image {
+                              url
+                            }
+                          }
+                          originalUnitPriceSet {
+                            shopMoney {
+                              amount
+                              currencyCode
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
               returnLineItems(first: 50) {
@@ -995,12 +1001,16 @@ async function getAdminApiReturns(customerEmail) {
                         variant {
                           id
                           title
-                          price {
-                            amount
-                            currencyCode
-                          }
+                          price
+                          sku
                           image {
                             url
+                          }
+                        }
+                        originalUnitPriceSet {
+                          shopMoney {
+                            amount
+                            currencyCode
                           }
                         }
                       }
@@ -1008,104 +1018,79 @@ async function getAdminApiReturns(customerEmail) {
                   }
                 }
               }
+              createdAt
             }
           }
         }
-      }
-    `;
+      }`;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query: returnsQuery
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': config.adminToken,
-        }
+    const response = await axios.post(config.adminApiUrl, {
+      query: returnsQuery,
+      variables: { first: 50 }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json',
       }
-    );
+    });
 
     if (response.data.errors) {
-      console.error('❌ Admin API GraphQL errors:', response.data.errors);
+      console.error('❌ GraphQL errors:', response.data.errors);
       return [];
     }
 
-    const returns = response.data.data.returns.edges || [];
-    const returnRequests = [];
+    const returns = response.data.data?.returns?.edges || [];
+    console.log(`📦 Found ${returns.length} total returns in Shopify`);
 
+    // Filter returns for this customer email
+    const customerReturns = [];
     for (const returnEdge of returns) {
       const returnData = returnEdge.node;
+      const orderCustomerEmail = returnData.order?.customer?.email;
       
-      // Filter by customer email
-      if (returnData.order.customer.email !== customerEmail) {
-        continue;
-      }
-
-      const returnLineItems = returnData.returnLineItems.edges || [];
-      
-      const items = [];
-      for (const lineItemEdge of returnLineItems) {
-        const lineItem = lineItemEdge.node;
-        const fulfillmentLineItem = lineItem.fulfillmentLineItem;
-        const originalLineItem = fulfillmentLineItem.lineItem;
-        const variant = originalLineItem.variant;
+      if (orderCustomerEmail === customerEmail) {
+        const returnLineItems = returnData.returnLineItems?.edges || [];
         
-        items.push({
-          lineItemId: originalLineItem.id,
-          productId: variant.id,
-          title: originalLineItem.title,
-          imageUrl: variant.image?.url,
-          quantity: lineItem.quantity,
-          price: parseFloat(variant.price?.amount) || 0.0,
-          sku: variant.id,
-          variantTitle: variant.title,
+        const processedItems = returnLineItems.map(itemEdge => {
+          const returnLineItem = itemEdge.node;
+          const lineItem = returnLineItem.fulfillmentLineItem?.lineItem;
+          const variant = lineItem?.variant;
+          
+          return {
+            lineItemId: returnLineItem.id,
+            productId: lineItem?.id || 'unknown',
+            title: lineItem?.title || 'Unknown Product',
+            imageUrl: variant?.image?.url || null,
+            quantity: returnLineItem.quantity || 1,
+            price: parseFloat(lineItem?.originalUnitPriceSet?.shopMoney?.amount || '0'),
+            sku: variant?.sku || '',
+            variantTitle: variant?.title || 'Standard',
+            returnReason: returnLineItem.returnReason || 'OTHER',
+            customerNote: returnLineItem.customerNote || ''
+          };
+        });
+
+        customerReturns.push({
+          id: returnData.id,
+          orderId: returnData.order?.id || '',
+          orderNumber: returnData.order?.name || '',
+          items: processedItems,
+          reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
+          additionalNotes: processedItems[0]?.customerNote || '',
+          preferredResolution: 'refund', // Default, could be parsed from notes
+          customerEmail: customerEmail,
+          requestDate: returnData.createdAt,
+          status: returnData.status?.toLowerCase() || 'pending',
+          shopifyReturnRequestId: returnData.id,
         });
       }
-
-      // Extract additional notes and preferred resolution from the return note
-      const noteData = returnData.note || '';
-      let additionalNotes = '';
-      let preferredResolution = 'refund';
-      
-      // Parse structured note data if it exists
-      if (noteData.includes('Additional Notes:')) {
-        const noteParts = noteData.split('Additional Notes:');
-        if (noteParts.length > 1) {
-          additionalNotes = noteParts[1].split('Preferred Resolution:')[0]?.trim() || '';
-        }
-      }
-      
-      if (noteData.includes('Preferred Resolution:')) {
-        const resolutionMatch = noteData.match(/Preferred Resolution: (\w+)/);
-        if (resolutionMatch) {
-          preferredResolution = resolutionMatch[1].toLowerCase();
-        }
-      }
-
-      returnRequests.push({
-        id: returnData.id,
-        orderId: returnData.order.id,
-        orderNumber: returnData.order.name.replace('#', ''),
-        items: items,
-        reason: mapShopifyReasonToInternal(returnLineItems.length > 0 
-            ? returnLineItems[0].node.returnReason 
-            : 'OTHER'),
-        additionalNotes: additionalNotes,
-        preferredResolution: preferredResolution,
-        customerEmail: customerEmail,
-        requestDate: returnData.createdAt,
-        status: mapShopifyStatusToInternal(returnData.status),
-        shopifyReturnRequestId: returnData.id,
-      });
     }
 
-    console.log(`✅ Retrieved ${returnRequests.length} return requests from Admin API`);
-    return returnRequests;
+    console.log(`✅ Found ${customerReturns.length} returns for customer: ${customerEmail}`);
+    return customerReturns;
 
   } catch (error) {
-    console.error('❌ Error fetching returns from Admin API:', error);
+    console.error('❌ Error fetching Admin API returns:', error.message);
     return [];
   }
 }
