@@ -945,6 +945,9 @@ async function getAdminApiReturns(customerEmail) {
               id
               name
               status
+              totalQuantity
+              createdAt
+              note
               order {
                 id
                 name
@@ -967,6 +970,10 @@ async function getAdminApiReturns(customerEmail) {
                         variant {
                           id
                           title
+                          price {
+                            amount
+                            currencyCode
+                          }
                           image {
                             url
                           }
@@ -1026,10 +1033,30 @@ async function getAdminApiReturns(customerEmail) {
           title: originalLineItem.title,
           imageUrl: variant.image?.url,
           quantity: lineItem.quantity,
-          price: 0.0, // Price not available in this query
+          price: parseFloat(variant.price?.amount) || 0.0,
           sku: variant.id,
           variantTitle: variant.title,
         });
+      }
+
+      // Extract additional notes and preferred resolution from the return note
+      const noteData = returnData.note || '';
+      let additionalNotes = '';
+      let preferredResolution = 'refund';
+      
+      // Parse structured note data if it exists
+      if (noteData.includes('Additional Notes:')) {
+        const noteParts = noteData.split('Additional Notes:');
+        if (noteParts.length > 1) {
+          additionalNotes = noteParts[1].split('Preferred Resolution:')[0]?.trim() || '';
+        }
+      }
+      
+      if (noteData.includes('Preferred Resolution:')) {
+        const resolutionMatch = noteData.match(/Preferred Resolution: (\w+)/);
+        if (resolutionMatch) {
+          preferredResolution = resolutionMatch[1].toLowerCase();
+        }
       }
 
       returnRequests.push({
@@ -1040,12 +1067,10 @@ async function getAdminApiReturns(customerEmail) {
         reason: mapShopifyReasonToInternal(returnLineItems.length > 0 
             ? returnLineItems[0].node.returnReason 
             : 'OTHER'),
-        additionalNotes: returnLineItems.length > 0 
-            ? (returnLineItems[0].node.customerNote || '') 
-            : '',
-        preferredResolution: 'refund', // Default since we can't extract from note field
+        additionalNotes: additionalNotes,
+        preferredResolution: preferredResolution,
         customerEmail: customerEmail,
-        requestDate: new Date().toISOString(), // Default since createdAt not available
+        requestDate: returnData.createdAt,
         status: mapShopifyStatusToInternal(returnData.status),
         shopifyReturnRequestId: returnData.id,
       });
