@@ -970,6 +970,12 @@ async function getAdminApiReturns(customerEmail) {
                       currencyCode
                     }
                   }
+                  discountedUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
                 }
               }
             }
@@ -1027,13 +1033,18 @@ async function getAdminApiReturns(customerEmail) {
       const orderLineItem = orderLineItems[0]?.node; // For now, match to first item
       const variant = orderLineItem?.variant;
       
+      // Use discounted price if available (sale price), otherwise original price
+      const discountedPrice = orderLineItem?.discountedUnitPriceSet?.shopMoney?.amount;
+      const originalPrice = orderLineItem?.originalUnitPriceSet?.shopMoney?.amount;
+      const actualPrice = discountedPrice || originalPrice || '0';
+      
       return {
         lineItemId: returnLineItem.id,
         productId: orderLineItem?.id || 'unknown',
         title: orderLineItem?.title || `Return Item (${returnData.name})`,
         imageUrl: variant?.image?.url || null,
         quantity: returnLineItem.quantity || 1,
-        price: parseFloat(orderLineItem?.originalUnitPriceSet?.shopMoney?.amount || '0'),
+        price: parseFloat(actualPrice),
         sku: variant?.sku || returnLineItem.id,
         variantTitle: variant?.title || 'Returned Item',
         returnReason: returnLineItem.returnReason || 'OTHER',
