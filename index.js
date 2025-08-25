@@ -25,6 +25,41 @@ try {
   // Don't throw error - continue with fallback
 }
 
+// DEBUG: Map return items to fulfillmentLineItemIds using Admin API
+app.get('/debug/returns/map', authenticateAppToken, async (req, res) => {
+  try {
+    const { orderId } = req.query;
+    if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
+    if (!config.adminToken) return res.status(400).json({ success: false, error: 'Admin token not configured' });
+
+    const adminGraphql = async (query, variables) => {
+      const r = await axios.post(config.adminApiUrl, { query, variables }, {
+        headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.adminToken }
+      });
+      return r.data;
+    };
+
+    const orderQuery = `query orderFulfillments($orderId: ID!) {\n  order(id: $orderId) {\n    id\n    name\n    fulfillments(first:50) {\n      nodes {\n        id\n        fulfillmentLineItems(first:50) {\n          edges { node { id quantity lineItem { id title } } }\n        }\n      }\n    }\n  }\n}`;
+
+    const orderResp = await adminGraphql(orderQuery, { orderId });
+    if (!orderResp || orderResp.errors) return res.status(502).json({ success: false, error: 'Admin API error', details: orderResp });
+
+    const fulfillments = orderResp.data.order.fulfillments.nodes || [];
+    const items = [];
+    for (const f of fulfillments) {
+      const flis = f.fulfillmentLineItems.edges || [];
+      for (const e of flis) {
+        if (e.node) items.push({ fulfillmentLineItemId: e.node.id, quantity: e.node.quantity, lineItemId: e.node.lineItem?.id, title: e.node.lineItem?.title });
+      }
+    }
+
+    res.json({ success: true, items });
+  } catch (err) {
+    console.error('debug map error', err?.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.message, details: err?.response?.data });
+  }
+});
+
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
