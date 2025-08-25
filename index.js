@@ -941,60 +941,92 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    // Query the ACTUAL return that was created: gid://shopify/Return/17455055116
-    const returnQuery = `
-      query getReturn($id: ID!) {
-        return(id: $id) {
-          id
-          name
-          status
-          order {
-            id
-            name
-            customer {
-              email
-            }
-          }
-          returnLineItems(first: 50) {
-            edges {
-              node {
+    // Query all returns from Shopify Admin API
+    const returnsQuery = `
+      query getReturns($first: Int!) {
+        returns(first: $first) {
+          edges {
+            node {
+              id
+              name
+              status
+              order {
                 id
-                quantity
-                returnReason
-                customerNote
-                fulfillmentLineItem {
-                  id
-                  lineItem {
-                    id
-                    title
-                    variant {
-                      id
-                      title
-                      price
-                      sku
-                      image {
-                        url
-                      }
-                    }
-                    originalUnitPriceSet {
-                      shopMoney {
-                        amount
-                        currencyCode
+                name
+                customer {
+                  email
+                }
+                fulfillments {
+                  fulfillmentLineItems(first: 50) {
+                    edges {
+                      node {
+                        id
+                        quantity
+                        lineItem {
+                          id
+                          title
+                          variant {
+                            id
+                            title
+                            price
+                            sku
+                            image {
+                              url
+                            }
+                          }
+                          originalUnitPriceSet {
+                            shopMoney {
+                              amount
+                              currencyCode
+                            }
+                          }
+                        }
                       }
                     }
                   }
                 }
               }
+              returnLineItems(first: 50) {
+                edges {
+                  node {
+                    id
+                    quantity
+                    returnReason
+                    customerNote
+                    fulfillmentLineItem {
+                      id
+                      lineItem {
+                        id
+                        title
+                        variant {
+                          id
+                          title
+                          price
+                          sku
+                          image {
+                            url
+                          }
+                        }
+                        originalUnitPriceSet {
+                          shopMoney {
+                            amount
+                            currencyCode
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              createdAt
             }
           }
-          createdAt
         }
       }`;
 
-    // Query the specific return that was created successfully
     const response = await axios.post(config.adminApiUrl, {
-      query: returnQuery,
-      variables: { id: 'gid://shopify/Return/17455055116' }
+      query: returnsQuery,
+      variables: { first: 50 }
     }, {
       headers: {
         'X-Shopify-Access-Token': config.adminToken,
@@ -1007,63 +1039,55 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    const returnData = response.data.data?.return;
-    if (!returnData) {
-      console.log('❌ Return not found');
-      return [];
-    }
+    const returns = response.data.data?.returns?.edges || [];
+    console.log(`📦 Found ${returns.length} total returns in Shopify`);
 
-    // Verify this return belongs to the customer
-    const orderCustomerEmail = returnData.order?.customer?.email;
-    if (orderCustomerEmail !== customerEmail) {
-      console.log('❌ Return does not belong to this customer');
-      return [];
-    }
-
-    // Process return line items with REAL data
-    const returnLineItems = returnData.returnLineItems?.edges || [];
-    const processedItems = returnLineItems.map(itemEdge => {
-      const returnLineItem = itemEdge.node;
-      const lineItem = returnLineItem.fulfillmentLineItem?.lineItem;
-      const variant = lineItem?.variant;
+    // Filter returns for this customer email
+    const customerReturns = [];
+    for (const returnEdge of returns) {
+      const returnData = returnEdge.node;
+      const orderCustomerEmail = returnData.order?.customer?.email;
       
-      return {
-        lineItemId: returnLineItem.id,
-        productId: lineItem?.id || 'unknown',
-        title: lineItem?.title || 'Unknown Product',
-        imageUrl: variant?.image?.url || null,
-        quantity: returnLineItem.quantity || 1,
-        price: parseFloat(lineItem?.originalUnitPriceSet?.shopMoney?.amount || '0'),
-        sku: variant?.sku || '',
-        variantTitle: variant?.title || 'Standard',
-        returnReason: returnLineItem.returnReason || 'OTHER',
-        customerNote: returnLineItem.customerNote || ''
-      };
-    });
+      if (orderCustomerEmail === customerEmail) {
+        const returnLineItems = returnData.returnLineItems?.edges || [];
+        
+        const processedItems = returnLineItems.map(itemEdge => {
+          const returnLineItem = itemEdge.node;
+          const lineItem = returnLineItem.fulfillmentLineItem?.lineItem;
+          const variant = lineItem?.variant;
+          
+          return {
+            lineItemId: returnLineItem.id,
+            productId: lineItem?.id || 'unknown',
+            title: lineItem?.title || 'Unknown Product',
+            imageUrl: variant?.image?.url || null,
+            quantity: returnLineItem.quantity || 1,
+            price: parseFloat(lineItem?.originalUnitPriceSet?.shopMoney?.amount || '0'),
+            sku: variant?.sku || '',
+            variantTitle: variant?.title || 'Standard',
+            returnReason: returnLineItem.returnReason || 'OTHER',
+            customerNote: returnLineItem.customerNote || ''
+          };
+        });
 
-    const customerReturn = {
-      id: returnData.id,
-      orderId: returnData.order?.id || '',
-      orderNumber: returnData.order?.name || '',
-      items: processedItems,
-      reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
-      additionalNotes: processedItems[0]?.customerNote || '',
-      preferredResolution: 'refund',
-      customerEmail: customerEmail,
-      requestDate: returnData.createdAt,
-      status: returnData.status?.toLowerCase() || 'pending',
-      shopifyReturnRequestId: returnData.id,
-    };
+        customerReturns.push({
+          id: returnData.id,
+          orderId: returnData.order?.id || '',
+          orderNumber: returnData.order?.name || '',
+          items: processedItems,
+          reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
+          additionalNotes: processedItems[0]?.customerNote || '',
+          preferredResolution: 'refund', // Default, could be parsed from notes
+          customerEmail: customerEmail,
+          requestDate: returnData.createdAt,
+          status: returnData.status?.toLowerCase() || 'pending',
+          shopifyReturnRequestId: returnData.id,
+        });
+      }
+    }
 
-    console.log(`✅ Found 1 return for customer: ${customerEmail}`);
-    console.log('📦 Return details:', {
-      id: customerReturn.id,
-      orderNumber: customerReturn.orderNumber,
-      itemCount: customerReturn.items.length,
-      status: customerReturn.status
-    });
-
-    return [customerReturn];
+    console.log(`✅ Found ${customerReturns.length} returns for customer: ${customerEmail}`);
+    return customerReturns;
 
   } catch (error) {
     console.error('❌ Error fetching Admin API returns:', error.message);
