@@ -8395,7 +8395,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       };
 
       // 1) Fetch order fulfillments to map fulfillmentLineItemIds
-      const orderQuery = `query orderFulfillments($orderId: ID!) {\n  order(id: $orderId) {\n    id\n    name\n    fulfillments(first:50) {\n      edges {\n        node {\n          id\n          fulfillmentLineItems(first:50) {\n            edges {\n              node {\n                id\n                quantity\n                lineItem { id title variant { id } }\n              }\n            }\n          }\n        }\n      }\n    }\n  }\n}`;
+  const orderQuery = `query orderFulfillments($orderId: ID!) {\n  order(id: $orderId) {\n    id\n    name\n    fulfillments(first:50) {\n      nodes {\n        id\n        fulfillmentLineItems(first:50) {\n          edges {\n            node {\n              id\n              quantity\n              lineItem { id title variant { id } }\n            }\n          }\n        }\n      }\n    }\n  }\n}`;
 
       const orderResp = await adminGraphql(orderQuery, { orderId: returnRequest.orderId });
       if (!orderResp || orderResp.errors) {
@@ -8411,10 +8411,9 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         return res.status(502).json({ success: false, error: 'Failed to fetch order from Admin API' });
       }
 
-      const fulfillments = (orderResp.data?.order?.fulfillments?.edges) || [];
+      const fulfillments = (orderResp.data?.order?.fulfillments?.nodes) || [];
       const fulfillmentItems = [];
-      for (const fEdge of fulfillments) {
-        const f = fEdge.node;
+      for (const f of fulfillments) {
         if (!f) continue;
         const flis = f.fulfillmentLineItems?.edges || [];
         for (const e of flis) if (e?.node) fulfillmentItems.push(e.node);
