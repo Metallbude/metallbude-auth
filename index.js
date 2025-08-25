@@ -8371,6 +8371,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       orderNumber: returnRequest.orderNumber,
       itemCount: returnRequest.items?.length,
       reason: returnRequest.reason,
+      additionalNotes: returnRequest.additionalNotes,
+      preferredResolution: returnRequest.preferredResolution,
       customer: customerEmail
     });
 
@@ -8455,7 +8457,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
                 returnLineItems.push({
                   fulfillmentLineItemId: fulfillmentLineItem.id,
                   quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity),
-                  returnReason: mapReturnReason(returnRequest.reason)
+                  returnReason: mapReturnReason(returnRequest.reason),
+                  customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason)
                 });
               }
             }
@@ -8485,8 +8488,19 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         const returnInput = {
           orderId: returnRequest.orderId,
           returnLineItems: returnLineItems,
-          notifyCustomer: true
+          notifyCustomer: true,
+          note: `Return Request Details:
+Reason: ${returnRequest.reason}
+Preferred Resolution: ${returnRequest.preferredResolution || 'refund'}
+${returnRequest.additionalNotes ? 'Additional Notes: ' + returnRequest.additionalNotes : ''}
+
+Customer Email: ${customerEmail}`
         };
+
+        console.log('🔥 Creating return with Admin API:', {
+          returnInput: returnInput,
+          returnLineItemsCount: returnLineItems.length
+        });
 
         const returnResponse = await axios.post(config.adminApiUrl, {
           query: returnMutation,
@@ -10371,6 +10385,53 @@ app.get('/debug/returns/map', authenticateAppToken, async (req, res) => {
     console.error('❌ [DEBUG] Error mapping returns:', error.message);
     res.status(500).json({
       error: 'Failed to map returns',
+      details: error.message
+    });
+  }
+});
+
+// Test endpoint for return creation (no auth required for debugging)
+app.post('/debug/returns/test', async (req, res) => {
+  try {
+    console.log('🧪 [DEBUG] Test return creation request:', JSON.stringify(req.body, null, 2));
+    
+    const { orderId, items, customerMessage } = req.body;
+    
+    if (!orderId || !items) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        required: ['orderId', 'items']
+      });
+    }
+
+    // Map return items
+    const returnLineItems = items.map(item => ({
+      fulfillmentLineItemId: item.fulfillmentLineItemId,
+      quantity: item.quantity,
+      returnReason: mapReturnReason(item.reason)
+    }));
+
+    console.log('🧪 [DEBUG] Mapped return line items:', JSON.stringify(returnLineItems, null, 2));
+
+    const returnInput = {
+      orderId: orderId,
+      returnLineItems: returnLineItems
+    };
+
+    console.log('🧪 [DEBUG] Final return input:', JSON.stringify(returnInput, null, 2));
+
+    // For testing, just return the mapped data without actually calling Shopify
+    res.json({
+      success: true,
+      message: 'Test successful - return input is valid',
+      returnInput: returnInput,
+      originalRequest: { orderId, items, customerMessage }
+    });
+
+  } catch (error) {
+    console.error('❌ [DEBUG] Test return error:', error.message);
+    res.status(500).json({
+      error: 'Test failed',
       details: error.message
     });
   }
