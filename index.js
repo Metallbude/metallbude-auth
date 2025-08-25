@@ -813,7 +813,6 @@ async function getShopifyCustomerReturns(customerToken) {
                       id
                       status
                       totalQuantity
-                      createdAt
                       order {
                         id
                         name
@@ -824,22 +823,19 @@ async function getShopifyCustomerReturns(customerToken) {
                             id
                             quantity
                             returnReason
-                            customerNote
-                            fulfillmentLineItem {
+                            returnReasonNote
+                            lineItem {
                               id
-                              lineItem {
+                              title
+                              variant {
                                 id
                                 title
-                                variant {
-                                  id
-                                  title
-                                  price {
-                                    amount
-                                    currencyCode
-                                  }
-                                  image {
-                                    url
-                                  }
+                                price {
+                                  amount
+                                  currencyCode
+                                }
+                                image {
+                                  url
                                 }
                               }
                             }
@@ -885,20 +881,19 @@ async function getShopifyCustomerReturns(customerToken) {
         
         const items = [];
         for (const lineItemEdge of returnLineItems) {
-          const lineItem = lineItemEdge.node;
-          const fulfillmentLineItem = lineItem.fulfillmentLineItem;
-          const originalLineItem = fulfillmentLineItem.lineItem;
-          const variant = originalLineItem.variant;
+          const returnLineItem = lineItemEdge.node;
+          const lineItem = returnLineItem.lineItem;  // Direct access, no fulfillmentLineItem
+          const variant = lineItem?.variant;
           
           items.push({
-            lineItemId: originalLineItem.id,
-            productId: variant.id,
-            title: originalLineItem.title,
-            imageUrl: variant.image?.url,
-            quantity: lineItem.quantity,
-            price: parseFloat(variant.price.amount) || 0.0,
-            sku: variant.id,
-            variantTitle: variant.title,
+            lineItemId: lineItem?.id || 'unknown',
+            productId: variant?.id || 'unknown',
+            title: lineItem?.title || 'Unknown Product',
+            imageUrl: variant?.image?.url || null,
+            quantity: returnLineItem.quantity || 1,
+            price: parseFloat(variant?.price?.amount || '0'),
+            sku: variant?.id || '',
+            variantTitle: variant?.title || 'Standard',
           });
         }
 
@@ -911,11 +906,11 @@ async function getShopifyCustomerReturns(customerToken) {
               ? returnLineItems[0].node.returnReason 
               : 'OTHER'),
           additionalNotes: returnLineItems.length > 0 
-              ? (returnLineItems[0].node.customerNote || '') 
+              ? (returnLineItems[0].node.returnReasonNote || '') 
               : '',
           preferredResolution: 'refund',
           customerEmail: '',
-          requestDate: returnData.createdAt,
+          requestDate: new Date().toISOString(), // Remove createdAt which doesn't exist
           status: mapShopifyStatusToInternal(returnData.status),
           shopifyReturnRequestId: returnData.id,
         });
