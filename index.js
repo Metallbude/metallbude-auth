@@ -10254,6 +10254,110 @@ app.get('/debug/disk-sessions', async (req, res) => {
   }
 });
 
+// DEBUG: Debug returns mapping endpoint - inspect fulfillmentLineItemId mapping
+app.get('/debug/returns/map', authenticateAppToken, async (req, res) => {
+  try {
+    const { orderId } = req.query;
+    
+    if (!orderId) {
+      return res.status(400).json({ error: 'orderId parameter required' });
+    }
+    
+    if (!config.adminToken) {
+      return res.status(400).json({ error: 'Admin token not configured - cannot map fulfillment line items' });
+    }
+    
+    console.log('🔍 [DEBUG] Mapping fulfillment line items for order:', orderId);
+    
+    // Fetch order fulfillments via Admin API
+    const orderQuery = `
+      query getOrderFulfillments($orderId: ID!) {
+        order(id: $orderId) {
+          id
+          name
+          fulfillments {
+            id
+            status
+            fulfillmentLineItems(first: 50) {
+              edges {
+                node {
+                  id
+                  quantity
+                  lineItem {
+                    id
+                    title
+                    variant {
+                      id
+                      title
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`;
+    
+    const orderResponse = await axios.post(config.adminApiUrl, {
+      query: orderQuery,
+      variables: { orderId }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json',
+      }
+    });
+
+    if (orderResponse.data.errors) {
+      return res.status(502).json({
+        error: 'GraphQL errors',
+        details: orderResponse.data.errors
+      });
+    }
+
+    const order = orderResponse.data.data.order;
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Map all fulfillment line items
+    const mappedItems = [];
+    for (const fulfillment of order.fulfillments) {
+      for (const fulfillmentLineItemEdge of fulfillment.fulfillmentLineItems.edges) {
+        const fulfillmentLineItem = fulfillmentLineItemEdge.node;
+        mappedItems.push({
+          fulfillmentLineItemId: fulfillmentLineItem.id,
+          quantity: fulfillmentLineItem.quantity,
+          lineItemId: fulfillmentLineItem.lineItem.id,
+          title: fulfillmentLineItem.lineItem.title,
+          variant: {
+            id: fulfillmentLineItem.lineItem.variant?.id,
+            title: fulfillmentLineItem.lineItem.variant?.title
+          },
+          fulfillmentId: fulfillment.id,
+          fulfillmentStatus: fulfillment.status
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      orderId,
+      orderName: order.name,
+      totalFulfillments: order.fulfillments.length,
+      totalMappedItems: mappedItems.length,
+      mappedItems
+    });
+
+  } catch (error) {
+    console.error('❌ [DEBUG] Error mapping returns:', error.message);
+    res.status(500).json({
+      error: 'Failed to map returns',
+      details: error.message
+    });
+  }
+});
+
 async function cleanupExpiredTokens() {
   const now = Date.now();
   let cleanedSessions = 0;
