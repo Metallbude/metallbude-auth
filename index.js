@@ -931,6 +931,180 @@ async function getShopifyCustomerReturns(customerToken) {
   }
 }
 
+// 🔥 ADDED: Get returns from Admin API (for returns created via Admin API)
+async function getAdminApiReturns(customerEmail) {
+  try {
+    console.log('📥 Fetching returns from Shopify Admin API for:', customerEmail);
+
+    // First, find the customer by email
+    const customerQuery = `
+      query getCustomer($query: String!) {
+        customers(first: 1, query: $query) {
+          edges {
+            node {
+              id
+              email
+              orders(first: 50, reverse: true) {
+                edges {
+                  node {
+                    id
+                    name
+                    processedAt
+                    returns(first: 50) {
+                      edges {
+                        node {
+                          id
+                          name
+                          status
+                          totalQuantity
+                          createdAt
+                          note
+                          order {
+                            id
+                            name
+                          }
+                          returnLineItems(first: 50) {
+                            edges {
+                              node {
+                                id
+                                quantity
+                                returnReason
+                                customerNote
+                                fulfillmentLineItem {
+                                  id
+                                  lineItem {
+                                    id
+                                    title
+                                    variant {
+                                      id
+                                      title
+                                      price
+                                      image {
+                                        url
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: customerQuery,
+        variables: {
+          query: `email:${customerEmail}`
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.adminToken,
+        }
+      }
+    );
+
+    if (response.data.errors) {
+      console.error('❌ Admin API GraphQL errors:', response.data.errors);
+      return [];
+    }
+
+    const customers = response.data.data.customers.edges || [];
+    if (customers.length === 0) {
+      console.log('ℹ️ No customer found with email:', customerEmail);
+      return [];
+    }
+
+    const customer = customers[0].node;
+    const orders = customer.orders.edges || [];
+    const returnRequests = [];
+
+    for (const orderEdge of orders) {
+      const order = orderEdge.node;
+      const returns = order.returns.edges || [];
+      
+      for (const returnEdge of returns) {
+        const returnData = returnEdge.node;
+        const returnLineItems = returnData.returnLineItems.edges || [];
+        
+        const items = [];
+        for (const lineItemEdge of returnLineItems) {
+          const lineItem = lineItemEdge.node;
+          const fulfillmentLineItem = lineItem.fulfillmentLineItem;
+          const originalLineItem = fulfillmentLineItem.lineItem;
+          const variant = originalLineItem.variant;
+          
+          items.push({
+            lineItemId: originalLineItem.id,
+            productId: variant.id,
+            title: originalLineItem.title,
+            imageUrl: variant.image?.url,
+            quantity: lineItem.quantity,
+            price: parseFloat(variant.price) || 0.0,
+            sku: variant.id,
+            variantTitle: variant.title,
+          });
+        }
+
+        // Extract additional notes and preferred resolution from the return note
+        const noteData = returnData.note || '';
+        let additionalNotes = '';
+        let preferredResolution = 'refund';
+        
+        // Parse structured note data if it exists
+        if (noteData.includes('Additional Notes:')) {
+          const noteParts = noteData.split('Additional Notes:');
+          if (noteParts.length > 1) {
+            additionalNotes = noteParts[1].split('Preferred Resolution:')[0]?.trim() || '';
+          }
+        }
+        
+        if (noteData.includes('Preferred Resolution:')) {
+          const resolutionMatch = noteData.match(/Preferred Resolution: (\w+)/);
+          if (resolutionMatch) {
+            preferredResolution = resolutionMatch[1].toLowerCase();
+          }
+        }
+
+        returnRequests.push({
+          id: returnData.id,
+          orderId: order.id,
+          orderNumber: order.name.replace('#', ''),
+          items: items,
+          reason: mapShopifyReasonToInternal(returnLineItems.length > 0 
+              ? returnLineItems[0].node.returnReason 
+              : 'OTHER'),
+          additionalNotes: additionalNotes,
+          preferredResolution: preferredResolution,
+          customerEmail: customerEmail,
+          requestDate: returnData.createdAt,
+          status: mapShopifyStatusToInternal(returnData.status),
+          shopifyReturnRequestId: returnData.id,
+        });
+      }
+    }
+
+    console.log(`✅ Retrieved ${returnRequests.length} return requests from Admin API`);
+    return returnRequests;
+
+  } catch (error) {
+    console.error('❌ Error fetching returns from Admin API:', error);
+    return [];
+  }
+}
+
 // Helper function to set address as default
 async function setAsDefaultAddress(customerId, addressId) {
   try {
@@ -8580,7 +8754,7 @@ Customer Email: ${customerEmail}`
   }
 });
 
-// 🔥 UPDATED: Get return history from Shopify Customer Account API
+// 🔥 UPDATED: Get return history from both Customer Account API and Admin API
 app.get('/returns', authenticateAppToken, async (req, res) => {
   try {
     const customerToken = req.headers.authorization?.substring(7);
@@ -8595,12 +8769,32 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
 
     console.log('📋 Fetching return history for:', customerEmail);
     
-    // Get returns from Shopify Customer Account API
-    const shopifyReturns = await getShopifyCustomerReturns(customerToken);
+    // Try Customer Account API first
+    let shopifyReturns = [];
+    try {
+      shopifyReturns = await getShopifyCustomerReturns(customerToken);
+      console.log(`✅ Customer Account API returned ${shopifyReturns.length} returns`);
+    } catch (error) {
+      console.log('⚠️ Customer Account API failed, trying Admin API fallback:', error.message);
+    }
+
+    // If we have few or no returns from Customer Account API, also try Admin API
+    // This helps with returns created via Admin API that might not show up immediately
+    if (shopifyReturns.length === 0) {
+      try {
+        console.log('🔄 Fetching returns from Admin API as fallback...');
+        const adminReturns = await getAdminApiReturns(customerEmail);
+        console.log(`✅ Admin API returned ${adminReturns.length} returns`);
+        
+        // Merge results (Admin API format should match our expected format)
+        shopifyReturns = [...shopifyReturns, ...adminReturns];
+      } catch (adminError) {
+        console.log('⚠️ Admin API fallback also failed:', adminError.message);
+      }
+    }
     
-    // Optionally merge with backend data
-    // const backendReturns = await getBackendReturns(customerEmail);
-    // const mergedReturns = mergeReturns(shopifyReturns, backendReturns);
+    // Log final results
+    console.log(`📊 Final return count: ${shopifyReturns.length} returns for ${customerEmail}`);
     
     res.json({
       success: true,
