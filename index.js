@@ -936,57 +936,39 @@ async function getAdminApiReturns(customerEmail) {
   try {
     console.log('📥 Fetching returns from Shopify Admin API for:', customerEmail);
 
-    // First, find the customer by email
-    const customerQuery = `
-      query getCustomer($query: String!) {
-        customers(first: 1, query: $query) {
+    // First, get returns directly from Admin API (different schema than Customer Account API)
+    const returnsQuery = `
+      query getReturns {
+        returns(first: 50, reverse: true) {
           edges {
             node {
               id
-              email
-              orders(first: 50, reverse: true) {
+              name
+              status
+              order {
+                id
+                name
+                customer {
+                  email
+                }
+              }
+              returnLineItems(first: 50) {
                 edges {
                   node {
                     id
-                    name
-                    processedAt
-                    returns(first: 50) {
-                      edges {
-                        node {
+                    quantity
+                    returnReason
+                    customerNote
+                    fulfillmentLineItem {
+                      id
+                      lineItem {
+                        id
+                        title
+                        variant {
                           id
-                          name
-                          status
-                          totalQuantity
-                          createdAt
-                          note
-                          order {
-                            id
-                            name
-                          }
-                          returnLineItems(first: 50) {
-                            edges {
-                              node {
-                                id
-                                quantity
-                                returnReason
-                                customerNote
-                                fulfillmentLineItem {
-                                  id
-                                  lineItem {
-                                    id
-                                    title
-                                    variant {
-                                      id
-                                      title
-                                      price
-                                      image {
-                                        url
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            }
+                          title
+                          image {
+                            url
                           }
                         }
                       }
@@ -1003,10 +985,7 @@ async function getAdminApiReturns(customerEmail) {
     const response = await axios.post(
       config.adminApiUrl,
       {
-        query: customerQuery,
-        variables: {
-          query: `email:${customerEmail}`
-        }
+        query: returnsQuery
       },
       {
         headers: {
@@ -1021,79 +1000,55 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    const customers = response.data.data.customers.edges || [];
-    if (customers.length === 0) {
-      console.log('ℹ️ No customer found with email:', customerEmail);
-      return [];
-    }
-
-    const customer = customers[0].node;
-    const orders = customer.orders.edges || [];
+    const returns = response.data.data.returns.edges || [];
     const returnRequests = [];
 
-    for (const orderEdge of orders) {
-      const order = orderEdge.node;
-      const returns = order.returns.edges || [];
+    for (const returnEdge of returns) {
+      const returnData = returnEdge.node;
       
-      for (const returnEdge of returns) {
-        const returnData = returnEdge.node;
-        const returnLineItems = returnData.returnLineItems.edges || [];
-        
-        const items = [];
-        for (const lineItemEdge of returnLineItems) {
-          const lineItem = lineItemEdge.node;
-          const fulfillmentLineItem = lineItem.fulfillmentLineItem;
-          const originalLineItem = fulfillmentLineItem.lineItem;
-          const variant = originalLineItem.variant;
-          
-          items.push({
-            lineItemId: originalLineItem.id,
-            productId: variant.id,
-            title: originalLineItem.title,
-            imageUrl: variant.image?.url,
-            quantity: lineItem.quantity,
-            price: parseFloat(variant.price) || 0.0,
-            sku: variant.id,
-            variantTitle: variant.title,
-          });
-        }
+      // Filter by customer email
+      if (returnData.order.customer.email !== customerEmail) {
+        continue;
+      }
 
-        // Extract additional notes and preferred resolution from the return note
-        const noteData = returnData.note || '';
-        let additionalNotes = '';
-        let preferredResolution = 'refund';
+      const returnLineItems = returnData.returnLineItems.edges || [];
+      
+      const items = [];
+      for (const lineItemEdge of returnLineItems) {
+        const lineItem = lineItemEdge.node;
+        const fulfillmentLineItem = lineItem.fulfillmentLineItem;
+        const originalLineItem = fulfillmentLineItem.lineItem;
+        const variant = originalLineItem.variant;
         
-        // Parse structured note data if it exists
-        if (noteData.includes('Additional Notes:')) {
-          const noteParts = noteData.split('Additional Notes:');
-          if (noteParts.length > 1) {
-            additionalNotes = noteParts[1].split('Preferred Resolution:')[0]?.trim() || '';
-          }
-        }
-        
-        if (noteData.includes('Preferred Resolution:')) {
-          const resolutionMatch = noteData.match(/Preferred Resolution: (\w+)/);
-          if (resolutionMatch) {
-            preferredResolution = resolutionMatch[1].toLowerCase();
-          }
-        }
-
-        returnRequests.push({
-          id: returnData.id,
-          orderId: order.id,
-          orderNumber: order.name.replace('#', ''),
-          items: items,
-          reason: mapShopifyReasonToInternal(returnLineItems.length > 0 
-              ? returnLineItems[0].node.returnReason 
-              : 'OTHER'),
-          additionalNotes: additionalNotes,
-          preferredResolution: preferredResolution,
-          customerEmail: customerEmail,
-          requestDate: returnData.createdAt,
-          status: mapShopifyStatusToInternal(returnData.status),
-          shopifyReturnRequestId: returnData.id,
+        items.push({
+          lineItemId: originalLineItem.id,
+          productId: variant.id,
+          title: originalLineItem.title,
+          imageUrl: variant.image?.url,
+          quantity: lineItem.quantity,
+          price: 0.0, // Price not available in this query
+          sku: variant.id,
+          variantTitle: variant.title,
         });
       }
+
+      returnRequests.push({
+        id: returnData.id,
+        orderId: returnData.order.id,
+        orderNumber: returnData.order.name.replace('#', ''),
+        items: items,
+        reason: mapShopifyReasonToInternal(returnLineItems.length > 0 
+            ? returnLineItems[0].node.returnReason 
+            : 'OTHER'),
+        additionalNotes: returnLineItems.length > 0 
+            ? (returnLineItems[0].node.customerNote || '') 
+            : '',
+        preferredResolution: 'refund', // Default since we can't extract from note field
+        customerEmail: customerEmail,
+        requestDate: new Date().toISOString(), // Default since createdAt not available
+        status: mapShopifyStatusToInternal(returnData.status),
+        shopifyReturnRequestId: returnData.id,
+      });
     }
 
     console.log(`✅ Retrieved ${returnRequests.length} return requests from Admin API`);
