@@ -2513,6 +2513,31 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
   });
 });
 
+// 🔥 NEW: Helper function to create Shopify customer access token for store credit
+async function createCustomerAccessToken(customerEmail) {
+  try {
+    console.log(`🔐 Attempting to create customer access token for: ${customerEmail}`);
+    
+    // Since we don't store passwords (using email verification), we need to use Multipass or 
+    // create a temporary password for the customer access token
+    // For now, we'll use a fallback approach with Admin API
+    
+    // Option 1: Try to use existing customer access token if stored
+    // Option 2: Create a temporary password and use it immediately
+    // Option 3: Use Admin API directly for store credit (current approach)
+    
+    // For immediate functionality, we'll return null and rely on Admin API store credit
+    // This can be enhanced later with proper customer access token creation
+    
+    console.log(`⚠️ Customer access token creation skipped - using Admin API for store credit`);
+    return null;
+    
+  } catch (error) {
+    console.error('❌ Error creating customer access token:', error);
+    return null;
+  }
+}
+
 // GET /customer/profile - Get customer profile
 app.get('/customer/profile', authenticateAppToken, async (req, res) => {
   try {
@@ -2665,6 +2690,9 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
         amount: totalStoreCredit.toFixed(2),
         currencyCode: 'EUR'
       },
+      
+      // 🔥 NEW: Shopify Customer Access Token for store credit functionality
+      shopifyCustomerAccessToken: await createCustomerAccessToken(customer.email),
       
       // Address data - FIXED structure
       defaultAddress: customer.defaultAddress,
