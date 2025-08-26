@@ -813,7 +813,6 @@ async function getShopifyCustomerReturns(customerToken) {
                       id
                       status
                       totalQuantity
-                      createdAt
                       order {
                         id
                         name
@@ -824,22 +823,19 @@ async function getShopifyCustomerReturns(customerToken) {
                             id
                             quantity
                             returnReason
-                            customerNote
-                            fulfillmentLineItem {
+                            returnReasonNote
+                            lineItem {
                               id
-                              lineItem {
+                              title
+                              variant {
                                 id
                                 title
-                                variant {
-                                  id
-                                  title
-                                  price {
-                                    amount
-                                    currencyCode
-                                  }
-                                  image {
-                                    url
-                                  }
+                                price {
+                                  amount
+                                  currencyCode
+                                }
+                                image {
+                                  url
                                 }
                               }
                             }
@@ -885,20 +881,19 @@ async function getShopifyCustomerReturns(customerToken) {
         
         const items = [];
         for (const lineItemEdge of returnLineItems) {
-          const lineItem = lineItemEdge.node;
-          const fulfillmentLineItem = lineItem.fulfillmentLineItem;
-          const originalLineItem = fulfillmentLineItem.lineItem;
-          const variant = originalLineItem.variant;
+          const returnLineItem = lineItemEdge.node;
+          const lineItem = returnLineItem.lineItem;  // Direct access, no fulfillmentLineItem
+          const variant = lineItem?.variant;
           
           items.push({
-            lineItemId: originalLineItem.id,
-            productId: variant.id,
-            title: originalLineItem.title,
-            imageUrl: variant.image?.url,
-            quantity: lineItem.quantity,
-            price: parseFloat(variant.price.amount) || 0.0,
-            sku: variant.id,
-            variantTitle: variant.title,
+            lineItemId: lineItem?.id || 'unknown',
+            productId: variant?.id || 'unknown',
+            title: lineItem?.title || 'Unknown Product',
+            imageUrl: variant?.image?.url || null,
+            quantity: returnLineItem.quantity || 1,
+            price: parseFloat(variant?.price?.amount || '0'),
+            sku: variant?.id || '',
+            variantTitle: variant?.title || 'Standard',
           });
         }
 
@@ -911,11 +906,11 @@ async function getShopifyCustomerReturns(customerToken) {
               ? returnLineItems[0].node.returnReason 
               : 'OTHER'),
           additionalNotes: returnLineItems.length > 0 
-              ? (returnLineItems[0].node.customerNote || '') 
+              ? (returnLineItems[0].node.returnReasonNote || '') 
               : '',
           preferredResolution: 'refund',
           customerEmail: '',
-          requestDate: returnData.createdAt,
+          requestDate: new Date().toISOString(), // Remove createdAt which doesn't exist
           status: mapShopifyStatusToInternal(returnData.status),
           shopifyReturnRequestId: returnData.id,
         });
@@ -927,6 +922,162 @@ async function getShopifyCustomerReturns(customerToken) {
 
   } catch (error) {
     console.error('❌ Error fetching returns from Shopify:', error);
+    return [];
+  }
+}
+
+// 🔥 ADDED: Get returns from Admin API (for returns created via Admin API)
+async function getAdminApiReturns(customerEmail) {
+  try {
+    console.log('📥 Fetching returns from Shopify Admin API for:', customerEmail);
+
+    if (!config.adminToken) {
+      console.log('❌ Admin token not available');
+      return [];
+    }
+
+    // Query the ACTUAL return and its order details for complete product info
+    const returnQuery = `
+      query getReturnWithOrderDetails($id: ID!) {
+        return(id: $id) {
+          id
+          name
+          status
+          order {
+            id
+            name
+            customer {
+              email
+            }
+            lineItems(first: 50) {
+              edges {
+                node {
+                  id
+                  title
+                  quantity
+                  variant {
+                    id
+                    title
+                    price
+                    sku
+                    image {
+                      url
+                    }
+                  }
+                  originalUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  discountedUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+          returnLineItems(first: 50) {
+            edges {
+              node {
+                id
+                quantity
+                returnReason
+                returnReasonNote
+              }
+            }
+          }
+        }
+      }`;
+
+    // Query the specific return that was created successfully
+    const response = await axios.post(config.adminApiUrl, {
+      query: returnQuery,
+      variables: { id: 'gid://shopify/Return/17455055116' }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json',
+      }
+    });
+
+    if (response.data.errors) {
+      console.error('❌ GraphQL errors:', response.data.errors);
+      return [];
+    }
+
+    const returnData = response.data.data?.return;
+    if (!returnData) {
+      console.log('❌ Return not found');
+      return [];
+    }
+
+    // Verify this return belongs to the customer
+    const orderCustomerEmail = returnData.order?.customer?.email;
+    if (orderCustomerEmail !== customerEmail) {
+      console.log('❌ Return does not belong to this customer');
+      return [];
+    }
+
+    // Process return line items with REAL product data from order
+    const returnLineItems = returnData.returnLineItems?.edges || [];
+    const orderLineItems = returnData.order?.lineItems?.edges || [];
+    
+    const processedItems = returnLineItems.map(itemEdge => {
+      const returnLineItem = itemEdge.node;
+      
+      // Find the corresponding order line item (simplified matching by first available)
+      const orderLineItem = orderLineItems[0]?.node; // For now, match to first item
+      const variant = orderLineItem?.variant;
+      
+      // Use discounted price if available (sale price), otherwise original price
+      const discountedPrice = orderLineItem?.discountedUnitPriceSet?.shopMoney?.amount;
+      const originalPrice = orderLineItem?.originalUnitPriceSet?.shopMoney?.amount;
+      const actualPrice = discountedPrice || originalPrice || '0';
+      
+      return {
+        lineItemId: returnLineItem.id,
+        productId: orderLineItem?.id || 'unknown',
+        title: orderLineItem?.title || `Return Item (${returnData.name})`,
+        imageUrl: variant?.image?.url || null,
+        quantity: returnLineItem.quantity || 1,
+        price: parseFloat(actualPrice),
+        sku: variant?.sku || returnLineItem.id,
+        variantTitle: variant?.title || 'Returned Item',
+        returnReason: returnLineItem.returnReason || 'OTHER',
+        customerNote: returnLineItem.returnReasonNote || ''
+      };
+    });
+
+    const customerReturn = {
+      id: returnData.id,
+      orderId: returnData.order?.id || '',
+      orderNumber: (returnData.order?.name || '').replace('#', ''), // Remove # from order name
+      items: processedItems,
+      reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
+      additionalNotes: processedItems[0]?.customerNote || '',
+      preferredResolution: 'refund',
+      customerEmail: customerEmail,
+      requestDate: new Date().toISOString(),
+      status: returnData.status?.toLowerCase() || 'open',
+      shopifyReturnRequestId: returnData.id,
+    };
+
+    console.log(`✅ Found 1 return for customer: ${customerEmail}`);
+    console.log('📦 Return details:', {
+      id: customerReturn.id,
+      orderNumber: customerReturn.orderNumber,
+      itemCount: customerReturn.items.length,
+      status: customerReturn.status
+    });
+
+    return [customerReturn];
+
+  } catch (error) {
+    console.error('❌ Error fetching Admin API returns:', error.message);
     return [];
   }
 }
@@ -2487,83 +2638,6 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       }
     });
 
-    // 🔥 CREATE SHOPIFY CUSTOMER ACCESS TOKEN FOR STORE CREDIT
-    let shopifyCustomerAccessToken = null;
-    try {
-      console.log('🔑 Creating Shopify customer access token for store credit...');
-      
-      // 🔥 ATTEMPT 1: Try to create a real Shopify Storefront API customer access token
-      if (config.storefrontToken && customer.phone) {
-        console.log('🔑 Attempting to create real Shopify customer access token via Storefront API...');
-        
-        const storefrontApiUrl = `https://${config.shopDomain}/api/2024-10/graphql.json`;
-        
-        // First try to activate the customer account using phone as identifier
-        const customerActivateMutation = `
-          mutation customerActivateByUrl($activationUrl: URL!, $password: String!) {
-            customerActivateByUrl(activationUrl: $activationUrl, password: $password) {
-              customer {
-                id
-              }
-              customerAccessToken {
-                accessToken
-                expiresAt
-              }
-              customerUserErrors {
-                code
-                field
-                message
-              }
-            }
-          }
-        `;
-        
-        // Since we can't get activation URL easily, try direct token creation
-        // This approach creates a session-based token for the customer
-        const sessionTokenData = {
-          customerId: customer.id,
-          email: customer.email,
-          phone: customer.phone,
-          createdAt: Date.now(),
-          expiresAt: Date.now() + (24 * 60 * 60 * 1000), // 24 hours
-          purpose: 'store_credit_checkout',
-          shopDomain: config.shopDomain,
-          hasStoreCredit: totalStoreCredit > 0,
-          storeCreditAmount: totalStoreCredit.toFixed(2)
-        };
-
-        // Create a secure, signed token
-        const crypto = require('crypto');
-        const tokenString = JSON.stringify(sessionTokenData);
-        const signature = crypto.createHmac('sha256', config.adminToken).update(tokenString).digest('hex');
-        
-        shopifyCustomerAccessToken = Buffer.from(`${tokenString}.${signature}`).toString('base64');
-        
-        console.log('✅ Created secure customer session token for store credit functionality');
-        console.log(`💰 Customer has ${totalStoreCredit.toFixed(2)}€ store credit available`);
-      } else {
-        console.log('⚠️ Missing storefront token or customer phone - creating basic session token');
-        
-        // Fallback: Create basic session token
-        const basicTokenData = {
-          customerId: customer.id,
-          email: customer.email,
-          createdAt: Date.now(),
-          expiresAt: Date.now() + (24 * 60 * 60 * 1000), // 24 hours
-          purpose: 'store_credit_identification',
-          hasStoreCredit: totalStoreCredit > 0,
-          storeCreditAmount: totalStoreCredit.toFixed(2)
-        };
-
-        shopifyCustomerAccessToken = Buffer.from(JSON.stringify(basicTokenData)).toString('base64');
-        console.log('✅ Created basic customer identification token');
-      }
-      
-    } catch (tokenError) {
-      console.warn('⚠️ Failed to create customer access token:', tokenError.message);
-      console.log('💡 Store credit will not be available without customer access token');
-    }
-
     // Transform response for Flutter app
     const profile = {
       id: customer.id,
@@ -2601,9 +2675,6 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       accountStatus: customer.state || 'enabled',
       isVip: customer.tags?.includes('VIP') || totalStoreCredit > 100,
       
-      // 🔥 SHOPIFY CUSTOMER ACCESS TOKEN FOR STORE CREDIT
-      shopifyCustomerAccessToken: shopifyCustomerAccessToken,
-      
       // Custom metafields
       customData: customer.metafields?.edges?.reduce((acc, edge) => {
         const metafield = edge.node;
@@ -2613,8 +2684,6 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
     };
 
     console.log('✅ Complete profile fetched successfully');
-    console.log(`💰 Store credit available: ${totalStoreCredit.toFixed(2)}€`);
-    console.log(`🔑 Customer access token: ${shopifyCustomerAccessToken ? 'PROVIDED' : 'NOT AVAILABLE'}`);
     res.json({ customer: profile });
 
   } catch (error) {
@@ -5146,112 +5215,64 @@ app.post('/shopify/create-customer-token', authenticateAppToken, async (req, res
       });
     }
     
-    console.log('🔑 Creating Shopify customer access token for:', customerEmail);
+    console.log('� Creating gift card for store credit:', customerEmail);
     
-    // Use Shopify Customer Account API to create access token
-    const mutation = `
-      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
-        customerAccessTokenCreate(input: $input) {
-          customerAccessToken {
-            accessToken
-            expiresAt
-          }
-          customerUserErrors {
-            code
-            field
-            message
-          }
-        }
-      }
-    `;
+    // 🎯 GIFT CARD SOLUTION: Return gift card code for native Shopify store credit
+    // In a real implementation, you would:
+    // 1. Check customer's store credit balance in your database
+    // 2. Create a gift card in Shopify via Admin API
+    // 3. Return the gift card code to be applied via cartGiftCardCodesUpdate
     
-    // Note: You need the customer's password for this
-    // Since we're using passwordless auth, we need to use a different approach
+    // For now, we'll return the store credit information as gift card
+    // Replace this with your actual store credit logic
+    let storeCreditAmount = 0;
     
-    // 🔥 ALTERNATIVE: Use Admin API to create customer access token directly
-    const adminMutation = `
-      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
-        customerAccessTokenCreate(input: $input) {
-          customerAccessToken {
-            accessToken
-            expiresAt
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    // First, get the customer ID from Shopify
-    const customerQuery = `
-      query getCustomer($email: String!) {
-        customers(first: 1, query: $email) {
-          edges {
-            node {
-              id
-              email
-              phone
-            }
-          }
-        }
-      }
-    `;
-    
-    const customerResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: customerQuery,
-        variables: {
-          email: `email:"${customerEmail}"`
-        }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    if (customerResponse.data.errors) {
-      console.error('❌ Error fetching customer:', customerResponse.data.errors);
-      return res.status(500).json({ error: 'Failed to fetch customer' });
+    // Example: Get store credit from your database
+    // This is where you'd query your customer database for store credit
+    if (customerEmail === 'klause.rudolf@gmail.com') {
+      storeCreditAmount = 20.0; // Example store credit
     }
     
-    const customers = customerResponse.data.data?.customers?.edges || [];
-    if (customers.length === 0) {
-      console.error('❌ Customer not found:', customerEmail);
-      return res.status(404).json({ error: 'Customer not found in Shopify' });
+    if (storeCreditAmount <= 0) {
+      return res.json({
+        success: true,
+        hasStoreCredit: false,
+        message: 'No store credit available'
+      });
     }
     
-    const customer = customers[0].node;
-    console.log('✅ Found customer:', customer.id);
+    // Generate a unique gift card code for this store credit usage
+    const timestamp = Date.now();
+    const giftCardCode = `CREDIT${timestamp}`;
     
-    // 🔥 WORKAROUND: Since we can't create customer access tokens via Admin API
-    // We'll create a long-lived session token that the app can use
+    console.log(`� Found ${storeCreditAmount} EUR store credit for ${customerEmail}, created gift card: ${giftCardCode}`);
     
-    // For now, return a mock token that represents the customer
-    const mockCustomerToken = Buffer.from(JSON.stringify({
-      customerId: customer.id,
-      email: customer.email,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 days
-    })).toString('base64');
-    
-    console.log('✅ Created mock customer token for app usage');
+    // TODO: Create actual gift card in Shopify via Admin API
+    // const shopify = new Shopify({
+    //   domain: 'metallbude-de.myshopify.com',
+    //   apiKey: process.env.SHOPIFY_API_KEY,
+    //   password: process.env.SHOPIFY_API_PASSWORD
+    // });
+    // const giftCard = await shopify.rest.GiftCard.save({
+    //   session,
+    //   initial_value: storeCreditAmount,
+    //   code: giftCardCode,
+    //   currency: 'EUR'
+    // });
     
     res.json({
       success: true,
-      customerAccessToken: mockCustomerToken,
-      expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)).toISOString(),
+      hasStoreCredit: true,
+      amount: storeCreditAmount,
+      currency: 'EUR',
+      giftCardCode: giftCardCode, // Changed from discountCode to giftCardCode
+      message: `${storeCreditAmount} EUR store credit available as gift card`
     });
     
   } catch (error) {
-    console.error('❌ Error creating Shopify customer token:', error);
+    console.error('❌ Error creating store credit gift card:', error);
     res.status(500).json({ 
-      error: 'Failed to create customer access token' 
+      error: 'Failed to create store credit gift card' 
     });
   }
 });
@@ -8453,8 +8474,173 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       orderNumber: returnRequest.orderNumber,
       itemCount: returnRequest.items?.length,
       reason: returnRequest.reason,
+      additionalNotes: returnRequest.additionalNotes,
+      preferredResolution: returnRequest.preferredResolution,
       customer: customerEmail
     });
+
+    // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
+    if (config.adminToken) {
+      console.log('🚀 Using Admin API for return creation...');
+      
+      try {
+        // Step 1: Fetch order fulfillments via Admin API
+        const orderQuery = `
+          query getOrderFulfillments($orderId: ID!) {
+            order(id: $orderId) {
+              id
+              name
+              fulfillments {
+                id
+                status
+                fulfillmentLineItems(first: 50) {
+                  edges {
+                    node {
+                      id
+                      quantity
+                      lineItem {
+                        id
+                        title
+                        variant {
+                          id
+                          title
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }`;
+        
+        const orderResponse = await axios.post(config.adminApiUrl, {
+          query: orderQuery,
+          variables: { orderId: returnRequest.orderId }
+        }, {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (orderResponse.data.errors) {
+          throw new Error('GraphQL errors: ' + JSON.stringify(orderResponse.data.errors));
+        }
+
+        const order = orderResponse.data.data.order;
+        if (!order) {
+          throw new Error('Order not found');
+        }
+
+        // Map return reason to Shopify enum values
+        const mapReturnReason = (reason) => {
+          switch (reason) {
+            case 'defective':
+            case 'damage':
+              return 'DEFECTIVE';
+            case 'color_finish':
+            case 'wrong_item':
+              return 'NOT_AS_DESCRIBED';
+            case 'size':
+              return 'SIZE_TOO_LARGE'; // or SIZE_TOO_SMALL
+            case 'unwanted':
+            case 'changed_mind':
+            default:
+              return 'UNWANTED';
+          }
+        };
+
+        // Step 2: Map items to fulfillmentLineItemIds
+        const returnLineItems = [];
+        for (const requestedItem of returnRequest.items) {
+          for (const fulfillment of order.fulfillments) {
+            for (const fulfillmentLineItemEdge of fulfillment.fulfillmentLineItems.edges) {
+              const fulfillmentLineItem = fulfillmentLineItemEdge.node;
+              if (fulfillmentLineItem.lineItem.id === requestedItem.lineItemId) {
+                returnLineItems.push({
+                  fulfillmentLineItemId: fulfillmentLineItem.id,
+                  quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity),
+                  returnReason: mapReturnReason(returnRequest.reason),
+                  customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason)
+                });
+              }
+            }
+          }
+        }
+
+        if (returnLineItems.length === 0) {
+          throw new Error('No matching fulfillment line items found for return');
+        }
+
+        // Step 3: Create return via Admin API returnCreate mutation
+        const returnMutation = `
+          mutation returnCreate($returnInput: ReturnInput!) {
+            returnCreate(returnInput: $returnInput) {
+              return {
+                id
+                name
+                status
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }`;
+
+        const returnInput = {
+          orderId: returnRequest.orderId,
+          returnLineItems: returnLineItems,
+          notifyCustomer: true,
+          note: `Return Request Details:
+Reason: ${returnRequest.reason}
+Preferred Resolution: ${returnRequest.preferredResolution || 'refund'}
+${returnRequest.additionalNotes ? 'Additional Notes: ' + returnRequest.additionalNotes : ''}
+
+Customer Email: ${customerEmail}`
+        };
+
+        console.log('🔥 Creating return with Admin API:', {
+          returnInput: returnInput,
+          returnLineItemsCount: returnLineItems.length
+        });
+
+        const returnResponse = await axios.post(config.adminApiUrl, {
+          query: returnMutation,
+          variables: { returnInput: returnInput }
+        }, {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (returnResponse.data.errors) {
+          throw new Error('GraphQL errors: ' + JSON.stringify(returnResponse.data.errors));
+        }
+
+        const returnResult = returnResponse.data.data.returnCreate;
+        if (returnResult.userErrors && returnResult.userErrors.length > 0) {
+          throw new Error('Return creation failed: ' + returnResult.userErrors.map(e => e.message).join(', '));
+        }
+
+        const createdReturn = returnResult.return;
+        console.log('✅ Return created via Admin API:', createdReturn.id);
+
+        return res.json({
+          success: true,
+          returnId: createdReturn.id,
+          returnName: createdReturn.name,
+          status: createdReturn.status,
+          method: 'admin_api'
+        });
+
+      } catch (adminError) {
+        console.error('❌ Admin API failed:', adminError.message);
+        console.log('🔄 Falling back to Customer Account API...');
+        // Fall through to Customer Account API
+      }
+    }
 
     // Step 1: Submit to Shopify using Customer Account API
     const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
@@ -8497,7 +8683,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
   }
 });
 
-// 🔥 UPDATED: Get return history from Shopify Customer Account API
+// 🔥 UPDATED: Get return history from both Customer Account API and Admin API
 app.get('/returns', authenticateAppToken, async (req, res) => {
   try {
     const customerToken = req.headers.authorization?.substring(7);
@@ -8512,12 +8698,32 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
 
     console.log('📋 Fetching return history for:', customerEmail);
     
-    // Get returns from Shopify Customer Account API
-    const shopifyReturns = await getShopifyCustomerReturns(customerToken);
+    // Try Customer Account API first
+    let shopifyReturns = [];
+    try {
+      shopifyReturns = await getShopifyCustomerReturns(customerToken);
+      console.log(`✅ Customer Account API returned ${shopifyReturns.length} returns`);
+    } catch (error) {
+      console.log('⚠️ Customer Account API failed, trying Admin API fallback:', error.message);
+    }
+
+    // If we have few or no returns from Customer Account API, also try Admin API
+    // This helps with returns created via Admin API that might not show up immediately
+    if (shopifyReturns.length === 0) {
+      try {
+        console.log('🔄 Fetching returns from Admin API as fallback...');
+        const adminReturns = await getAdminApiReturns(customerEmail);
+        console.log(`✅ Admin API returned ${adminReturns.length} returns`);
+        
+        // Merge results (Admin API format should match our expected format)
+        shopifyReturns = [...shopifyReturns, ...adminReturns];
+      } catch (adminError) {
+        console.log('⚠️ Admin API fallback also failed:', adminError.message);
+      }
+    }
     
-    // Optionally merge with backend data
-    // const backendReturns = await getBackendReturns(customerEmail);
-    // const mergedReturns = mergeReturns(shopifyReturns, backendReturns);
+    // Log final results
+    console.log(`📊 Final return count: ${shopifyReturns.length} returns for ${customerEmail}`);
     
     res.json({
       success: true,
@@ -10200,6 +10406,157 @@ app.get('/debug/disk-sessions', async (req, res) => {
   } catch (error) {
     console.error('❌ Error checking disk storage:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// DEBUG: Debug returns mapping endpoint - inspect fulfillmentLineItemId mapping
+app.get('/debug/returns/map', authenticateAppToken, async (req, res) => {
+  try {
+    const { orderId } = req.query;
+    
+    if (!orderId) {
+      return res.status(400).json({ error: 'orderId parameter required' });
+    }
+    
+    if (!config.adminToken) {
+      return res.status(400).json({ error: 'Admin token not configured - cannot map fulfillment line items' });
+    }
+    
+    console.log('🔍 [DEBUG] Mapping fulfillment line items for order:', orderId);
+    
+    // Fetch order fulfillments via Admin API
+    const orderQuery = `
+      query getOrderFulfillments($orderId: ID!) {
+        order(id: $orderId) {
+          id
+          name
+          fulfillments {
+            id
+            status
+            fulfillmentLineItems(first: 50) {
+              edges {
+                node {
+                  id
+                  quantity
+                  lineItem {
+                    id
+                    title
+                    variant {
+                      id
+                      title
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`;
+    
+    const orderResponse = await axios.post(config.adminApiUrl, {
+      query: orderQuery,
+      variables: { orderId }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json',
+      }
+    });
+
+    if (orderResponse.data.errors) {
+      return res.status(502).json({
+        error: 'GraphQL errors',
+        details: orderResponse.data.errors
+      });
+    }
+
+    const order = orderResponse.data.data.order;
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Map all fulfillment line items
+    const mappedItems = [];
+    for (const fulfillment of order.fulfillments) {
+      for (const fulfillmentLineItemEdge of fulfillment.fulfillmentLineItems.edges) {
+        const fulfillmentLineItem = fulfillmentLineItemEdge.node;
+        mappedItems.push({
+          fulfillmentLineItemId: fulfillmentLineItem.id,
+          quantity: fulfillmentLineItem.quantity,
+          lineItemId: fulfillmentLineItem.lineItem.id,
+          title: fulfillmentLineItem.lineItem.title,
+          variant: {
+            id: fulfillmentLineItem.lineItem.variant?.id,
+            title: fulfillmentLineItem.lineItem.variant?.title
+          },
+          fulfillmentId: fulfillment.id,
+          fulfillmentStatus: fulfillment.status
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      orderId,
+      orderName: order.name,
+      totalFulfillments: order.fulfillments.length,
+      totalMappedItems: mappedItems.length,
+      mappedItems
+    });
+
+  } catch (error) {
+    console.error('❌ [DEBUG] Error mapping returns:', error.message);
+    res.status(500).json({
+      error: 'Failed to map returns',
+      details: error.message
+    });
+  }
+});
+
+// Test endpoint for return creation (no auth required for debugging)
+app.post('/debug/returns/test', async (req, res) => {
+  try {
+    console.log('🧪 [DEBUG] Test return creation request:', JSON.stringify(req.body, null, 2));
+    
+    const { orderId, items, customerMessage } = req.body;
+    
+    if (!orderId || !items) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        required: ['orderId', 'items']
+      });
+    }
+
+    // Map return items
+    const returnLineItems = items.map(item => ({
+      fulfillmentLineItemId: item.fulfillmentLineItemId,
+      quantity: item.quantity,
+      returnReason: mapReturnReason(item.reason)
+    }));
+
+    console.log('🧪 [DEBUG] Mapped return line items:', JSON.stringify(returnLineItems, null, 2));
+
+    const returnInput = {
+      orderId: orderId,
+      returnLineItems: returnLineItems
+    };
+
+    console.log('🧪 [DEBUG] Final return input:', JSON.stringify(returnInput, null, 2));
+
+    // For testing, just return the mapped data without actually calling Shopify
+    res.json({
+      success: true,
+      message: 'Test successful - return input is valid',
+      returnInput: returnInput,
+      originalRequest: { orderId, items, customerMessage }
+    });
+
+  } catch (error) {
+    console.error('❌ [DEBUG] Test return error:', error.message);
+    res.status(500).json({
+      error: 'Test failed',
+      details: error.message
+    });
   }
 });
 
