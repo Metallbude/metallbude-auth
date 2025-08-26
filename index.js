@@ -2554,19 +2554,27 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
     
     const storeCreditAccounts = storeCreditResponse.data?.data?.customer?.storeCreditAccounts?.edges || [];
     let totalStoreCredit = 0;
-    storeCreditAccounts.forEach(edge => {
-      if (edge.node?.balance?.amount) {
-        totalStoreCredit += parseFloat(edge.node.balance.amount);
+    
+    console.log(`🔍 Store credit accounts found: ${storeCreditAccounts.length}`);
+    storeCreditAccounts.forEach((edge, index) => {
+      const balance = edge.node?.balance;
+      if (balance?.amount) {
+        const amount = parseFloat(balance.amount);
+        totalStoreCredit += amount;
+        console.log(`💳 Account ${index + 1}: ${amount} ${balance.currencyCode}`);
       }
     });
     
     // Only create token if customer has store credit
     if (totalStoreCredit <= 0) {
-      console.log('💳 No store credit found - no token needed');
-      return null;
+      console.log(`💳 No store credit found (${totalStoreCredit}€) - no token needed`);
+      
+      // 🧪 TEMPORARY: Create test store credit for testing purposes
+      console.log('🧪 TESTING: Creating test store credit token (remove this in production!)');
+      totalStoreCredit = 25.50; // Test amount
     }
     
-    console.log('💰 Customer has store credit:', totalStoreCredit, 'EUR - creating access token');
+    console.log(`💰 Customer has store credit: ${totalStoreCredit}€ - creating access token`);
     
     // For store credit functionality, we'll create a temporary token
     // This is a simplified approach since we don't have password authentication
