@@ -12355,9 +12355,16 @@ app.post('/apply-store-credit', async (req, res) => {
       input: {
         customerId: customer.id,
         lineItems: draftOrderLines,
-        useCustomerDefaultAddress: true
+        useCustomerDefaultAddress: false,
+        appliedDiscount: {
+          description: `Store Credit Applied - ${storeCreditAmount}€`,
+          value: storeCreditAmount,
+          valueType: 'FIXED_AMOUNT'
+        }
       }
     };
+
+    console.log(`📋 Creating draft order with input:`, JSON.stringify(draftOrderInput, null, 2));
 
     const draftOrderResponse = await axios.post(
       config.adminApiUrl,
@@ -12372,6 +12379,8 @@ app.post('/apply-store-credit', async (req, res) => {
         },
       }
     );
+
+    console.log(`📋 Draft order response:`, JSON.stringify(draftOrderResponse.data, null, 2));
 
     const draftOrderData = draftOrderResponse.data?.data?.draftOrderCreate;
     const draftOrderErrors = draftOrderData?.userErrors || [];
@@ -12389,60 +12398,17 @@ app.post('/apply-store-credit', async (req, res) => {
     if (!draftOrder) {
       return res.status(500).json({
         success: false,
-        error: 'Failed to create draft order'
+        error: 'Failed to create draft order - no draft order returned',
+        debugInfo: {
+          response: draftOrderResponse.data,
+          input: draftOrderInput
+        }
       });
     }
 
     console.log(`📋 Created draft order: ${draftOrder.name} (${draftOrder.id})`);
 
-    // Step 4: Apply store credit to draft order (this actually deducts from balance)
-    const applyStoreCreditMutation = `
-      mutation draftOrderUpdate($id: ID!, $input: DraftOrderInput!) {
-        draftOrderUpdate(id: $id, input: $input) {
-          draftOrder {
-            id
-            name
-            totalPrice
-            appliedDiscount {
-              description
-              value
-              valueType
-            }
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const updateInput = {
-      id: draftOrder.id,
-      input: {
-        appliedDiscount: {
-          description: `Store Credit Applied - ${storeCreditAmount}€`,
-          value: storeCreditAmount,
-          valueType: 'FIXED_AMOUNT'
-        }
-      }
-    };
-
-    const updateResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: applyStoreCreditMutation,
-        variables: updateInput
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    // Step 5: Deduct store credit from customer account
+    // Step 4: Deduct store credit from customer account FIRST
     const deductStoreCreditMutation = `
       mutation storeCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
         storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
@@ -12499,7 +12465,7 @@ app.post('/apply-store-credit', async (req, res) => {
     const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || 0;
     console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
 
-    // Step 6: Complete the draft order to create a real order
+    // Step 5: Complete the draft order to create a real order
     const completeDraftOrderMutation = `
       mutation draftOrderComplete($id: ID!) {
         draftOrderComplete(id: $id) {
