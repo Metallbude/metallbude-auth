@@ -2568,10 +2568,11 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
     // Only create token if customer has store credit
     if (totalStoreCredit <= 0) {
       console.log(`💳 No store credit found (${totalStoreCredit}€) - no token needed`);
+      return null;
       
-      // 🧪 TEMPORARY: Create test store credit for testing purposes
-      console.log('🧪 TESTING: Creating test store credit token (remove this in production!)');
-      totalStoreCredit = 25.50; // Test amount
+      // 🧪 TEMPORARY: Test store credit override (commented out to use real amounts)
+      // console.log('🧪 TESTING: Creating test store credit token (remove this in production!)');
+      // totalStoreCredit = 25.50; // Test amount
     }
     
     console.log(`💰 Customer has store credit: ${totalStoreCredit}€ - creating access token`);
