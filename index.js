@@ -2513,31 +2513,6 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
   });
 });
 
-// 🔥 NEW: Helper function to create Shopify customer access token for store credit
-async function createCustomerAccessToken(customerEmail) {
-  try {
-    console.log(`🔐 Attempting to create customer access token for: ${customerEmail}`);
-    
-    // Since we don't store passwords (using email verification), we need to use Multipass or 
-    // create a temporary password for the customer access token
-    // For now, we'll use a fallback approach with Admin API
-    
-    // Option 1: Try to use existing customer access token if stored
-    // Option 2: Create a temporary password and use it immediately
-    // Option 3: Use Admin API directly for store credit (current approach)
-    
-    // For immediate functionality, we'll return null and rely on Admin API store credit
-    // This can be enhanced later with proper customer access token creation
-    
-    console.log(`⚠️ Customer access token creation skipped - using Admin API for store credit`);
-    return null;
-    
-  } catch (error) {
-    console.error('❌ Error creating customer access token:', error);
-    return null;
-  }
-}
-
 // GET /customer/profile - Get customer profile
 app.get('/customer/profile', authenticateAppToken, async (req, res) => {
   try {
@@ -2690,9 +2665,6 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
         amount: totalStoreCredit.toFixed(2),
         currencyCode: 'EUR'
       },
-      
-      // 🔥 NEW: Shopify Customer Access Token for store credit functionality
-      shopifyCustomerAccessToken: await createCustomerAccessToken(customer.email),
       
       // Address data - FIXED structure
       defaultAddress: customer.defaultAddress,
@@ -5243,64 +5215,222 @@ app.post('/shopify/create-customer-token', authenticateAppToken, async (req, res
       });
     }
     
-    console.log('� Creating gift card for store credit:', customerEmail);
+    console.log('🔑 Creating Shopify customer access token for:', customerEmail);
     
-    // 🎯 GIFT CARD SOLUTION: Return gift card code for native Shopify store credit
-    // In a real implementation, you would:
-    // 1. Check customer's store credit balance in your database
-    // 2. Create a gift card in Shopify via Admin API
-    // 3. Return the gift card code to be applied via cartGiftCardCodesUpdate
+    // Use Shopify Customer Account API to create access token
+    const mutation = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerAccessToken {
+            accessToken
+            expiresAt
+          }
+          customerUserErrors {
+            code
+            field
+            message
+          }
+        }
+      }
+    `;
     
-    // For now, we'll return the store credit information as gift card
-    // Replace this with your actual store credit logic
-    let storeCreditAmount = 0;
+    // Note: You need the customer's password for this
+    // Since we're using passwordless auth, we need to use a different approach
     
-    // Example: Get store credit from your database
-    // This is where you'd query your customer database for store credit
-    if (customerEmail === 'klause.rudolf@gmail.com') {
-      storeCreditAmount = 20.0; // Example store credit
+    // 🔥 ALTERNATIVE: Use Admin API to create customer access token directly
+    const adminMutation = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerAccessToken {
+            accessToken
+            expiresAt
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    // First, get the customer ID from Shopify
+    const customerQuery = `
+      query getCustomer($email: String!) {
+        customers(first: 1, query: $email) {
+          edges {
+            node {
+              id
+              email
+              phone
+            }
+          }
+        }
+      }
+    `;
+    
+    const customerResponse = await axios.post(
+      config.adminApiUrl,
+      {
+        query: customerQuery,
+        variables: {
+          email: `email:"${customerEmail}"`
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    if (customerResponse.data.errors) {
+      console.error('❌ Error fetching customer:', customerResponse.data.errors);
+      return res.status(500).json({ error: 'Failed to fetch customer' });
     }
     
-    if (storeCreditAmount <= 0) {
-      return res.json({
-        success: true,
-        hasStoreCredit: false,
-        message: 'No store credit available'
-      });
+    const customers = customerResponse.data.data?.customers?.edges || [];
+    if (customers.length === 0) {
+      console.error('❌ Customer not found:', customerEmail);
+      return res.status(404).json({ error: 'Customer not found in Shopify' });
     }
     
-    // Generate a unique gift card code for this store credit usage
-    const timestamp = Date.now();
-    const giftCardCode = `CREDIT${timestamp}`;
+    const customer = customers[0].node;
+    console.log('✅ Found customer:', customer.id);
     
-    console.log(`� Found ${storeCreditAmount} EUR store credit for ${customerEmail}, created gift card: ${giftCardCode}`);
+    // 🔥 REAL SOLUTION: Create actual Shopify customer access token via Storefront API
+    // We'll temporarily set a password, create the token, then remove the password
     
-    // TODO: Create actual gift card in Shopify via Admin API
-    // const shopify = new Shopify({
-    //   domain: 'metallbude-de.myshopify.com',
-    //   apiKey: process.env.SHOPIFY_API_KEY,
-    //   password: process.env.SHOPIFY_API_PASSWORD
-    // });
-    // const giftCard = await shopify.rest.GiftCard.save({
-    //   session,
-    //   initial_value: storeCreditAmount,
-    //   code: giftCardCode,
-    //   currency: 'EUR'
-    // });
+    const tempPassword = crypto.randomBytes(32).toString('hex');
+    console.log('🔒 Setting temporary password for customer');
+    
+    // Step 1: Set temporary password via Admin API
+    const setPasswordMutation = `
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+            email
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    await axios.post(
+      config.adminApiUrl,
+      {
+        query: setPasswordMutation,
+        variables: {
+          input: {
+            id: customer.id,
+            password: tempPassword
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    // Step 2: Create customer access token via Storefront API
+    const tokenMutation = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerAccessToken {
+            accessToken
+            expiresAt
+          }
+          customerUserErrors {
+            code
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const tokenResponse = await axios.post(
+      config.apiUrl,
+      {
+        query: tokenMutation,
+        variables: {
+          input: {
+            email: customerEmail,
+            password: tempPassword
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    // Step 3: Remove the temporary password
+    const removePasswordMutation = `
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+            email
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    await axios.post(
+      config.adminApiUrl,
+      {
+        query: removePasswordMutation,
+        variables: {
+          input: {
+            id: customer.id,
+            password: null
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    console.log('🔒 Removed temporary password');
+    
+    if (tokenResponse.data.errors || tokenResponse.data.data.customerAccessTokenCreate.customerUserErrors?.length > 0) {
+      console.error('❌ Error creating customer access token:', 
+        tokenResponse.data.errors || tokenResponse.data.data.customerAccessTokenCreate.customerUserErrors);
+      return res.status(500).json({ error: 'Failed to create customer access token' });
+    }
+    
+    const accessTokenData = tokenResponse.data.data.customerAccessTokenCreate.customerAccessToken;
+    console.log('✅ Created REAL Shopify customer access token');
     
     res.json({
       success: true,
-      hasStoreCredit: true,
-      amount: storeCreditAmount,
-      currency: 'EUR',
-      giftCardCode: giftCardCode, // Changed from discountCode to giftCardCode
-      message: `${storeCreditAmount} EUR store credit available as gift card`
+      customerAccessToken: accessTokenData.accessToken,
+      expiresAt: accessTokenData.expiresAt,
     });
     
   } catch (error) {
-    console.error('❌ Error creating store credit gift card:', error);
+    console.error('❌ Error creating Shopify customer token:', error);
     res.status(500).json({ 
-      error: 'Failed to create store credit gift card' 
+      error: 'Failed to create customer access token' 
     });
   }
 });
