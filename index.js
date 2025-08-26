@@ -12164,12 +12164,12 @@ app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
     }
 });
 
-// Apply store credit to a Shopify cart
+// Apply store credit to a Shopify cart by creating draft order and applying store credit
 app.post('/apply-store-credit', async (req, res) => {
   try {
     const { cartId, customerEmail, storeCreditAmount } = req.body;
     
-    console.log(`💳 [STORE_CREDIT] Apply store credit request:`);
+    console.log(`💳 [STORE_CREDIT] Apply store credit and deduct from balance:`);
     console.log(`   Cart ID: ${cartId}`);
     console.log(`   Customer: ${customerEmail}`);
     console.log(`   Amount: ${storeCreditAmount}€`);
@@ -12181,7 +12181,7 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // First, get customer ID from email  
+    // Step 1: Get customer and verify store credit balance
     const customerQuery = `
       query getCustomer($email: String!) {
         customers(first: 1, query: $email) {
@@ -12192,6 +12192,7 @@ app.post('/apply-store-credit', async (req, res) => {
               storeCreditAccounts(first: 10) {
                 edges {
                   node {
+                    id
                     balance {
                       amount
                     }
@@ -12229,12 +12230,17 @@ app.post('/apply-store-credit', async (req, res) => {
     const customer = customers[0].node;
     console.log(`👤 Found customer: ${customer.email} (${customer.id})`);
 
-    // Check if customer has sufficient store credit
+    // Calculate available store credit
     const storeCreditAccounts = customer.storeCreditAccounts?.edges || [];
     let totalStoreCredit = 0;
+    let storeCreditAccountId = null;
+
     storeCreditAccounts.forEach(edge => {
       const amount = parseFloat(edge.node.balance?.amount || 0);
       totalStoreCredit += amount;
+      if (amount > 0 && !storeCreditAccountId) {
+        storeCreditAccountId = edge.node.id; // Use the first account with balance
+      }
     });
 
     console.log(`💰 Customer has ${totalStoreCredit}€ store credit available`);
@@ -12246,25 +12252,326 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // For now, we'll simulate store credit application and return the checkout URL
-    // The actual store credit will be applied in Shopify's web checkout interface
-    console.log(`💳 Store credit verified - will be applied in web checkout`);
+    if (!storeCreditAccountId) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid store credit account found'
+      });
+    }
+
+    // Step 2: Get cart contents via Storefront API to create draft order
+    const cartQuery = `
+      query getCart($cartId: ID!) {
+        cart(id: $cartId) {
+          id
+          lines(first: 50) {
+            edges {
+              node {
+                id
+                quantity
+                merchandise {
+                  ... on ProductVariant {
+                    id
+                    price {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+          cost {
+            subtotalAmount {
+              amount
+              currencyCode
+            }
+            totalAmount {
+              amount
+              currencyCode
+            }
+          }
+          discountCodes {
+            code
+            applicable
+          }
+        }
+      }
+    `;
+
+    const cartResponse = await axios.post(
+      `https://${SHOPIFY_SHOP_DOMAIN}/api/2024-10/graphql.json`,
+      {
+        query: cartQuery,
+        variables: { cartId: `gid://shopify/Cart/${cartId}` }
+      },
+      {
+        headers: {
+          'X-Shopify-Storefront-Access-Token': STOREFRONT_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const cart = cartResponse.data?.data?.cart;
+    if (!cart) {
+      return res.status(404).json({
+        success: false,
+        error: 'Cart not found'
+      });
+    }
+
+    console.log(`🛒 Cart found with ${cart.lines.edges.length} items`);
+
+    // Step 3: Create draft order with cart items
+    const draftOrderLines = cart.lines.edges.map(edge => {
+      const line = edge.node;
+      const variantId = line.merchandise.id.replace('gid://shopify/ProductVariant/', '');
+      
+      return {
+        variantId: parseInt(variantId),
+        quantity: line.quantity
+      };
+    });
+
+    const createDraftOrderMutation = `
+      mutation draftOrderCreate($input: DraftOrderInput!) {
+        draftOrderCreate(input: $input) {
+          draftOrder {
+            id
+            name
+            totalPrice
+            invoiceUrl
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const draftOrderInput = {
+      input: {
+        customerId: customer.id,
+        lineItems: draftOrderLines,
+        useCustomerDefaultAddress: true
+      }
+    };
+
+    const draftOrderResponse = await axios.post(
+      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      {
+        query: createDraftOrderMutation,
+        variables: draftOrderInput
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const draftOrderData = draftOrderResponse.data?.data?.draftOrderCreate;
+    const draftOrderErrors = draftOrderData?.userErrors || [];
+
+    if (draftOrderErrors.length > 0) {
+      console.error('❌ Error creating draft order:', draftOrderErrors);
+      return res.status(400).json({
+        success: false,
+        error: 'Failed to create draft order',
+        details: draftOrderErrors
+      });
+    }
+
+    const draftOrder = draftOrderData?.draftOrder;
+    if (!draftOrder) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create draft order'
+      });
+    }
+
+    console.log(`📋 Created draft order: ${draftOrder.name} (${draftOrder.id})`);
+
+    // Step 4: Apply store credit to draft order (this actually deducts from balance)
+    const applyStoreCreditMutation = `
+      mutation draftOrderUpdate($id: ID!, $input: DraftOrderInput!) {
+        draftOrderUpdate(id: $id, input: $input) {
+          draftOrder {
+            id
+            name
+            totalPrice
+            appliedDiscount {
+              description
+              value
+              valueType
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const updateInput = {
+      id: draftOrder.id,
+      input: {
+        appliedDiscount: {
+          description: `Store Credit Applied - ${storeCreditAmount}€`,
+          value: storeCreditAmount,
+          valueType: 'FIXED_AMOUNT'
+        }
+      }
+    };
+
+    const updateResponse = await axios.post(
+      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      {
+        query: applyStoreCreditMutation,
+        variables: updateInput
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Step 5: Deduct store credit from customer account
+    const deductStoreCreditMutation = `
+      mutation storeCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
+        storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
+          storeCreditAccountTransaction {
+            id
+            account {
+              balance {
+                amount
+              }
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const debitInput = {
+      storeCreditAccountDebit: {
+        storeCreditAccountId: storeCreditAccountId,
+        amount: storeCreditAmount.toString(),
+        note: `Store credit used for order ${draftOrder.name}`
+      }
+    };
+
+    const debitResponse = await axios.post(
+      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      {
+        query: deductStoreCreditMutation,
+        variables: debitInput
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const debitData = debitResponse.data?.data?.storeCreditAccountDebit;
+    const debitErrors = debitData?.userErrors || [];
+
+    if (debitErrors.length > 0) {
+      console.error('❌ Error deducting store credit:', debitErrors);
+      return res.status(400).json({
+        success: false,
+        error: 'Failed to deduct store credit',
+        details: debitErrors
+      });
+    }
+
+    const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || 0;
+    console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
+
+    // Step 6: Complete the draft order to create a real order
+    const completeDraftOrderMutation = `
+      mutation draftOrderComplete($id: ID!) {
+        draftOrderComplete(id: $id) {
+          draftOrder {
+            id
+            order {
+              id
+              name
+              totalPrice
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const completeResponse = await axios.post(
+      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      {
+        query: completeDraftOrderMutation,
+        variables: { id: draftOrder.id }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const completeData = completeResponse.data?.data?.draftOrderComplete;
+    const completeErrors = completeData?.userErrors || [];
+
+    if (completeErrors.length > 0) {
+      console.error('❌ Error completing draft order:', completeErrors);
+      return res.status(400).json({
+        success: false,
+        error: 'Failed to complete order',
+        details: completeErrors
+      });
+    }
+
+    const completedOrder = completeData?.draftOrder?.order;
+    if (!completedOrder) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to complete order'
+      });
+    }
+
+    console.log(`🎉 Order completed: ${completedOrder.name} (${completedOrder.id})`);
+    console.log(`💰 Store credit of ${storeCreditAmount}€ successfully deducted`);
 
     res.json({
       success: true,
-      message: 'Store credit ready for application',
-      availableCredit: totalStoreCredit,
-      appliedAmount: storeCreditAmount,
-      customerId: customer.id,
-      // Return a flag indicating store credit should be applied
-      useWebCheckout: true
+      message: 'Store credit applied and order completed',
+      orderId: completedOrder.id,
+      orderName: completedOrder.name,
+      totalPrice: completedOrder.totalPrice,
+      appliedStoreCredit: storeCreditAmount,
+      newStoreCreditBalance: parseFloat(newBalance),
+      customerId: customer.id
     });
 
   } catch (error) {
-    console.error('❌ Error processing store credit:', error);
+    console.error('❌ Error processing store credit order:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to process store credit',
+      error: 'Failed to process store credit order',
       details: error.message
     });
   }
