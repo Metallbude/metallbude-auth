@@ -12164,6 +12164,112 @@ app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
     }
 });
 
+// Apply store credit to a Shopify cart
+app.post('/apply-store-credit', async (req, res) => {
+  try {
+    const { cartId, customerEmail, storeCreditAmount } = req.body;
+    
+    console.log(`💳 [STORE_CREDIT] Apply store credit request:`);
+    console.log(`   Cart ID: ${cartId}`);
+    console.log(`   Customer: ${customerEmail}`);
+    console.log(`   Amount: ${storeCreditAmount}€`);
+    
+    if (!cartId || !customerEmail || !storeCreditAmount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: cartId, customerEmail, storeCreditAmount'
+      });
+    }
+
+    // First, get customer ID from email  
+    const customerQuery = `
+      query getCustomer($email: String!) {
+        customers(first: 1, query: $email) {
+          edges {
+            node {
+              id
+              email
+              storeCreditAccounts(first: 10) {
+                edges {
+                  node {
+                    balance {
+                      amount
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const customerResponse = await axios.post(
+      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      {
+        query: customerQuery,
+        variables: { email: customerEmail }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const customers = customerResponse.data?.data?.customers?.edges || [];
+    if (customers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Customer not found'
+      });
+    }
+
+    const customer = customers[0].node;
+    console.log(`👤 Found customer: ${customer.email} (${customer.id})`);
+
+    // Check if customer has sufficient store credit
+    const storeCreditAccounts = customer.storeCreditAccounts?.edges || [];
+    let totalStoreCredit = 0;
+    storeCreditAccounts.forEach(edge => {
+      const amount = parseFloat(edge.node.balance?.amount || 0);
+      totalStoreCredit += amount;
+    });
+
+    console.log(`💰 Customer has ${totalStoreCredit}€ store credit available`);
+
+    if (totalStoreCredit < storeCreditAmount) {
+      return res.status(400).json({
+        success: false,
+        error: `Insufficient store credit. Available: ${totalStoreCredit}€, Requested: ${storeCreditAmount}€`
+      });
+    }
+
+    // For now, we'll simulate store credit application and return the checkout URL
+    // The actual store credit will be applied in Shopify's web checkout interface
+    console.log(`💳 Store credit verified - will be applied in web checkout`);
+
+    res.json({
+      success: true,
+      message: 'Store credit ready for application',
+      availableCredit: totalStoreCredit,
+      appliedAmount: storeCreditAmount,
+      customerId: customer.id,
+      // Return a flag indicating store credit should be applied
+      useWebCheckout: true
+    });
+
+  } catch (error) {
+    console.error('❌ Error processing store credit:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process store credit',
+      details: error.message
+    });
+  }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
