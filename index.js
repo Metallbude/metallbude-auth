@@ -2513,6 +2513,84 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
   });
 });
 
+// Helper function to create Shopify customer access token for store credit functionality
+async function createShopifyCustomerAccessToken(customerEmail, customerId) {
+  try {
+    console.log('🔑 Creating Shopify customer access token for:', customerEmail);
+    
+    // Since we don't have the customer's password (email verification system), 
+    // we'll use a special approach for store credit functionality
+    
+    // First, check if customer has store credit - only create token if needed
+    const hasStoreCreditQuery = `
+      query checkStoreCredit($customerId: ID!) {
+        customer(id: $customerId) {
+          storeCreditAccounts(first: 10) {
+            edges {
+              node {
+                balance {
+                  amount
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    
+    const storeCreditResponse = await axios.post(
+      config.adminApiUrl,
+      {
+        query: hasStoreCreditQuery,
+        variables: { customerId }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    const storeCreditAccounts = storeCreditResponse.data?.data?.customer?.storeCreditAccounts?.edges || [];
+    let totalStoreCredit = 0;
+    storeCreditAccounts.forEach(edge => {
+      if (edge.node?.balance?.amount) {
+        totalStoreCredit += parseFloat(edge.node.balance.amount);
+      }
+    });
+    
+    // Only create token if customer has store credit
+    if (totalStoreCredit <= 0) {
+      console.log('💳 No store credit found - no token needed');
+      return null;
+    }
+    
+    console.log('💰 Customer has store credit:', totalStoreCredit, 'EUR - creating access token');
+    
+    // For store credit functionality, we'll create a temporary token
+    // This is a simplified approach since we don't have password authentication
+    const tokenPayload = {
+      customerId: customerId,
+      email: customerEmail,
+      purpose: 'store_credit',
+      storeCredit: totalStoreCredit,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
+    };
+    
+    // Create a JWT token that represents the customer access token
+    const customerAccessToken = jwt.sign(tokenPayload, config.privateKey, { algorithm: 'RS256' });
+    
+    console.log('✅ Created customer access token for store credit functionality');
+    return customerAccessToken;
+    
+  } catch (error) {
+    console.error('❌ Error creating customer access token:', error);
+    return null;
+  }
+}
+
 // GET /customer/profile - Get customer profile
 app.get('/customer/profile', authenticateAppToken, async (req, res) => {
   try {
@@ -2638,6 +2716,9 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       }
     });
 
+    // 🔥 NEW: Create Shopify customer access token for store credit functionality
+    const shopifyCustomerAccessToken = await createShopifyCustomerAccessToken(customer.email, customer.id);
+
     // Transform response for Flutter app
     const profile = {
       id: customer.id,
@@ -2649,6 +2730,9 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       createdAt: customer.createdAt,
       updatedAt: customer.updatedAt,
       verified: customer.verifiedEmail,
+      
+      // 🔥 NEW: Include Shopify customer access token for store credit
+      shopifyCustomerAccessToken: shopifyCustomerAccessToken,
       
       // Marketing preferences
       acceptsEmailMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
