@@ -12167,6 +12167,12 @@ app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
 // Apply store credit by simply deducting from customer balance
 app.post('/apply-store-credit', async (req, res) => {
   try {
+    console.log('📧 Store credit request received:');
+    console.log('   Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('   Raw body:', req.body);
+    console.log('   Body type:', typeof req.body);
+    console.log('   Body keys:', Object.keys(req.body || {}));
+    
     const { customerEmail, storeCreditAmount, cartTotal } = req.body;
     
     console.log(`💳 [STORE_CREDIT] Store credit deduction request:`);
