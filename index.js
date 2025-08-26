@@ -12371,7 +12371,7 @@ app.post('/apply-store-credit', async (req, res) => {
           value: {
             discountAmount: {
               amount: amountToDeduct.toString(),
-              appliesOnOneTimePurchase: true
+              // Remove the invalid appliesOnOneTimePurchase field
             }
           },
           items: {
