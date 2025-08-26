@@ -12164,12 +12164,12 @@ app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
     }
 });
 
-// Apply store credit to a Shopify cart by creating draft order and applying store credit
+// Apply store credit by simply deducting from customer balance
 app.post('/apply-store-credit', async (req, res) => {
   try {
     const { cartId, customerEmail, storeCreditAmount } = req.body;
     
-    console.log(`💳 [STORE_CREDIT] Apply store credit and deduct from balance:`);
+    console.log(`💳 [STORE_CREDIT] Simple store credit deduction:`);
     console.log(`   Cart ID: ${cartId}`);
     console.log(`   Customer: ${customerEmail}`);
     console.log(`   Amount: ${storeCreditAmount}€`);
@@ -12259,156 +12259,7 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Step 2: Get cart contents via Storefront API to create draft order
-    const cartQuery = `
-      query getCart($cartId: ID!) {
-        cart(id: $cartId) {
-          id
-          lines(first: 50) {
-            edges {
-              node {
-                id
-                quantity
-                merchandise {
-                  ... on ProductVariant {
-                    id
-                    price {
-                      amount
-                      currencyCode
-                    }
-                  }
-                }
-              }
-            }
-          }
-          cost {
-            subtotalAmount {
-              amount
-              currencyCode
-            }
-            totalAmount {
-              amount
-              currencyCode
-            }
-          }
-          discountCodes {
-            code
-            applicable
-          }
-        }
-      }
-    `;
-
-    const cartResponse = await axios.post(
-      config.apiUrl,
-      {
-        query: cartQuery,
-        variables: { cartId: `gid://shopify/Cart/${cartId}` }
-      },
-      {
-        headers: {
-          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    const cart = cartResponse.data?.data?.cart;
-    if (!cart) {
-      return res.status(404).json({
-        success: false,
-        error: 'Cart not found'
-      });
-    }
-
-    console.log(`🛒 Cart found with ${cart.lines.edges.length} items`);
-
-    // Step 3: Create draft order with cart items
-    const draftOrderLines = cart.lines.edges.map(edge => {
-      const line = edge.node;
-      const variantId = line.merchandise.id.replace('gid://shopify/ProductVariant/', '');
-      
-      return {
-        variantId: parseInt(variantId),
-        quantity: line.quantity
-      };
-    });
-
-    const createDraftOrderMutation = `
-      mutation draftOrderCreate($input: DraftOrderInput!) {
-        draftOrderCreate(input: $input) {
-          draftOrder {
-            id
-            name
-            totalPrice
-            invoiceUrl
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const draftOrderInput = {
-      input: {
-        customerId: customer.id,
-        lineItems: draftOrderLines,
-        useCustomerDefaultAddress: false,
-        appliedDiscount: {
-          description: `Store Credit Applied - ${storeCreditAmount}€`,
-          value: storeCreditAmount,
-          valueType: 'FIXED_AMOUNT'
-        }
-      }
-    };
-
-    console.log(`📋 Creating draft order with input:`, JSON.stringify(draftOrderInput, null, 2));
-
-    const draftOrderResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: createDraftOrderMutation,
-        variables: draftOrderInput
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    console.log(`📋 Draft order response:`, JSON.stringify(draftOrderResponse.data, null, 2));
-
-    const draftOrderData = draftOrderResponse.data?.data?.draftOrderCreate;
-    const draftOrderErrors = draftOrderData?.userErrors || [];
-
-    if (draftOrderErrors.length > 0) {
-      console.error('❌ Error creating draft order:', draftOrderErrors);
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to create draft order',
-        details: draftOrderErrors
-      });
-    }
-
-    const draftOrder = draftOrderData?.draftOrder;
-    if (!draftOrder) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to create draft order - no draft order returned',
-        debugInfo: {
-          response: draftOrderResponse.data,
-          input: draftOrderInput
-        }
-      });
-    }
-
-    console.log(`📋 Created draft order: ${draftOrder.name} (${draftOrder.id})`);
-
-    // Step 4: Deduct store credit from customer account FIRST
+    // Step 2: Simply deduct store credit from customer account
     const deductStoreCreditMutation = `
       mutation storeCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
         storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
@@ -12432,7 +12283,7 @@ app.post('/apply-store-credit', async (req, res) => {
       storeCreditAccountDebit: {
         storeCreditAccountId: storeCreditAccountId,
         amount: storeCreditAmount.toString(),
-        note: `Store credit used for order ${draftOrder.name}`
+        note: `Store credit used for cart ${cartId}`
       }
     };
 
@@ -12465,16 +12316,22 @@ app.post('/apply-store-credit', async (req, res) => {
     const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || 0;
     console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
 
-    // Step 5: Complete the draft order to create a real order
-    const completeDraftOrderMutation = `
-      mutation draftOrderComplete($id: ID!) {
-        draftOrderComplete(id: $id) {
-          draftOrder {
+    // Step 3: Create a discount code equivalent to the store credit amount
+    const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    
+    const createDiscountMutation = `
+      mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+        discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+          codeDiscountNode {
             id
-            order {
-              id
-              name
-              totalPrice
+            codeDiscount {
+              ... on DiscountCodeBasic {
+                codes(first: 1) {
+                  nodes {
+                    code
+                  }
+                }
+              }
             }
           }
           userErrors {
@@ -12485,11 +12342,37 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     `;
 
-    const completeResponse = await axios.post(
+    const discountInput = {
+      basicCodeDiscount: {
+        title: `Store Credit Used - ${customerEmail}`,
+        code: discountCodeName,
+        startsAt: new Date().toISOString(),
+        endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
+        customerGets: {
+          value: {
+            discountAmount: {
+              amount: storeCreditAmount.toString(),
+              appliesOnOneTimePurchase: true
+            }
+          },
+          items: {
+            all: true
+          }
+        },
+        customerSelection: {
+          customers: {
+            add: [customer.id]
+          }
+        },
+        usageLimit: 1 // One-time use only
+      }
+    };
+
+    const discountResponse = await axios.post(
       config.adminApiUrl,
       {
-        query: completeDraftOrderMutation,
-        variables: { id: draftOrder.id }
+        query: createDiscountMutation,
+        variables: discountInput
       },
       {
         headers: {
@@ -12499,45 +12382,44 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     );
 
-    const completeData = completeResponse.data?.data?.draftOrderComplete;
-    const completeErrors = completeData?.userErrors || [];
+    const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
+    const discountErrors = discountData?.userErrors || [];
 
-    if (completeErrors.length > 0) {
-      console.error('❌ Error completing draft order:', completeErrors);
+    if (discountErrors.length > 0) {
+      console.error('❌ Error creating discount code:', discountErrors);
       return res.status(400).json({
         success: false,
-        error: 'Failed to complete order',
-        details: completeErrors
+        error: 'Failed to create discount code',
+        details: discountErrors
       });
     }
 
-    const completedOrder = completeData?.draftOrder?.order;
-    if (!completedOrder) {
+    const createdDiscountCode = discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code;
+    
+    if (!createdDiscountCode) {
       return res.status(500).json({
         success: false,
-        error: 'Failed to complete order'
+        error: 'Failed to create discount code'
       });
     }
 
-    console.log(`🎉 Order completed: ${completedOrder.name} (${completedOrder.id})`);
-    console.log(`💰 Store credit of ${storeCreditAmount}€ successfully deducted`);
+    console.log(`✅ Created discount code: ${createdDiscountCode}`);
+    console.log(`💰 Store credit of ${storeCreditAmount}€ successfully deducted and discount created`);
 
     res.json({
       success: true,
-      message: 'Store credit applied and order completed',
-      orderId: completedOrder.id,
-      orderName: completedOrder.name,
-      totalPrice: completedOrder.totalPrice,
+      message: 'Store credit deducted and discount code created',
+      discountCode: createdDiscountCode,
       appliedStoreCredit: storeCreditAmount,
       newStoreCreditBalance: parseFloat(newBalance),
       customerId: customer.id
     });
 
   } catch (error) {
-    console.error('❌ Error processing store credit order:', error);
+    console.error('❌ Error processing store credit:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to process store credit order',
+      error: 'Failed to process store credit',
       details: error.message
     });
   }
