@@ -12206,14 +12206,14 @@ app.post('/apply-store-credit', async (req, res) => {
     `;
 
     const customerResponse = await axios.post(
-      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      config.adminApiUrl,
       {
         query: customerQuery,
         variables: { email: customerEmail }
       },
       {
         headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'X-Shopify-Access-Token': config.adminToken,
           'Content-Type': 'application/json',
         },
       }
@@ -12300,14 +12300,14 @@ app.post('/apply-store-credit', async (req, res) => {
     `;
 
     const cartResponse = await axios.post(
-      `https://${SHOPIFY_SHOP_DOMAIN}/api/2024-10/graphql.json`,
+      config.apiUrl,
       {
         query: cartQuery,
         variables: { cartId: `gid://shopify/Cart/${cartId}` }
       },
       {
         headers: {
-          'X-Shopify-Storefront-Access-Token': STOREFRONT_ACCESS_TOKEN,
+          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
           'Content-Type': 'application/json',
         },
       }
@@ -12360,14 +12360,14 @@ app.post('/apply-store-credit', async (req, res) => {
     };
 
     const draftOrderResponse = await axios.post(
-      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      config.adminApiUrl,
       {
         query: createDraftOrderMutation,
         variables: draftOrderInput
       },
       {
         headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'X-Shopify-Access-Token': config.adminToken,
           'Content-Type': 'application/json',
         },
       }
@@ -12429,14 +12429,14 @@ app.post('/apply-store-credit', async (req, res) => {
     };
 
     const updateResponse = await axios.post(
-      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      config.adminApiUrl,
       {
         query: applyStoreCreditMutation,
         variables: updateInput
       },
       {
         headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'X-Shopify-Access-Token': config.adminToken,
           'Content-Type': 'application/json',
         },
       }
@@ -12471,14 +12471,14 @@ app.post('/apply-store-credit', async (req, res) => {
     };
 
     const debitResponse = await axios.post(
-      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      config.adminApiUrl,
       {
         query: deductStoreCreditMutation,
         variables: debitInput
       },
       {
         headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'X-Shopify-Access-Token': config.adminToken,
           'Content-Type': 'application/json',
         },
       }
@@ -12520,14 +12520,14 @@ app.post('/apply-store-credit', async (req, res) => {
     `;
 
     const completeResponse = await axios.post(
-      `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-10/graphql.json`,
+      config.adminApiUrl,
       {
         query: completeDraftOrderMutation,
         variables: { id: draftOrder.id }
       },
       {
         headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'X-Shopify-Access-Token': config.adminToken,
           'Content-Type': 'application/json',
         },
       }
