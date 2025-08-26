@@ -5298,23 +5298,133 @@ app.post('/shopify/create-customer-token', authenticateAppToken, async (req, res
     const customer = customers[0].node;
     console.log('✅ Found customer:', customer.id);
     
-    // 🔥 WORKAROUND: Since we can't create customer access tokens via Admin API
-    // We'll create a long-lived session token that the app can use
+    // 🔥 REAL SOLUTION: Create actual Shopify customer access token via Storefront API
+    // We'll temporarily set a password, create the token, then remove the password
     
-    // For now, return a mock token that represents the customer
-    const mockCustomerToken = Buffer.from(JSON.stringify({
-      customerId: customer.id,
-      email: customer.email,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 days
-    })).toString('base64');
+    const tempPassword = crypto.randomBytes(32).toString('hex');
+    console.log('🔒 Setting temporary password for customer');
     
-    console.log('✅ Created mock customer token for app usage');
+    // Step 1: Set temporary password via Admin API
+    const setPasswordMutation = `
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+            email
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    await axios.post(
+      config.adminApiUrl,
+      {
+        query: setPasswordMutation,
+        variables: {
+          input: {
+            id: customer.id,
+            password: tempPassword
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    // Step 2: Create customer access token via Storefront API
+    const tokenMutation = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerAccessToken {
+            accessToken
+            expiresAt
+          }
+          customerUserErrors {
+            code
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    const tokenResponse = await axios.post(
+      config.apiUrl,
+      {
+        query: tokenMutation,
+        variables: {
+          input: {
+            email: customerEmail,
+            password: tempPassword
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    // Step 3: Remove the temporary password
+    const removePasswordMutation = `
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+            email
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    await axios.post(
+      config.adminApiUrl,
+      {
+        query: removePasswordMutation,
+        variables: {
+          input: {
+            id: customer.id,
+            password: null
+          }
+        }
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    console.log('🔒 Removed temporary password');
+    
+    if (tokenResponse.data.errors || tokenResponse.data.data.customerAccessTokenCreate.customerUserErrors?.length > 0) {
+      console.error('❌ Error creating customer access token:', 
+        tokenResponse.data.errors || tokenResponse.data.data.customerAccessTokenCreate.customerUserErrors);
+      return res.status(500).json({ error: 'Failed to create customer access token' });
+    }
+    
+    const accessTokenData = tokenResponse.data.data.customerAccessTokenCreate.customerAccessToken;
+    console.log('✅ Created REAL Shopify customer access token');
     
     res.json({
       success: true,
-      customerAccessToken: mockCustomerToken,
-      expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)).toISOString(),
+      customerAccessToken: accessTokenData.accessToken,
+      expiresAt: accessTokenData.expiresAt,
     });
     
   } catch (error) {
