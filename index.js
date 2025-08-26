@@ -12167,21 +12167,32 @@ app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
 // Apply store credit by simply deducting from customer balance
 app.post('/apply-store-credit', async (req, res) => {
   try {
-    const { cartId, customerEmail, storeCreditAmount } = req.body;
+    const { customerEmail, storeCreditAmount, cartTotal } = req.body;
     
-    console.log(`💳 [STORE_CREDIT] Simple store credit deduction:`);
-    console.log(`   Cart ID: ${cartId}`);
+    console.log(`💳 [STORE_CREDIT] Store credit deduction request:`);
     console.log(`   Customer: ${customerEmail}`);
-    console.log(`   Amount: ${storeCreditAmount}€`);
+    console.log(`   Available store credit: ${storeCreditAmount}€`);
+    console.log(`   Cart total: ${cartTotal}€`);
     
-    if (!cartId || !customerEmail || !storeCreditAmount) {
+    if (!customerEmail || !storeCreditAmount || !cartTotal) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: cartId, customerEmail, storeCreditAmount'
+        error: 'Missing required fields: customerEmail, storeCreditAmount, cartTotal'
       });
     }
 
-    // Step 1: Get customer and verify store credit balance
+    // Calculate the actual amount to deduct (minimum of available store credit and cart total)
+    const amountToDeduct = Math.min(parseFloat(storeCreditAmount), parseFloat(cartTotal));
+    console.log(`💰 Will deduct ${amountToDeduct}€ from store credit balance`);
+    
+    if (amountToDeduct <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid deduction amount'
+      });
+    }
+
+    // Step 1: Get customer ID and verify store credit balance
     const customerQuery = `
       query getCustomer($email: String!) {
         customers(first: 1, query: $email) {
@@ -12245,10 +12256,10 @@ app.post('/apply-store-credit', async (req, res) => {
 
     console.log(`💰 Customer has ${totalStoreCredit}€ store credit available`);
 
-    if (totalStoreCredit < storeCreditAmount) {
+    if (totalStoreCredit < amountToDeduct) {
       return res.status(400).json({
         success: false,
-        error: `Insufficient store credit. Available: ${totalStoreCredit}€, Requested: ${storeCreditAmount}€`
+        error: `Insufficient store credit. Available: ${totalStoreCredit}€, Requested: ${amountToDeduct}€`
       });
     }
 
@@ -12259,7 +12270,7 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Step 2: Simply deduct store credit from customer account
+    // Step 2: Deduct store credit from customer account
     const deductStoreCreditMutation = `
       mutation storeCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
         storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
@@ -12282,8 +12293,8 @@ app.post('/apply-store-credit', async (req, res) => {
     const debitInput = {
       storeCreditAccountDebit: {
         storeCreditAccountId: storeCreditAccountId,
-        amount: storeCreditAmount.toString(),
-        note: `Store credit used for cart ${cartId}`
+        amount: amountToDeduct.toString(),
+        note: `Store credit used for checkout - ${amountToDeduct}€`
       }
     };
 
@@ -12313,11 +12324,13 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || 0;
+    const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
     console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
 
-    // Step 3: Create a discount code equivalent to the store credit amount
+    // Step 3: Create a discount code equivalent to the deducted amount
     const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    
+    console.log(`💳 Creating discount code: ${discountCodeName} for ${amountToDeduct}€`);
     
     const createDiscountMutation = `
       mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
@@ -12351,7 +12364,7 @@ app.post('/apply-store-credit', async (req, res) => {
         customerGets: {
           value: {
             discountAmount: {
-              amount: storeCreditAmount.toString(),
+              amount: amountToDeduct.toString(),
               appliesOnOneTimePurchase: true
             }
           },
@@ -12368,6 +12381,8 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     };
 
+    console.log(`📋 Discount input:`, JSON.stringify(discountInput, null, 2));
+
     const discountResponse = await axios.post(
       config.adminApiUrl,
       {
@@ -12381,6 +12396,8 @@ app.post('/apply-store-credit', async (req, res) => {
         },
       }
     );
+
+    console.log(`📋 Discount response:`, JSON.stringify(discountResponse.data, null, 2));
 
     const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
     const discountErrors = discountData?.userErrors || [];
@@ -12397,20 +12414,25 @@ app.post('/apply-store-credit', async (req, res) => {
     const createdDiscountCode = discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code;
     
     if (!createdDiscountCode) {
+      console.error('❌ No discount code returned:', discountData);
       return res.status(500).json({
         success: false,
-        error: 'Failed to create discount code'
+        error: 'Failed to create discount code - no code returned',
+        debugInfo: {
+          response: discountResponse.data,
+          discountData: discountData
+        }
       });
     }
 
     console.log(`✅ Created discount code: ${createdDiscountCode}`);
-    console.log(`💰 Store credit of ${storeCreditAmount}€ successfully deducted and discount created`);
+    console.log(`💰 Store credit of ${amountToDeduct}€ successfully deducted and discount created`);
 
     res.json({
       success: true,
       message: 'Store credit deducted and discount code created',
       discountCode: createdDiscountCode,
-      appliedStoreCredit: storeCreditAmount,
+      appliedStoreCredit: amountToDeduct,
       newStoreCreditBalance: parseFloat(newBalance),
       customerId: customer.id
     });
