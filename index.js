@@ -12367,13 +12367,13 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     `;
 
-    // Prepare candidate shapes for the "value" field. The Admin API returns
-    // DiscountAmount values as an object with an inner 'amount' object, so for
-    // creation we must supply the same nested shape. Try the nested fixedAmount
-    // first and keep percentage as a commented fallback.
+    // Prepare candidate shapes for the "value" field. The Admin API expects
+    // a Money-like object for a fixed amount. For creation use the shape
+    // fixedAmount: { amount: "16.05", currencyCode: "EUR" }
+    // Keep percentage as a commented fallback.
     const candidateValues = [
-      // Correct nested shape: fixedAmount: { amount: { amount: "16.05", currencyCode: "EUR" } }
-      { fixedAmount: { amount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } } },
+      // Correct shape for Admin API: fixedAmount directly contains amount & currencyCode
+      { fixedAmount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } },
       // Fallback: percentage (unlikely for store credit) - included for completeness
       // { percentage: (100).toString() }
     ];
@@ -12400,6 +12400,7 @@ app.post('/apply-store-credit', async (req, res) => {
       console.log('📋 Trying discount payload variant:', JSON.stringify(discountInput, null, 2));
 
       try {
+        console.log('📤 Sending Admin API variables:', JSON.stringify(discountInput, null, 2));
         const discountResponse = await axios.post(
           config.adminApiUrl,
           { query: createDiscountMutation, variables: discountInput },
@@ -12410,6 +12411,11 @@ app.post('/apply-store-credit', async (req, res) => {
 
         // Store the response for debugging
         lastErrorResponse = discountResponse.data;
+
+        // Log top-level GraphQL errors if present
+        if (Array.isArray(discountResponse.data?.errors) && discountResponse.data.errors.length) {
+          console.warn('⚠️ Admin API top-level errors:', JSON.stringify(discountResponse.data.errors, null, 2));
+        }
 
         const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
         const discountErrors = discountData?.userErrors || [];
