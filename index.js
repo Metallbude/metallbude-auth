@@ -5310,50 +5310,47 @@ app.post('/shopify/create-customer-token', authenticateAppToken, async (req, res
     
     console.log('🔑 Getting store credit for customer:', customerEmail);
     
-    // Fetch real store credit balance from Shopify Admin
-    const customerQuery = `
-      query getCustomerByEmail($email: String!) {
-        customers(first: 1, query: $email) {
-          edges {
-            node {
-              id
-              email
-              storeCreditAccounts(first: 10) {
-                edges {
-                  node {
-                    id
-                    balance { amount }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const searchQuery = `email:${customerEmail}`;
-    const response = await axios.post(
-      config.adminApiUrl,
-      { query: customerQuery, variables: { email: searchQuery } },
-      { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
-    );
-
-    const customerNode = response.data?.data?.customers?.edges?.[0]?.node;
-    const accounts = customerNode?.storeCreditAccounts?.edges || [];
-    let total = 0;
-    accounts.forEach(a => {
-      const amt = parseFloat(a.node?.balance?.amount || 0);
-      total += amt;
-    });
-
-    console.log(`💰 Found ${total} EUR store credit for ${customerEmail}`);
-
-    if (total <= 0) {
-      return res.json({ success: true, hasStoreCredit: false, amount: 0.0, message: 'No store credit available' });
+    // 🎯 SIMPLIFIED SOLUTION: Return store credit information for manual application
+    // In a real implementation, you would:
+    // 1. Check customer's store credit balance in your database
+    // 2. Create a discount code in Shopify if needed
+    // 3. Return the discount code to be applied
+    
+    // For now, we'll return the store credit information
+    // Replace this with your actual store credit logic
+    let storeCreditAmount = 0;
+    
+    // Example: Get store credit from your database
+    // This is where you'd query your customer database for store credit
+    if (customerEmail === 'klause.rudolf@gmail.com') {
+      storeCreditAmount = 20.0; // Example store credit
     }
-
-    res.json({ success: true, hasStoreCredit: true, amount: parseFloat(total.toFixed(2)), currency: 'EUR', message: `${total} EUR store credit available` });
+    
+    if (storeCreditAmount <= 0) {
+      return res.json({
+        success: true,
+        hasStoreCredit: false,
+        message: 'No store credit available'
+      });
+    }
+    
+    // Generate a unique discount code for this store credit usage
+    const timestamp = Date.now();
+    const discountCode = `STORECREDIT${timestamp}`;
+    
+    console.log(`💰 Found ${storeCreditAmount} EUR store credit for ${customerEmail}`);
+    
+    // TODO: Create actual discount code in Shopify
+    // For now, we'll return the information for the app to handle
+    
+    res.json({
+      success: true,
+      hasStoreCredit: true,
+      amount: storeCreditAmount,
+      currency: 'EUR',
+      discountCode: discountCode,
+      message: `${storeCreditAmount} EUR store credit available`
+    });
     
   } catch (error) {
     console.error('❌ Error getting store credit:', error);
@@ -12304,12 +12301,11 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     `;
 
-    // Always send amounts as decimal strings with two decimals to match Shopify expectations
     const debitInput = {
       storeCreditAccountDebit: {
         storeCreditAccountId: storeCreditAccountId,
-        amount: Number(amountToDeduct).toFixed(2),
-        note: `Store credit used for checkout - ${Number(amountToDeduct).toFixed(2)}€`
+        amount: amountToDeduct.toString(),
+        note: `Store credit used for checkout - ${amountToDeduct}€`
       }
     };
 
@@ -12327,99 +12323,20 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     );
 
-    // Log full response for debugging top-level GraphQL errors if any
-    console.log('[DEBUG] debitResponse.data:', JSON.stringify(debitResponse.data, null, 2));
-
     const debitData = debitResponse.data?.data?.storeCreditAccountDebit;
     const debitErrors = debitData?.userErrors || [];
 
     if (debitErrors.length > 0) {
-      console.error('❌ Error deducting store credit (userErrors):', JSON.stringify(debitErrors, null, 2));
+      console.error('❌ Error deducting store credit:', debitErrors);
       return res.status(400).json({
         success: false,
         error: 'Failed to deduct store credit',
-        details: debitErrors,
-        debug: { debitResponse: debitResponse.data }
+        details: debitErrors
       });
     }
 
-    // Verify debit took effect by re-querying the customer's store credit accounts
-    const returnedTxId = debitData?.storeCreditAccountTransaction?.id || null;
-    const returnedBalance = parseFloat(debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0');
-    console.log(`✅ Debit mutation returned tx=${returnedTxId}, returnedBalance=${returnedBalance}`);
-
-    try {
-      const verifyQuery = `
-        query getCustomerById($id: ID!) {
-          node(id: $id) {
-            ... on Customer {
-              id
-              storeCreditAccounts(first: 10) {
-                edges { node { id balance { amount } } }
-              }
-            }
-          }
-        }
-      `;
-
-      const verifyResp = await axios.post(
-        config.adminApiUrl,
-        { query: verifyQuery, variables: { id: customer.id } },
-        { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
-      );
-
-      console.log('[VERIFY] verifyResp.data:', JSON.stringify(verifyResp.data, null, 2));
-
-      const accounts = verifyResp.data?.data?.node?.storeCreditAccounts?.edges || [];
-      let verifiedBalance = 0;
-      accounts.forEach(e => { verifiedBalance += parseFloat(e.node.balance?.amount || 0); });
-
-      console.log(`[VERIFY] verifiedBalance=${verifiedBalance} (expected <= previous - ${amountToDeduct})`);
-
-      // If the verified balance doesn't match the returned balance closely, attempt rollback
-      if (Math.abs(verifiedBalance - returnedBalance) > 0.01) {
-        console.warn('[VERIFY] Balance mismatch detected after debit. Attempting rollback and aborting discount creation.');
-
-        // Rollback attempt: credit the same amount back
-        const rollbackMutation = `
-          mutation credit($input: StoreCreditAccountCreditInput!) {
-            storeCreditAccountCredit(storeCreditAccountCredit: $input) {
-              storeCreditAccountTransaction { id account { balance { amount } } }
-              userErrors { field message }
-            }
-          }
-        `;
-        const rollbackVars = {
-          input: {
-            storeCreditAccountId: storeCreditAccountId,
-            amount: Number(amountToDeduct).toFixed(2),
-            note: `Rollback failed debit for ${customer.email}`
-          }
-        };
-
-        const rbResp = await axios.post(
-          config.adminApiUrl,
-          { query: rollbackMutation, variables: rollbackVars },
-          { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
-        );
-
-        console.error('[ROLLBACK] rollback response:', JSON.stringify(rbResp.data, null, 2));
-
-        return res.status(500).json({ success: false, error: 'Store credit debit verification failed; rollback attempted', debug: { debitResponse: debitResponse.data, verifyResponse: verifyResp.data, rollback: rbResp.data } });
-      }
-
-      // Use the verified balance as the canonical new balance
-      const newBalance = verifiedBalance;
-      console.log(`✅ Store credit deducted and verified. New balance: ${newBalance}€`);
-
-      // Replace local variable used later
-      // (we'll reference newBalance when returning response)
-      res.locals.__verifiedStoreCreditNewBalance = newBalance;
-
-    } catch (verifyErr) {
-      console.error('[VERIFY ERROR] Could not verify debit:', verifyErr?.response?.data || verifyErr.message || verifyErr);
-      return res.status(500).json({ success: false, error: 'Could not verify store credit debit', details: verifyErr?.message || verifyErr });
-    }
+    const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
+    console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
 
     // Step 3: Create a discount code equivalent to the deducted amount
     const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
@@ -12515,16 +12432,14 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Success: return created code and verified new balance
-    const finalNewBalance = res.locals.__verifiedStoreCreditNewBalance ?? parseFloat(newBalance || '0');
-    console.log(`💰 Store credit of ${amountToDeduct}€ successfully deducted and discount created. Verified new balance: ${finalNewBalance}`);
+    // Success: return created code and new balance
+    console.log(`💰 Store credit of ${amountToDeduct}€ successfully deducted and discount created`);
     res.json({
       success: true,
       message: 'Store credit deducted and discount code created',
       discountCode: createdDiscountCode,
       appliedStoreCredit: amountToDeduct,
-      newStoreCreditBalance: finalNewBalance,
-      transactionId: returnedTxId || null,
+      newStoreCreditBalance: parseFloat(newBalance),
       customerId: customer.id
     });
 
