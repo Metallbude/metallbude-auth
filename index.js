@@ -12367,13 +12367,14 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     `;
 
-    // Prepare several candidate shapes for the "value" field to work around schema differences
+    // Prepare candidate shapes for the "value" field. The Admin API returns
+    // DiscountAmount values as an object with an inner 'amount' object, so for
+    // creation we must supply the same nested shape. Try the nested fixedAmount
+    // first and keep percentage as a commented fallback.
     const candidateValues = [
-      // some Shopify API surfaces use 'fixedAmount' with currency
-      { fixedAmount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } },
-      // alternate shape: 'amount' directly under value (no currency)
-      { amount: amountToDeduct.toString() },
-      // fallback: percentage (very unlikely here) - included for completeness
+      // Correct nested shape: fixedAmount: { amount: { amount: "16.05", currencyCode: "EUR" } }
+      { fixedAmount: { amount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } } },
+      // Fallback: percentage (unlikely for store credit) - included for completeness
       // { percentage: (100).toString() }
     ];
 
