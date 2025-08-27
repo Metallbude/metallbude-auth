@@ -355,6 +355,203 @@ process.on('SIGINT', async () => {
 });
 
 // Shopify Customer Account API token management
+// ===== Store Credit helpers (Admin GraphQL) =====
+const ADMIN_VERSION = '2024-10';
+
+async function adminGraphQL(query, variables) {
+  const res = await axios.post(
+    config.adminApiUrl,
+    { query, variables },
+    { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+  );
+  if (res.data?.errors) {
+    throw new Error(JSON.stringify(res.data.errors));
+  }
+  return res.data;
+}
+
+const MUTATION_DEBIT = `
+mutation StoreCreditAccountDebit($input: StoreCreditAccountDebitInput!) {
+  storeCreditAccountDebit(input: $input) {
+    transaction { id createdAt amount { amount currencyCode } }
+    userErrors { field message }
+  }
+}`;
+
+const MUTATION_CREDIT = `
+mutation StoreCreditAccountCredit($input: StoreCreditAccountCreditInput!) {
+  storeCreditAccountCredit(input: $input) {
+    transaction { id createdAt amount { amount currencyCode } }
+    userErrors { field message }
+  }
+}`;
+
+const QUERY_CUSTOMER_BY_EMAIL = `
+query GetCustomerByEmail($query: String!) {
+  customers(first: 1, query: $query) {
+    edges { node { id email storeCreditAccounts(first: 5) { edges { node { id balance { amount currencyCode } } } } } }
+  }
+}`;
+
+const QUERY_CUSTOMER_BALANCE = `
+query GetCustomerBalance($id: ID!) {
+  customer(id: $id) {
+    id
+    email
+    storeCreditAccounts(first: 5) {
+      edges { node { id balance { amount currencyCode } } }
+    }
+  }
+}`;
+
+function toMoneyString(n) {
+  // round to 2 decimals and stringify with dot
+  return (Math.round(Number(n) * 100) / 100).toFixed(2);
+}
+
+// POST /store-credit/debit  — Secure backend endpoint callable from Flutter
+// Body: { email?: string, customerId?: string (gid or numeric), amount: number|string, currencyCode?: string, memo?: string, reason?: string }
+app.post('/store-credit/debit', async (req, res) => {
+  try {
+    const { email, customerId, amount, currencyCode = 'EUR', memo = 'Used via app', reason = 'Store credit used at checkout' } = req.body || {};
+    if (!amount) return res.status(400).json({ success: false, error: 'amount required' });
+    if (!email && !customerId) return res.status(400).json({ success: false, error: 'email or customerId required' });
+
+    // Resolve customerId (GID) if only email provided
+    let customerGid = null;
+    if (customerId) {
+      customerGid = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+    } else {
+      const data = await adminGraphQL(QUERY_CUSTOMER_BY_EMAIL, { query: `email:${email}` });
+      const node = data?.data?.customers?.edges?.[0]?.node;
+      if (!node?.id) return res.status(404).json({ success: false, error: 'Customer not found' });
+      customerGid = node.id;
+    }
+
+    // Perform debit mutation
+    const moneyAmount = toMoneyString(amount);
+    const debitRes = await adminGraphQL(MUTATION_DEBIT, {
+      input: {
+        owner: { customerId: customerGid },
+        amount: { amount: moneyAmount, currencyCode },
+        reason,
+        memo
+      }
+    });
+
+    const userErrors = debitRes?.data?.storeCreditAccountDebit?.userErrors || [];
+    if (userErrors.length) {
+      return res.status(422).json({ success: false, error: 'Debit error', details: userErrors });
+    }
+
+    // Fetch updated balance
+    const balRes = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customerGid });
+    const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
+    const balances = accounts.map(e => e.node.balance);
+    const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+
+    return res.json({
+      success: true,
+      debited: moneyAmount,
+      currencyCode,
+      transaction: debitRes.data.storeCreditAccountDebit.transaction,
+      newBalance: toMoneyString(totalBalance)
+    });
+  } catch (err) {
+    console.error('❌ /store-credit/debit error', err.message);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// POST /store-credit/credit — optional helper to add credit
+// Body: { email?: string, customerId?: string, amount: number|string, currencyCode?: string, memo?: string, reason?: string }
+app.post('/store-credit/credit', async (req, res) => {
+  try {
+    const { email, customerId, amount, currencyCode = 'EUR', memo = 'Manual credit from app', reason = 'Goodwill' } = req.body || {};
+    if (!amount) return res.status(400).json({ success: false, error: 'amount required' });
+    if (!email && !customerId) return res.status(400).json({ success: false, error: 'email or customerId required' });
+
+    let customerGid = null;
+    if (customerId) {
+      customerGid = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+    } else {
+      const data = await adminGraphQL(QUERY_CUSTOMER_BY_EMAIL, { query: `email:${email}` });
+      const node = data?.data?.customers?.edges?.[0]?.node;
+      if (!node?.id) return res.status(404).json({ success: false, error: 'Customer not found' });
+      customerGid = node.id;
+    }
+
+    const moneyAmount = toMoneyString(amount);
+    const creditRes = await adminGraphQL(MUTATION_CREDIT, {
+      input: {
+        owner: { customerId: customerGid },
+        amount: { amount: moneyAmount, currencyCode },
+        reason,
+        memo
+      }
+    });
+
+    const userErrors = creditRes?.data?.storeCreditAccountCredit?.userErrors || [];
+    if (userErrors.length) {
+      return res.status(422).json({ success: false, error: 'Credit error', details: userErrors });
+    }
+
+    const balRes = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customerGid });
+    const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
+    const balances = accounts.map(e => e.node.balance);
+    const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+
+    return res.json({
+      success: true,
+      credited: moneyAmount,
+      currencyCode,
+      transaction: creditRes.data.storeCreditAccountCredit.transaction,
+      newBalance: toMoneyString(totalBalance)
+    });
+  } catch (err) {
+    console.error('❌ /store-credit/credit error', err.message);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// GET /store-credit/balance?email=... or ?customerId=...
+app.get('/store-credit/balance', async (req, res) => {
+  try {
+    const { email, customerId } = req.query || {};
+    if (!email && !customerId) return res.status(400).json({ success: false, error: 'email or customerId required' });
+
+    let customerGid = null;
+    if (customerId) {
+      customerGid = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+    } else {
+      const data = await adminGraphQL(QUERY_CUSTOMER_BY_EMAIL, { query: `email:${email}` });
+      const node = data?.data?.customers?.edges?.[0]?.node;
+      if (!node?.id) return res.status(404).json({ success: false, error: 'Customer not found' });
+      customerGid = node.id;
+    }
+
+    const balRes = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customerGid });
+    const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
+    const balances = accounts.map(e => e.node.balance);
+    const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+
+    return res.json({
+      success: true,
+      customerId: customerGid,
+      balances,
+      totalBalance: toMoneyString(totalBalance)
+    });
+  } catch (err) {
+    console.error('❌ /store-credit/balance error', err.message);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// small utility to stringify unknown errors safely
+function safeStringify(e) {
+  try { return typeof e === 'string' ? e : JSON.stringify(e); } catch { return String(e); }
+}
+
 
 
 // 🔥 ADDED: Customer Account API URL for returns
