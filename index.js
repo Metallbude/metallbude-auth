@@ -12372,11 +12372,11 @@ app.post('/apply-store-credit', async (req, res) => {
         code: discountCodeName,
         startsAt: new Date().toISOString(),
         endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
+        // Use the Admin API's fixedAmount shape for a fixed-value discount
         customerGets: {
           value: {
-            discountAmount: {
+            fixedAmount: {
               amount: amountToDeduct.toString(),
-              // include currencyCode to match DiscountAmountInput shape
               currencyCode: 'EUR'
             }
           },
