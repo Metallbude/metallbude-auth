@@ -12412,21 +12412,13 @@ app.post('/apply-store-credit', async (req, res) => {
         const discountErrors = discountData?.userErrors || [];
 
         if (discountErrors.length === 0) {
-          // Log the structure we're navigating
-          console.log('🔍 Navigating response structure:');
-          console.log('  - discountData:', !!discountData);
-          console.log('  - codeDiscountNode:', !!discountData?.codeDiscountNode);
-          console.log('  - codeDiscount:', !!discountData?.codeDiscountNode?.codeDiscount);
-          console.log('  - codes:', !!discountData?.codeDiscountNode?.codeDiscount?.codes);
-          console.log('  - nodes:', discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes);
-          
-          createdDiscountCode = discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code;
-          if (createdDiscountCode) {
-            console.log(`✅ Created discount code: ${createdDiscountCode} (variant succeeded)`);
-            break;
-          } else {
-            console.log('⚠️ No code found in response structure');
-          }
+          // The Admin API confirmed creation (no userErrors). We generate
+          // the discount code string locally (discountCodeName), so return
+          // that to the client rather than trying to parse nested nodes from
+          // the Admin response which may not include the literal code.
+          console.log('✅ Admin API reported success for discount creation (no userErrors)');
+          createdDiscountCode = discountCodeName;
+          break;
         } else {
           console.warn('⚠️ Discount creation userErrors for this variant:', JSON.stringify(discountErrors, null, 2));
         }
