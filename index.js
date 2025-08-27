@@ -12371,21 +12371,20 @@ app.post('/apply-store-credit', async (req, res) => {
           value: {
             discountAmount: {
               amount: amountToDeduct.toString(),
-              // Remove the invalid appliesOnOneTimePurchase field
+              appliesOnOneTimePurchase: true
             }
           },
           items: {
             all: true
           }
         },
-        // 🔥 FIX: Restrict discount code to the specific customer who has store credit
-        customerSelection: {
-          customers: {
-            add: [customer.id]
-          }
-        }
-        // usageLimit: 1 // One-time use only - removed to prevent checkout rejection
-        // minimumRequirement: removed to allow application even when subtotal is 0
+        // 🔥 FIX: Remove customer selection to make discount work with Checkout Sheet Kit
+        // customerSelection: {
+        //   customers: {
+        //     add: [customer.id]
+        //   }
+        // },
+        usageLimit: 1 // One-time use only
       }
     };
 
