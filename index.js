@@ -12383,13 +12383,10 @@ app.post('/apply-store-credit', async (req, res) => {
           customers: {
             add: [customer.id]
           }
-        },
-        // usageLimit: 1 // One-time use only - removed to prevent checkout rejection
-        minimumRequirement: {
-          subtotal: {
-            greaterThanOrEqualToSubtotal: "0.00" // Allow store credit even when subtotal is 0
-          }
         }
+        // usageLimit: 1 // One-time use only - removed to prevent checkout rejection
+        // minimumRequirement: removed to allow application even when subtotal is 0
+      }
       }
     };
 
