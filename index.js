@@ -12342,44 +12342,31 @@ app.post('/apply-store-credit', async (req, res) => {
     const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
     console.log(`💳 Creating discount code: ${discountCodeName} for ${amountToDeduct}€`);
 
-    // GraphQL mutation to create a basic code discount
+    // GraphQL mutation to create a basic code discount. Keep selection minimal:
+    // return the created node id and any userErrors. We already generate the
+    // discount code string on the server, so we don't need to ask Shopify to
+    // return the literal code value.
     const createDiscountMutation = `
       mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
         discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-          codeDiscountNode {
-            id
-            codeDiscount {
-              ... on DiscountCodeBasic {
-                codes(first: 1) {
-                  nodes {
-                    code
-                  }
-                }
-              }
-            }
-          }
-          userErrors {
-            field
-            message
-            __typename
-          }
+          codeDiscountNode { id }
+          userErrors { field message }
         }
       }
     `;
 
-    // Prepare candidate shapes for the "value" field. The Admin API expects
-    // a Money-like object for a fixed amount. For creation use the shape
-    // fixedAmount: { amount: "16.05", currencyCode: "EUR" }
-    // Keep percentage as a commented fallback.
+    // Format the amount as a string with two decimals (Shopify expects a string)
+    const amountStr = Number(amountToDeduct).toFixed(2);
+
+    // Prepare the correct "discountAmount" shape expected by the Admin API.
+    // We only try this single, correct variant instead of multiple failing shapes.
     const candidateValues = [
-      // Try shape using `amount` object - some API versions expect `amount` instead of `fixedAmount`
-      { amount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } },
-      // Previously tried shape: fixedAmount directly contains amount & currencyCode
-      { fixedAmount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } },
-      // Simple numeric amount fallback (older variants)
-      { amount: amountToDeduct.toString() },
-      // Fallback: percentage (unlikely for store credit) - included for completeness
-      // { percentage: (100).toString() }
+      {
+        discountAmount: {
+          amount: { amount: amountStr, currencyCode: 'EUR' },
+          appliesOnEachItem: false
+        }
+      }
     ];
 
     let lastErrorResponse = null;
