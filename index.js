@@ -12375,19 +12375,19 @@ app.post('/apply-store-credit', async (req, res) => {
         customerGets: {
           value: {
             discountAmount: {
-              amount: amountToDeduct.toString()
+              amount: amountToDeduct.toString(),
+              // include currencyCode to match DiscountAmountInput shape
+              currencyCode: 'EUR'
             }
           },
           items: {
             all: true
           }
         },
-        // 🔥 FIX: Remove customer selection to make discount work with Checkout Sheet Kit
-        // customerSelection: {
-        //   customers: {
-        //     add: [customer.id]
-        //   }
-        // },
+        // Allow any customer to use this code (avoids Checkout Kit rejection when tied to a single customer)
+        customerSelection: {
+          all: true
+        },
         usageLimit: 1 // One-time use only
       }
     };
