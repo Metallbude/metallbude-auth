@@ -12378,12 +12378,18 @@ app.post('/apply-store-credit', async (req, res) => {
             all: true
           }
         },
-        customerSelection: {
-          customers: {
-            add: [customer.id]
+        // 🔥 FIX: Remove customer restrictions and usage limits that cause checkout rejection
+        // customerSelection: {
+        //   customers: {
+        //     add: [customer.id]
+        //   }
+        // },
+        // usageLimit: 1 // One-time use only - removed to prevent checkout rejection
+        minimumRequirement: {
+          subtotal: {
+            greaterThanOrEqualToSubtotal: "0.01" // Small minimum to ensure it applies
           }
-        },
-        usageLimit: 1 // One-time use only
+        }
       }
     };
 
