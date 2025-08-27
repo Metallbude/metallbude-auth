@@ -12378,12 +12378,12 @@ app.post('/apply-store-credit', async (req, res) => {
             all: true
           }
         },
-        // 🔥 FIX: Remove customer restrictions and usage limits that cause checkout rejection
-        // customerSelection: {
-        //   customers: {
-        //     add: [customer.id]
-        //   }
-        // },
+        // 🔥 FIX: Restrict discount code to the specific customer who has store credit
+        customerSelection: {
+          customers: {
+            add: [customer.id]
+          }
+        },
         // usageLimit: 1 // One-time use only - removed to prevent checkout rejection
         minimumRequirement: {
           subtotal: {
