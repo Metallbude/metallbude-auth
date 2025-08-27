@@ -12355,77 +12355,72 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     `;
 
-    // Format the amount as a string with two decimals (Shopify expects a string)
+    // Format the amount as a string with two decimals
     const amountStr = Number(amountToDeduct).toFixed(2);
 
-    // Prepare the correct "discountAmount" shape expected by the Admin API.
-    // We only try this single, correct variant instead of multiple failing shapes.
-    const candidateValues = [
-      {
-        discountAmount: {
-          amount: { amount: amountStr, currencyCode: 'EUR' },
-          appliesOnEachItem: false
-        }
+    // Build a single strict payload with discountAmount.amount as a decimal string
+    // (no fallbacks). Shopify expects the amount field to be a decimal string,
+    // not an object.
+    const discountInput = {
+      basicCodeDiscount: {
+        title: `Store Credit Used - ${customerEmail}`,
+        code: discountCodeName,
+        startsAt: new Date().toISOString(),
+        endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
+        customerGets: {
+          value: {
+            discountAmount: {
+              amount: amountStr,
+              currencyCode: 'EUR',
+              appliesOnEachItem: false
+            }
+          },
+          items: { all: true }
+        },
+        customerSelection: { all: true },
+        usageLimit: 1
       }
-    ];
+    };
+
+    console.log('📋 Sending Admin API variables (single strict payload):', JSON.stringify(discountInput, null, 2));
 
     let lastErrorResponse = null;
     let createdDiscountCode = null;
 
-    for (const candidateValue of candidateValues) {
-      const discountInput = {
-        basicCodeDiscount: {
-          title: `Store Credit Used - ${customerEmail}`,
-          code: discountCodeName,
-          startsAt: new Date().toISOString(),
-          endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
-          customerGets: {
-            value: candidateValue,
-            items: { all: true }
-          },
-          customerSelection: { all: true },
-          usageLimit: 1
-        }
-      };
+    try {
+      const discountResponse = await axios.post(
+        config.adminApiUrl,
+        { query: createDiscountMutation, variables: discountInput },
+        { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+      );
 
-      console.log('📋 Trying discount payload variant:', JSON.stringify(discountInput, null, 2));
+      console.log('📋 Discount response:', JSON.stringify(discountResponse.data, null, 2));
+      lastErrorResponse = discountResponse.data;
 
-      try {
-        console.log('📤 Sending Admin API variables:', JSON.stringify(discountInput, null, 2));
-        const discountResponse = await axios.post(
-          config.adminApiUrl,
-          { query: createDiscountMutation, variables: discountInput },
-          { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
-        );
-
-        console.log('📋 Discount response candidate:', JSON.stringify(discountResponse.data, null, 2));
-
-        // Store the response for debugging
-        lastErrorResponse = discountResponse.data;
-
-        // Log top-level GraphQL errors if present
-        if (Array.isArray(discountResponse.data?.errors) && discountResponse.data.errors.length) {
-          console.warn('⚠️ Admin API top-level errors:', JSON.stringify(discountResponse.data.errors, null, 2));
-        }
-
-        const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
-        const discountErrors = discountData?.userErrors || [];
-
-        if (discountErrors.length === 0) {
-          // The Admin API confirmed creation (no userErrors). We generate
-          // the discount code string locally (discountCodeName), so return
-          // that to the client rather than trying to parse nested nodes from
-          // the Admin response which may not include the literal code.
-          console.log('✅ Admin API reported success for discount creation (no userErrors)');
-          createdDiscountCode = discountCodeName;
-          break;
-        } else {
-          console.warn('⚠️ Discount creation userErrors for this variant:', JSON.stringify(discountErrors, null, 2));
-        }
-      } catch (err) {
-        console.error('❌ Error calling Admin API for discount variant:', err?.response?.data || err.message || err);
-        lastErrorResponse = err?.response?.data || { message: err.message };
+      if (Array.isArray(discountResponse.data?.errors) && discountResponse.data.errors.length) {
+        console.error('❌ Admin API top-level GraphQL errors:', JSON.stringify(discountResponse.data.errors, null, 2));
+        return res.status(500).json({ success: false, error: 'Admin API top-level errors', debugInfo: { lastResponse: lastErrorResponse } });
       }
+
+      const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
+      if (!discountData) {
+        console.error('❌ Admin API returned no discount data (data.discountCodeBasicCreate is null)');
+        return res.status(500).json({ success: false, error: 'Admin API returned no discount data', debugInfo: { lastResponse: lastErrorResponse } });
+      }
+
+      const discountErrors = discountData?.userErrors || [];
+      if (discountErrors.length > 0) {
+        console.error('❌ Discount creation userErrors:', JSON.stringify(discountErrors, null, 2));
+        return res.status(500).json({ success: false, error: 'Discount creation userErrors', debugInfo: { lastResponse: lastErrorResponse } });
+      }
+
+      // Success
+      console.log('✅ Admin API reported success for discount creation (no userErrors)');
+      createdDiscountCode = discountCodeName;
+    } catch (err) {
+      console.error('❌ Error calling Admin API:', err?.response?.data || err.message || err);
+      lastErrorResponse = err?.response?.data || { message: err.message };
+      return res.status(500).json({ success: false, error: 'Admin API request failed', debugInfo: { lastResponse: lastErrorResponse } });
     }
 
     if (!createdDiscountCode) {
