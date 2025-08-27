@@ -12340,9 +12340,9 @@ app.post('/apply-store-credit', async (req, res) => {
 
     // Step 3: Create a discount code equivalent to the deducted amount
     const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-    
     console.log(`💳 Creating discount code: ${discountCodeName} for ${amountToDeduct}€`);
-    
+
+    // GraphQL mutation to create a basic code discount
     const createDiscountMutation = `
       mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
         discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
@@ -12361,84 +12361,82 @@ app.post('/apply-store-credit', async (req, res) => {
           userErrors {
             field
             message
+            __typename
           }
         }
       }
     `;
 
-    const discountInput = {
-      basicCodeDiscount: {
-        title: `Store Credit Used - ${customerEmail}`,
-        code: discountCodeName,
-        startsAt: new Date().toISOString(),
-        endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
-        // Use the Admin API's fixedAmount shape for a fixed-value discount
-        customerGets: {
-          value: {
-            fixedAmount: {
-              amount: amountToDeduct.toString(),
-              currencyCode: 'EUR'
-            }
+    // Prepare several candidate shapes for the "value" field to work around schema differences
+    const candidateValues = [
+      // some Shopify API surfaces use 'fixedAmount' with currency
+      { fixedAmount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } },
+      // alternate shape: 'amount' directly under value (no currency)
+      { amount: amountToDeduct.toString() },
+      // fallback: percentage (very unlikely here) - included for completeness
+      // { percentage: (100).toString() }
+    ];
+
+    let lastErrorResponse = null;
+    let createdDiscountCode = null;
+
+    for (const candidateValue of candidateValues) {
+      const discountInput = {
+        basicCodeDiscount: {
+          title: `Store Credit Used - ${customerEmail}`,
+          code: discountCodeName,
+          startsAt: new Date().toISOString(),
+          endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
+          customerGets: {
+            value: candidateValue,
+            items: { all: true }
           },
-          items: {
-            all: true
+          customerSelection: { all: true },
+          usageLimit: 1
+        }
+      };
+
+      console.log('📋 Trying discount payload variant:', JSON.stringify(discountInput, null, 2));
+
+      try {
+        const discountResponse = await axios.post(
+          config.adminApiUrl,
+          { query: createDiscountMutation, variables: discountInput },
+          { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+        );
+
+        console.log('📋 Discount response candidate:', JSON.stringify(discountResponse.data, null, 2));
+
+        const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
+        const discountErrors = discountData?.userErrors || [];
+
+        if (discountErrors.length === 0) {
+          createdDiscountCode = discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code;
+          if (createdDiscountCode) {
+            console.log(`✅ Created discount code: ${createdDiscountCode} (variant succeeded)`);
+            break;
           }
-        },
-        // Allow any customer to use this code (avoids Checkout Kit rejection when tied to a single customer)
-        customerSelection: {
-          all: true
-        },
-        usageLimit: 1 // One-time use only
+        } else {
+          console.warn('⚠️ Discount creation userErrors for this variant:', JSON.stringify(discountErrors, null, 2));
+          lastErrorResponse = discountResponse.data;
+        }
+      } catch (err) {
+        console.error('❌ Error calling Admin API for discount variant:', err?.response?.data || err.message || err);
+        lastErrorResponse = err?.response?.data || { message: err.message };
       }
-    };
-
-    console.log(`📋 Discount input:`, JSON.stringify(discountInput, null, 2));
-
-    const discountResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: createDiscountMutation,
-        variables: discountInput
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    console.log(`📋 Discount response:`, JSON.stringify(discountResponse.data, null, 2));
-
-    const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
-    const discountErrors = discountData?.userErrors || [];
-
-    if (discountErrors.length > 0) {
-      console.error('❌ Error creating discount code:', discountErrors);
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to create discount code',
-        details: discountErrors
-      });
     }
 
-    const createdDiscountCode = discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code;
-    
     if (!createdDiscountCode) {
-      console.error('❌ No discount code returned:', discountData);
+      console.error('❌ No discount variant succeeded. Last response:', JSON.stringify(lastErrorResponse, null, 2));
       return res.status(500).json({
         success: false,
         error: 'Failed to create discount code - no code returned',
-        debugInfo: {
-          response: discountResponse.data,
-          discountData: discountData
-        }
+        debugInfo: { lastResponse: lastErrorResponse }
       });
     }
 
-    console.log(`✅ Created discount code: ${createdDiscountCode}`);
+    // Success: return created code and new balance
     console.log(`💰 Store credit of ${amountToDeduct}€ successfully deducted and discount created`);
-
     res.json({
       success: true,
       message: 'Store credit deducted and discount code created',
