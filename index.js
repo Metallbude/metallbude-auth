@@ -12372,8 +12372,12 @@ app.post('/apply-store-credit', async (req, res) => {
     // fixedAmount: { amount: "16.05", currencyCode: "EUR" }
     // Keep percentage as a commented fallback.
     const candidateValues = [
-      // Correct shape for Admin API: fixedAmount directly contains amount & currencyCode
+      // Try shape using `amount` object - some API versions expect `amount` instead of `fixedAmount`
+      { amount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } },
+      // Previously tried shape: fixedAmount directly contains amount & currencyCode
       { fixedAmount: { amount: amountToDeduct.toString(), currencyCode: 'EUR' } },
+      // Simple numeric amount fallback (older variants)
+      { amount: amountToDeduct.toString() },
       // Fallback: percentage (unlikely for store credit) - included for completeness
       // { percentage: (100).toString() }
     ];
