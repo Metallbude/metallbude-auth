@@ -12387,7 +12387,7 @@ app.post('/apply-store-credit', async (req, res) => {
         // usageLimit: 1 // One-time use only - removed to prevent checkout rejection
         minimumRequirement: {
           subtotal: {
-            greaterThanOrEqualToSubtotal: "0.01" // Small minimum to ensure it applies
+            greaterThanOrEqualToSubtotal: "0.00" // Allow store credit even when subtotal is 0
           }
         }
       }
