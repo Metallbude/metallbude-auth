@@ -12407,18 +12407,30 @@ app.post('/apply-store-credit', async (req, res) => {
 
         console.log('📋 Discount response candidate:', JSON.stringify(discountResponse.data, null, 2));
 
+        // Store the response for debugging
+        lastErrorResponse = discountResponse.data;
+
         const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
         const discountErrors = discountData?.userErrors || [];
 
         if (discountErrors.length === 0) {
+          // Log the structure we're navigating
+          console.log('🔍 Navigating response structure:');
+          console.log('  - discountData:', !!discountData);
+          console.log('  - codeDiscountNode:', !!discountData?.codeDiscountNode);
+          console.log('  - codeDiscount:', !!discountData?.codeDiscountNode?.codeDiscount);
+          console.log('  - codes:', !!discountData?.codeDiscountNode?.codeDiscount?.codes);
+          console.log('  - nodes:', discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes);
+          
           createdDiscountCode = discountData?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code;
           if (createdDiscountCode) {
             console.log(`✅ Created discount code: ${createdDiscountCode} (variant succeeded)`);
             break;
+          } else {
+            console.log('⚠️ No code found in response structure');
           }
         } else {
           console.warn('⚠️ Discount creation userErrors for this variant:', JSON.stringify(discountErrors, null, 2));
-          lastErrorResponse = discountResponse.data;
         }
       } catch (err) {
         console.error('❌ Error calling Admin API for discount variant:', err?.response?.data || err.message || err);
