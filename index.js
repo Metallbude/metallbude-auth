@@ -12222,11 +12222,13 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     `;
 
+    // Use Shopify customer search syntax: "email:address@example.com"
+    const customerSearchQuery = `email:${customerEmail}`;
     const customerResponse = await axios.post(
       config.adminApiUrl,
       {
         query: customerQuery,
-        variables: { email: customerEmail }
+        variables: { email: customerSearchQuery }
       },
       {
         headers: {
@@ -12235,6 +12237,9 @@ app.post('/apply-store-credit', async (req, res) => {
         },
       }
     );
+
+    // Debug: log response from Shopify to help diagnose missing customers/store credit
+    console.log('[DEBUG] customerResponse.data:', JSON.stringify(customerResponse.data, null, 2));
 
     const customers = customerResponse.data?.data?.customers?.edges || [];
     if (customers.length === 0) {
@@ -12370,8 +12375,7 @@ app.post('/apply-store-credit', async (req, res) => {
         customerGets: {
           value: {
             discountAmount: {
-              amount: amountToDeduct.toString(),
-              appliesOnOneTimePurchase: true
+              amount: amountToDeduct.toString()
             }
           },
           items: {
