@@ -12367,11 +12367,11 @@ app.post('/apply-store-credit', async (req, res) => {
         code: discountCodeName,
         startsAt: new Date().toISOString(),
         endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
+        combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
         customerGets: {
           value: {
             discountAmount: {
               amount: amountStr,
-              currencyCode: 'EUR',
               appliesOnEachItem: false
             }
           },
