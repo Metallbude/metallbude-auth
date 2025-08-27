@@ -12301,11 +12301,12 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     `;
 
+    // Ensure amount is a decimal string with two decimals (Shopify expects this)
     const debitInput = {
       storeCreditAccountDebit: {
         storeCreditAccountId: storeCreditAccountId,
-        amount: amountToDeduct.toString(),
-        note: `Store credit used for checkout - ${amountToDeduct}€`
+        amount: Number(amountToDeduct).toFixed(2),
+        note: `Store credit used for checkout - ${Number(amountToDeduct).toFixed(2)}€`
       }
     };
 
@@ -12323,20 +12324,81 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     );
 
+    // Log full response for debugging any top-level GraphQL errors
+    console.log('[DEBUG] debitResponse.data:', JSON.stringify(debitResponse.data, null, 2));
+
+    // Check for top-level GraphQL errors
+    if (Array.isArray(debitResponse.data?.errors) && debitResponse.data.errors.length) {
+      console.error('❌ Admin API top-level errors during debit:', JSON.stringify(debitResponse.data.errors, null, 2));
+      return res.status(500).json({ success: false, error: 'Admin API top-level errors during debit', debug: { debitResponse: debitResponse.data } });
+    }
+
     const debitData = debitResponse.data?.data?.storeCreditAccountDebit;
     const debitErrors = debitData?.userErrors || [];
 
     if (debitErrors.length > 0) {
-      console.error('❌ Error deducting store credit:', debitErrors);
+      console.error('❌ Error deducting store credit (userErrors):', JSON.stringify(debitErrors, null, 2));
       return res.status(400).json({
         success: false,
         error: 'Failed to deduct store credit',
-        details: debitErrors
+        details: debitErrors,
+        debug: { debitResponse: debitResponse.data }
       });
     }
 
-    const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
-    console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
+    const returnedTxId = debitData?.storeCreditAccountTransaction?.id || null;
+    const returnedBalance = parseFloat(debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0');
+    console.log(`✅ Debit mutation returned tx=${returnedTxId}, returnedBalance=${returnedBalance}`);
+
+    // Re-query the customer store credit accounts to verify the new balance is applied
+    try {
+      const verifyQuery = `
+        query getCustomerById($id: ID!) {
+          node(id: $id) {
+            ... on Customer {
+              id
+              storeCreditAccounts(first: 10) {
+                edges { node { id balance { amount } } }
+              }
+            }
+          }
+        }
+      `;
+
+      const verifyResp = await axios.post(
+        config.adminApiUrl,
+        { query: verifyQuery, variables: { id: customer.id } },
+        { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+      );
+
+      console.log('[VERIFY] verifyResp.data:', JSON.stringify(verifyResp.data, null, 2));
+
+      const accounts = verifyResp.data?.data?.node?.storeCreditAccounts?.edges || [];
+      let verifiedBalance = 0;
+      accounts.forEach(e => { verifiedBalance += parseFloat(e.node.balance?.amount || 0); });
+
+      // Expect the verified balance to be previous totalStoreCredit - amountToDeduct (within epsilon)
+      const expectedBalance = Number(totalStoreCredit) - Number(amountToDeduct);
+      const diff = Math.abs(verifiedBalance - expectedBalance);
+      console.log(`[VERIFY] expectedBalance=${expectedBalance}, verifiedBalance=${verifiedBalance}, diff=${diff}`);
+
+      if (diff > 0.05) {
+        console.error('[VERIFY] Balance mismatch after debit; aborting and returning error.');
+        return res.status(500).json({ success: false, error: 'Store credit debit verification failed', debug: { debitResponse: debitResponse.data, verifyResponse: verifyResp.data } });
+      }
+
+      // Use verifiedBalance as canonical new balance
+      const newBalance = verifiedBalance;
+      console.log(`✅ Store credit deducted and verified. New balance: ${newBalance}€`);
+
+      // Store values for response
+      res.locals.__verifiedStoreCreditNewBalance = newBalance;
+      res.locals.__returnedTxId = returnedTxId;
+
+    } catch (verifyErr) {
+      console.error('[VERIFY ERROR] Could not verify debit:', verifyErr?.response?.data || verifyErr.message || verifyErr);
+      return res.status(500).json({ success: false, error: 'Could not verify store credit debit', details: verifyErr?.message || verifyErr });
+    }
 
     // Step 3: Create a discount code equivalent to the deducted amount
     const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
