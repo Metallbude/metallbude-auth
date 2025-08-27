@@ -12387,7 +12387,6 @@ app.post('/apply-store-credit', async (req, res) => {
         // usageLimit: 1 // One-time use only - removed to prevent checkout rejection
         // minimumRequirement: removed to allow application even when subtotal is 0
       }
-      }
     };
 
     console.log(`📋 Discount input:`, JSON.stringify(discountInput, null, 2));
