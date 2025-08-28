@@ -1218,6 +1218,8 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
         variantTitle: variant.title || null,
         variantPrice: variant.price || null,
         image: (variant.image && variant.image.url) ? variant.image.url : null,
+        productId: (variant.product && variant.product.id) ? variant.product.id : null,
+        productHandle: (variant.product && variant.product.handle) ? variant.product.handle : null,
       });
     }
     const fulfillments = order.fulfillments || [];
@@ -1240,12 +1242,55 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
             title: mapped.variantTitle || null,
             price: mapped.variantPrice || null,
             image: mapped.image || null,
+            productId: mapped.productId || null,
+            productHandle: mapped.productHandle || null,
           },
         });
       }
     }
 
     console.log(`✅ Found ${returnableItems.length} returnable items`);
+    // Try to enrich returnable items with product variant lists so clients don't have to call storefront
+    for (let i = 0; i < returnableItems.length; i++) {
+      const it = returnableItems[i];
+      it.variants = [];
+      const productHandle = it.variant && it.variant.productHandle ? it.variant.productHandle : null;
+      const productId = it.variant && it.variant.productId ? it.variant.productId : null;
+
+      try {
+        let productResp = null;
+        if (productHandle) {
+          const q = `query productByHandle($handle: String!) { productByHandle(handle: $handle) { id title handle variants(first:50) { edges { node { id title sku availableForSale selectedOptions { name value } image { url altText } priceV2 { amount currencyCode } } } } }`;
+          const r = await axios.post(config.adminApiUrl, { query: q, variables: { handle: productHandle } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+          productResp = r.data?.data?.productByHandle || null;
+        }
+
+        if (!productResp && productId) {
+          const q2 = `query nodeById($id: ID!) { node(id: $id) { ... on Product { id title handle variants(first:50) { edges { node { id title sku availableForSale selectedOptions { name value } image { url altText } priceV2 { amount currencyCode } } } } } }`;
+          const r2 = await axios.post(config.adminApiUrl, { query: q2, variables: { id: productId } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+          productResp = r2.data?.data?.node || null;
+        }
+
+        if (productResp) {
+          const edges = (productResp.variants && productResp.variants.edges) ? productResp.variants.edges : [];
+          it.variants = edges.map(e => {
+            const v = e.node || {};
+            return {
+              id: v.id || null,
+              title: v.title || null,
+              sku: v.sku || null,
+              availableForSale: v.availableForSale || false,
+              selectedOptions: v.selectedOptions || [],
+              image: v.image && v.image.url ? v.image.url : null,
+              price: v.priceV2 && v.priceV2.amount ? v.priceV2.amount : null,
+            };
+          });
+        }
+      } catch (e) {
+        // Non-fatal: leave variants empty
+        console.warn('Could not fetch variants for product', productHandle || productId, e?.message || e);
+      }
+    }
     return { eligible: returnableItems.length > 0, reason: returnableItems.length === 0 ? 'No returnable items found' : null, returnableItems, existingReturns: existingReturns.length };
 
   } catch (error) {
