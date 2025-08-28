@@ -340,7 +340,13 @@ async function persistSessions() {
   try {
     const sessionEntries = Array.from(sessions.entries());
     const refreshEntries = Array.from(appRefreshTokens.entries());
-    
+    // Ensure directory exists to avoid ENOENT when writing files
+    try {
+      await fs.mkdir(path.dirname(SESSION_FILE), { recursive: true });
+    } catch (e) {
+      // proceed - writeFile will throw if this fails
+    }
+
     await Promise.all([
       fs.writeFile(SESSION_FILE, JSON.stringify(sessionEntries), 'utf8'),
       fs.writeFile(REFRESH_TOKENS_FILE, JSON.stringify(refreshEntries), 'utf8')
@@ -3166,6 +3172,12 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 // Helper function to create Shopify customer access token for store credit functionality
 async function createShopifyCustomerAccessToken(customerEmail, customerId) {
   try {
+    // If Admin API token is not configured, skip Admin API calls and return null
+    if (!config.adminToken) {
+      console.log('⚠️ Admin token not configured - skipping shopify customer access token creation');
+      return null;
+    }
+
     console.log('🔑 Creating Shopify customer access token for:', customerEmail);
     
     // Since we don't have the customer's password (email verification system), 
