@@ -12672,14 +12672,14 @@ app.post('/apply-store-credit', async (req, res) => {
 
     // Step 2: Deduct store credit from customer account using shared MUTATION_DEBIT
     // Use the owner-based input shape (owner.customerId + amount) which is accepted by the Admin API
-    const amountStr = Number(amountToDeduct).toFixed(2);
+  const amountStrDebit = Number(amountToDeduct).toFixed(2);
     let debitResponse;
     try {
       debitResponse = await adminGraphQL(MUTATION_DEBIT, {
         input: {
           owner: { customerId: customer.id },
-          amount: { amount: amountStr, currencyCode: 'EUR' },
-          memo: `Store credit used for checkout - ${amountStr}€`,
+          amount: { amount: amountStrDebit, currencyCode: 'EUR' },
+          memo: `Store credit used for checkout - ${amountStrDebit}€`,
           reason: 'Store credit used at checkout'
         }
       });
