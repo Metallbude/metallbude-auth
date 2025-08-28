@@ -3282,23 +3282,40 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: { customerId: req.session.customerId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
+    let response;
+    try {
+      response = await axios.post(
+        config.adminApiUrl,
+        {
+          query,
+          variables: { customerId: req.session.customerId }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+    } catch (err) {
+      console.error('❌ Upstream Admin API error fetching profile:', err.message || err);
+      // If upstream returned a body (HTML or JSON), log a short preview but don't forward raw HTML
+      const upstreamBody = err.response?.data;
+      if (upstreamBody) {
+        try {
+          const preview = typeof upstreamBody === 'string' ? upstreamBody.substring(0, 400) : JSON.stringify(upstreamBody).substring(0,400);
+          console.error('❌ Upstream body preview:', preview);
+        } catch (e) {
+          // ignore preview errors
         }
       }
-    );
+      return res.status(502).json({ error: 'Upstream Admin API unavailable' });
+    }
 
-    if (response.data.errors) {
+    if (response.data?.errors) {
       console.error('❌ Profile fetch errors:', response.data.errors);
-      return res.status(500).json({ error: 'Failed to fetch profile' });
+      return res.status(502).json({ error: 'Failed to fetch profile from Admin API' });
     }
 
     const customer = response.data.data.customer;
@@ -3473,21 +3490,35 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: { customerId: req.session.customerId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
+    let response;
+    try {
+      response = await axios.post(
+        config.adminApiUrl,
+        {
+          query,
+          variables: { customerId: req.session.customerId }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
         }
+      );
+    } catch (err) {
+      console.error('❌ Upstream Admin API error fetching orders:', err.message || err);
+      const upstreamBody = err.response?.data;
+      if (upstreamBody) {
+        try {
+          const preview = typeof upstreamBody === 'string' ? upstreamBody.substring(0, 400) : JSON.stringify(upstreamBody).substring(0,400);
+          console.error('❌ Upstream body preview:', preview);
+        } catch (e) {}
       }
-    );
+      return res.status(502).json({ orders: [] });
+    }
 
-    if (response.data.errors) {
+    if (response.data?.errors) {
       console.error('❌ Orders fetch errors:', response.data.errors);
       return res.json({ orders: [] });
     }
@@ -9537,59 +9568,80 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: {
-          customerId: req.session.customerId
-        }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    console.log('Store credit response status:', response.status);
-    console.log('Store credit response success:', !response.data.errors);
-
-    if (response.data.errors) {
-      console.error('GraphQL errors:', response.data.errors);
-      
-      const metafieldQuery = `
-        query getCustomerMetafield($customerId: ID!) {
-          customer(id: $customerId) {
-            metafield(namespace: "customer", key: "store_credit") {
-              value
-            }
-          }
-        }
-      `;
-      
-      const metafieldResponse = await axios.post(
+    let response;
+    try {
+      response = await axios.post(
         config.adminApiUrl,
         {
-          query: metafieldQuery,
-          variables: { customerId: req.session.customerId }
+          query,
+          variables: {
+            customerId: req.session.customerId
+          }
         },
         {
           headers: {
             'X-Shopify-Access-Token': config.adminToken,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: 10000
         }
       );
+    } catch (err) {
+      console.error('❌ Upstream Admin API error fetching store credit:', err.message || err);
+      const upstreamBody = err.response?.data;
+      if (upstreamBody) {
+        try {
+          const preview = typeof upstreamBody === 'string' ? upstreamBody.substring(0, 400) : JSON.stringify(upstreamBody).substring(0,400);
+          console.error('❌ Upstream body preview:', preview);
+        } catch (e) {}
+      }
+      return res.status(502).json({ amount: 0.0, currency: 'EUR' });
+    }
+
+    console.log('Store credit response status:', response.status);
+    console.log('Store credit response success:', !response.data.errors);
+
+    if (response.data?.errors) {
+      console.error('GraphQL errors:', response.data.errors);
       
-      const metafield = metafieldResponse.data?.data?.customer?.metafield;
-      const creditAmount = metafield?.value ? parseFloat(metafield.value) : 0.0;
-      
-      return res.json({
-        amount: creditAmount,
-        currency: 'EUR'
-      });
+      // Try fallback to metafield, but wrap in try/catch too
+      try {
+        const metafieldQuery = `
+          query getCustomerMetafield($customerId: ID!) {
+            customer(id: $customerId) {
+              metafield(namespace: "customer", key: "store_credit") {
+                value
+              }
+            }
+          }
+        `;
+        
+        const metafieldResponse = await axios.post(
+          config.adminApiUrl,
+          {
+            query: metafieldQuery,
+            variables: { customerId: req.session.customerId }
+          },
+          {
+            headers: {
+              'X-Shopify-Access-Token': config.adminToken,
+              'Content-Type': 'application/json'
+            },
+            timeout: 8000
+          }
+        );
+        
+        const metafield = metafieldResponse.data?.data?.customer?.metafield;
+        const creditAmount = metafield?.value ? parseFloat(metafield.value) : 0.0;
+        
+        return res.json({
+          amount: creditAmount,
+          currency: 'EUR'
+        });
+      } catch (metaErr) {
+        console.error('❌ Metafield fallback failed:', metaErr.message || metaErr);
+        return res.status(502).json({ amount: 0.0, currency: 'EUR' });
+      }
     }
 
     let totalCredit = 0.0;
