@@ -1143,6 +1143,7 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
                   sku
                   image { url altText }
                   product { id title handle }
+                  priceV2 { amount currencyCode }
                 }
               }
             }
@@ -1158,11 +1159,7 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
                     node {
                       id
                       quantity
-                      fulfillmentLineItem {
-                        id
-                        quantity
-                        lineItem { id title }
-                      }
+                      lineItem { id title }
                     }
                   }
                 }
@@ -9065,186 +9062,15 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
       return res.status(500).json({ eligible: false, reason: 'Internal error resolving order', returnableItems: [] });
     }
 
-    // Get real order data to check return eligibility
-    const query = `
-      query checkReturnEligibility($orderId: ID!) {
-        order(id: $orderId) {
-          id
-          name
-          processedAt
-          displayFulfillmentStatus
-          displayFinancialStatus
-          lineItems(first: 250) {
-            edges {
-              node {
-                id
-                title
-                quantity
-                fulfillableQuantity
-                variant {
-                  id
-                  title
-                  sku
-                  price {
-                    amount
-                    currencyCode
-                  }
-                  image {
-                    url
-                    altText
-                  }
-                  product {
-                    id
-                    title
-                    handle
-                  }
-                }
-              }
-            }
-          }
-          fulfillments(first: 10) {
-            edges {
-              node {
-                id
-                status
-                createdAt
-                fulfillmentLineItems(first: 250) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                        title
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-          returns(first: 10) {
-            edges {
-              node {
-                id
-                status
-                returnLineItems(first: 250) {
-                  edges {
-                    node {
-                      fulfillmentLineItem {
-                        lineItem {
-                          id
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: { orderId: resolvedOrderId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    if (response.data.errors) {
-      console.error('❌ Return eligibility check errors:', response.data.errors);
-      return res.status(404).json({
-        eligible: false,
-        reason: 'Order not found',
-        returnableItems: []
-      });
+    // Delegate to the shared, API-version-safe eligibility checker
+    try {
+      const eligibility = await checkShopifyReturnEligibility(resolvedOrderId, null);
+      // ensure we always return a consistent shape
+      return res.json(Object.assign({ existingReturns: eligibility.existingReturns ?? 0 }, eligibility));
+    } catch (err) {
+      console.error('❌ Error delegating eligibility check:', err?.message || err);
+      return res.status(500).json({ eligible: false, reason: 'Error checking return eligibility', returnableItems: [] });
     }
-
-    const order = response.data.data.order;
-    if (!order) {
-      return res.status(404).json({
-        eligible: false,
-        reason: 'Order not found',
-        returnableItems: []
-      });
-    }
-
-    // Check basic return eligibility
-    const canReturn = order.displayFulfillmentStatus === 'FULFILLED' && 
-                     order.displayFinancialStatus !== 'REFUNDED';
-
-    if (!canReturn) {
-      return res.json({
-        eligible: false,
-        reason: order.displayFulfillmentStatus !== 'FULFILLED' ? 
-                'Order must be fulfilled to be returned' :
-                'Order has already been refunded',
-        returnableItems: []
-      });
-    }
-
-    // Get items already returned
-    const returnedLineItemIds = new Set();
-    order.returns.edges.forEach(returnEdge => {
-      returnEdge.node.returnLineItems.edges.forEach(returnLineItemEdge => {
-        const lineItemId = returnLineItemEdge.node.fulfillmentLineItem.lineItem.id;
-        returnedLineItemIds.add(lineItemId);
-      });
-    });
-
-    // Build returnable items list
-    const returnableItems = [];
-    order.lineItems.edges.forEach(lineItemEdge => {
-      const lineItem = lineItemEdge.node;
-      
-      // Skip if already returned
-      if (returnedLineItemIds.has(lineItem.id)) {
-        return;
-      }
-
-      // Add to returnable items
-      returnableItems.push({
-        id: lineItem.id,
-        lineItemId: lineItem.id,
-        fulfillmentLineItemId: `fulfillment_${lineItem.id}`,
-        title: lineItem.title,
-        quantity: lineItem.quantity,
-        variant: {
-          id: lineItem.variant.id,
-          title: lineItem.variant.title,
-          sku: lineItem.variant.sku,
-          price: lineItem.variant.price.amount,
-          image: lineItem.variant.image?.url || 'https://via.placeholder.com/150',
-          product: lineItem.variant.product
-        }
-      });
-    });
-
-    const eligibility = {
-      eligible: returnableItems.length > 0,
-      reason: returnableItems.length === 0 ? 'No returnable items found' : null,
-      returnableItems: returnableItems,
-      existingReturns: order.returns.edges.length,
-      orderInfo: {
-        id: order.id,
-        name: order.name,
-        processedAt: order.processedAt,
-        fulfillmentStatus: order.displayFulfillmentStatus,
-        financialStatus: order.displayFinancialStatus
-      }
-    };
-    
-    console.log(`✅ Return eligibility checked using Admin API - ${returnableItems.length} returnable items`);
-    res.json(eligibility);
     
   } catch (error) {
     console.error('❌ Error checking return eligibility:', error);
@@ -9282,98 +9108,40 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
     // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
     if (config.adminToken) {
-      console.log('🚀 Using Admin API for return creation...');
-      
+      console.log('🚀 Using Admin API for return creation (safer path)...');
       try {
-        // Step 1: Fetch order fulfillments via Admin API
-        const orderQuery = `
-          query getOrderFulfillments($orderId: ID!) {
-            order(id: $orderId) {
-              id
-              name
-              fulfillments {
-                id
-                status
-                fulfillmentLineItems(first: 50) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                        title
-                        variant {
-                          id
-                          title
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }`;
-        
-        const orderResponse = await axios.post(config.adminApiUrl, {
-          query: orderQuery,
-          variables: { orderId: returnRequest.orderId }
-        }, {
-          headers: {
-            'X-Shopify-Access-Token': config.adminToken,
-            'Content-Type': 'application/json',
-          }
-        });
-
-        if (orderResponse.data.errors) {
-          throw new Error('GraphQL errors: ' + JSON.stringify(orderResponse.data.errors));
+        // Reuse the API-version-safe eligibility checker to get fulfillmentLineItem IDs
+        const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
+        if (!eligibility || !eligibility.eligible || !Array.isArray(eligibility.returnableItems) || eligibility.returnableItems.length === 0) {
+          throw new Error(eligibility?.reason || 'No returnable items available via Admin API');
         }
 
-        const order = orderResponse.data.data.order;
-        if (!order) {
-          throw new Error('Order not found');
-        }
-
-        // Map return reason to Shopify enum values
-        const mapReturnReason = (reason) => {
-          switch (reason) {
-            case 'defective':
-            case 'damage':
-              return 'DEFECTIVE';
-            case 'color_finish':
-            case 'wrong_item':
-              return 'NOT_AS_DESCRIBED';
-            case 'size':
-              return 'SIZE_TOO_LARGE'; // or SIZE_TOO_SMALL
-            case 'unwanted':
-            case 'changed_mind':
-            default:
-              return 'UNWANTED';
-          }
-        };
-
-        // Step 2: Map items to fulfillmentLineItemIds
+        // Map return request items to fulfillmentLineItemIds from eligibility result
         const returnLineItems = [];
-        for (const requestedItem of returnRequest.items) {
-          for (const fulfillment of order.fulfillments) {
-            for (const fulfillmentLineItemEdge of fulfillment.fulfillmentLineItems.edges) {
-              const fulfillmentLineItem = fulfillmentLineItemEdge.node;
-              if (fulfillmentLineItem.lineItem.id === requestedItem.lineItemId) {
-                returnLineItems.push({
-                  fulfillmentLineItemId: fulfillmentLineItem.id,
-                  quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity),
-                  returnReason: mapReturnReason(returnRequest.reason),
-                  customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason)
-                });
-              }
-            }
+        const mapReturnReason = (reason) => mapReasonToShopify(reason || 'other');
+
+        for (const requestedItem of returnRequest.items || []) {
+          const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId || ri.title === requestedItem.title);
+          if (!match) {
+            console.log('⚠️ Requested item not found among returnable items:', requestedItem);
+            continue;
           }
+
+          const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
+          if (qty <= 0) continue;
+
+          returnLineItems.push({
+            fulfillmentLineItemId: match.fulfillmentLineItemId,
+            quantity: qty,
+            returnReason: mapReturnReason(returnRequest.reason),
+            customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason)
+          });
         }
 
         if (returnLineItems.length === 0) {
-          throw new Error('No matching fulfillment line items found for return');
+          throw new Error('No matching fulfillment line items found for return (Admin API)');
         }
 
-        // Step 3: Create return via Admin API returnCreate mutation
         const returnMutation = `
           mutation returnCreate($returnInput: ReturnInput!) {
             returnCreate(returnInput: $returnInput) {
@@ -9393,52 +9161,43 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           orderId: returnRequest.orderId,
           returnLineItems: returnLineItems,
           notifyCustomer: true,
-          note: `Return Request Details:
-Reason: ${returnRequest.reason}
-Preferred Resolution: ${returnRequest.preferredResolution || 'refund'}
-${returnRequest.additionalNotes ? 'Additional Notes: ' + returnRequest.additionalNotes : ''}
-
-Customer Email: ${customerEmail}`
+          note: `Return Request Details:\nReason: ${returnRequest.reason}\nPreferred Resolution: ${returnRequest.preferredResolution || 'refund'}\n${returnRequest.additionalNotes ? 'Additional Notes: ' + returnRequest.additionalNotes : ''}\n\nCustomer Email: ${customerEmail}`
         };
 
-        console.log('🔥 Creating return with Admin API:', {
-          returnInput: returnInput,
-          returnLineItemsCount: returnLineItems.length
-        });
+        console.log('🔥 Creating return with Admin API (delegated):', { returnLineItemsCount: returnLineItems.length });
 
         const returnResponse = await axios.post(config.adminApiUrl, {
           query: returnMutation,
-          variables: { returnInput: returnInput }
+          variables: { returnInput }
         }, {
           headers: {
             'X-Shopify-Access-Token': config.adminToken,
-            'Content-Type': 'application/json',
+            'Content-Type': 'application/json'
           }
         });
 
         if (returnResponse.data.errors) {
-          throw new Error('GraphQL errors: ' + JSON.stringify(returnResponse.data.errors));
+          console.error('❌ Admin returnCreate GraphQL errors:', returnResponse.data.errors);
+          throw new Error('Admin API returnCreate failed');
         }
 
-        const returnResult = returnResponse.data.data.returnCreate;
-        if (returnResult.userErrors && returnResult.userErrors.length > 0) {
-          throw new Error('Return creation failed: ' + returnResult.userErrors.map(e => e.message).join(', '));
+        const returnResult = returnResponse.data.data?.returnCreate;
+        const userErrors = returnResult?.userErrors || [];
+        if (userErrors.length > 0) {
+          console.error('❌ Admin returnCreate userErrors:', userErrors);
+          throw new Error('Return creation failed: ' + userErrors.map(u => u.message).join('; '));
         }
 
-        const createdReturn = returnResult.return;
+        const createdReturn = returnResult?.return;
+        if (!createdReturn || !createdReturn.id) {
+          throw new Error('Admin API did not return created return');
+        }
+
         console.log('✅ Return created via Admin API:', createdReturn.id);
-
-        return res.json({
-          success: true,
-          returnId: createdReturn.id,
-          returnName: createdReturn.name,
-          status: createdReturn.status,
-          method: 'admin_api'
-        });
+        return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: createdReturn.status, method: 'admin_api' });
 
       } catch (adminError) {
-        console.error('❌ Admin API failed:', adminError.message);
-        console.log('🔄 Falling back to Customer Account API...');
+        console.error('❌ Admin API path failed (will fallback):', adminError?.message || adminError);
         // Fall through to Customer Account API
       }
     }
@@ -11349,11 +11108,11 @@ app.post('/debug/returns/test', async (req, res) => {
       });
     }
 
-    // Map return items
+    // Map return items (use global helper)
     const returnLineItems = items.map(item => ({
       fulfillmentLineItemId: item.fulfillmentLineItemId,
       quantity: item.quantity,
-      returnReason: mapReturnReason(item.reason)
+      returnReason: mapReasonToShopify(item.reason)
     }));
 
     console.log('🧪 [DEBUG] Mapped return line items:', JSON.stringify(returnLineItems, null, 2));
