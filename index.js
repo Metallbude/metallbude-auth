@@ -974,8 +974,8 @@ app.post('/raffle/pick-winner', async (req, res) => {
 });
 
 
-// 🔥 ADDED: Customer Account API URL for returns
-const CUSTOMER_ACCOUNT_API_URL = 'https://shopify.com/48343744676/account/customer/api/2024-10/graphql';
+// 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
+const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql`;
 
 // Helper functions
 function generateVerificationCode() {
@@ -1317,16 +1317,17 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       const matchingItem = eligibility.returnableItems.find(
         returnableItem => returnableItem.id === item.lineItemId
       );
-      
+
       if (!matchingItem) {
         throw new Error(`Item ${item.title} is not returnable`);
       }
-      
+
+      // Build minimal allowed payload for OrderReturnLineItemInput; avoid unsupported fields
       returnLineItems.push({
         fulfillmentLineItemId: matchingItem.fulfillmentLineItemId,
         quantity: item.quantity,
         returnReason: mapReasonToShopify(returnRequest.reason),
-        customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason),
+        // NOTE: do not include customerNote here - Customer Account API may reject custom fields
       });
     }
 
@@ -1371,14 +1372,23 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       }
     `;
 
+    // Sanitize payload before sending to Shopify Customer Account API and log the minimal shape
+    const sanitizedVariables = {
+      orderId: returnRequest.orderId,
+      returnLineItems: returnLineItems.map(li => ({
+        fulfillmentLineItemId: li.fulfillmentLineItemId,
+        quantity: Number(li.quantity || 1),
+        returnReason: li.returnReason
+      }))
+    };
+
+    console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
+
     const response = await axios.post(
       CUSTOMER_ACCOUNT_API_URL,
       {
         query: mutation,
-        variables: {
-          orderId: returnRequest.orderId,
-          returnLineItems: returnLineItems,
-        },
+        variables: sanitizedVariables,
       },
       {
         headers: {
@@ -9185,11 +9195,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
           if (qty <= 0) continue;
 
+          // Build minimal allowed Admin ReturnLineItem input - omit unsupported fields like customerNote
           returnLineItems.push({
             fulfillmentLineItemId: match.fulfillmentLineItemId,
             quantity: qty,
-            returnReason: mapReturnReason(returnRequest.reason),
-            customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason)
+            returnReason: mapReturnReason(returnRequest.reason)
           });
         }
 
@@ -9215,15 +9225,17 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         const returnInput = {
           orderId: returnRequest.orderId,
           returnLineItems: returnLineItems,
-          notifyCustomer: true,
-          note: `Return Request Details:\nReason: ${returnRequest.reason}\nPreferred Resolution: ${returnRequest.preferredResolution || 'refund'}\n${returnRequest.additionalNotes ? 'Additional Notes: ' + returnRequest.additionalNotes : ''}\n\nCustomer Email: ${customerEmail}`
+          notifyCustomer: true
         };
 
-        console.log('🔥 Creating return with Admin API (delegated):', { returnLineItemsCount: returnLineItems.length });
+        // Sanitize Admin payload: remove unsupported root-level fields like `note` before sending
+        const sanitizedReturnInput = Object.assign({}, returnInput);
+
+        console.log('🔥 Creating return with Admin API (delegated) - sanitized payload:', { returnLineItemsCount: returnLineItems.length });
 
         const returnResponse = await axios.post(config.adminApiUrl, {
           query: returnMutation,
-          variables: { returnInput }
+          variables: { returnInput: sanitizedReturnInput }
         }, {
           headers: {
             'X-Shopify-Access-Token': config.adminToken,
