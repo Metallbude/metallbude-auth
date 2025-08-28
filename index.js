@@ -3064,11 +3064,18 @@ const authenticateAppToken = async (req, res, next) => {
   }
 
   const token = authHeader.substring(7);
+  // Non-sensitive debug: log token length and current session store size (do not log token value)
+  try {
+    console.log(`🔐 Authorization header present (token length: ${token.length}), sessions in memory: ${sessions.size}`);
+  } catch (e) {
+    console.log('🔐 Authorization debug logging skipped');
+  }
+
   let session = sessions.get(token);
-  
+
   if (!session) {
-    console.log(`❌ Session not found for token: ${token.substring(0, 20)}...`);
-    
+    console.log(`❌ Session not found for token prefix: ${token.substring(0, 8)}...`);
+
     // 🔥 FIX: Do NOT create temporary sessions - reject invalid tokens
     return res.status(401).json({ 
       error: 'Session expired or invalid',
@@ -8957,7 +8964,12 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
       });
     }
 
-    console.log('🔍 Checking return eligibility for order:', orderId);
+    // Non-sensitive debug: log that eligibility check was received and which user requested it
+    try {
+      console.log(`🔍 Checking return eligibility for order: ${orderId} (user: ${customerEmail})`);
+    } catch (e) {
+      console.log('🔍 Checking return eligibility (user unknown)');
+    }
     
     // 🔥 REMOVED: await ensureValidShopifyToken(customerEmail);
     console.log('🔍 Using Shopify Admin API directly to check return eligibility...');
