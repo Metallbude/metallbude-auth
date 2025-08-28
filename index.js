@@ -559,18 +559,27 @@ mutation StoreCreditAccountCredit($input: StoreCreditAccountCreditInput!) {
 async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amountStr, memo = '', reason = '' }) {
   const attempts = [];
 
-  // Attempt A: id + debitInput shape (common and required for some API versions)
+  // Attempt A: official id + debitInput with debitAmount (use customerGid first)
   attempts.push({
-    name: 'id + debitInput',
+    name: 'id+debitInput (customerGid)',
     query: MUTATION_DEBIT,
-    variables: { id: storeCreditAccountId, debitInput: { amount: amountStr, note: memo } }
+    variables: { id: customerGid, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
   });
+
+  // Attempt A2: id+debitInput using storeCreditAccountId (if provided)
+  if (storeCreditAccountId) {
+    attempts.push({
+      name: 'id+debitInput (storeCreditAccountId)',
+      query: MUTATION_DEBIT,
+      variables: { id: storeCreditAccountId, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
+    });
+  }
 
   // Attempt B: owner-based input (older/alternate)
   const MUTATION_DEBIT_ALT1 = `
     mutation StoreCreditAccountDebit($input: StoreCreditAccountDebitInput!) {
       storeCreditAccountDebit(input: $input) {
-        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } }
+        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } account { id balance { amount currencyCode } } }
         userErrors { field message }
       }
     }
@@ -578,14 +587,14 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
   attempts.push({
     name: 'owner-based input',
     query: MUTATION_DEBIT_ALT1,
-    variables: { input: { owner: { customerId: customerGid }, amount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
+    variables: { input: { owner: { customerId: customerGid }, debitAmount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
   });
 
   // Attempt C: legacy wrapper variable
   const MUTATION_DEBIT_ALT2 = `
     mutation StoreCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
       storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
-        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } }
+        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } account { id balance { amount currencyCode } } }
         userErrors { field message }
       }
     }
@@ -593,7 +602,7 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
   attempts.push({
     name: 'legacy wrapper',
     query: MUTATION_DEBIT_ALT2,
-    variables: { storeCreditAccountDebit: { storeCreditAccountId, amount: amountStr, note: memo } }
+    variables: { storeCreditAccountDebit: { storeCreditAccountId, debitAmount: { amount: amountStr, currencyCode: 'EUR' }, note: memo } }
   });
 
   const errors = [];
@@ -602,9 +611,8 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
       console.log(`🔁 Trying debit attempt: ${att.name}`);
       const resp = await adminGraphQL(att.query, att.variables);
       console.log(`🔁 Debit attempt '${att.name}' response:`, JSON.stringify(resp, null, 2));
-      const payload = resp?.data?.storeCreditAccountDebit || resp?.data?.storeCreditAccountDebit || resp?.data?.storeCreditAccountDebit;
-      // Some responses are nested differently; inspect for userErrors
-      const userErrors = (payload?.userErrors) || resp?.data?.storeCreditAccountDebit?.userErrors || [];
+      const payload = resp?.data?.storeCreditAccountDebit;
+      const userErrors = (payload?.userErrors) || [];
       if (Array.isArray(userErrors) && userErrors.length) {
         errors.push({ attempt: att.name, userErrors });
         continue; // try next
