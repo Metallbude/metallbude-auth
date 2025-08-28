@@ -1143,7 +1143,7 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
                   sku
                   image { url altText }
                   product { id title handle }
-                  priceV2 { amount currencyCode }
+                  price
                 }
               }
             }
@@ -1159,7 +1159,7 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
                     node {
                       id
                       quantity
-                      lineItem { id title }
+                      fulfillmentLineItem { id }
                     }
                   }
                 }
