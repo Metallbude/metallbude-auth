@@ -12746,7 +12746,7 @@ app.post('/apply-store-credit', async (req, res) => {
 
     // Step 2: Deduct store credit from customer account using resilient helper
     const amountStrDebit = Number(amountToDeduct).toFixed(2);
-    const debitResult = await tryDebitWithFallbacks({ customerGid: customer.id, storeCreditAccountId, amountStr: amountStrDebit, memo: `Store credit used for checkout - ${amountStrDebit}€`, reason: 'Store credit used at checkout' });
+  const debitResult = await tryDebitWithFallbacks({ customerGid: customer.id, storeCreditAccountId, amountStr: amountStrDebit });
 
     // By default we require an authoritative Admin GraphQL debit to succeed.
     // If ENABLE_STORE_CREDIT_FALLBACK=true is set in env, older fallback behavior
