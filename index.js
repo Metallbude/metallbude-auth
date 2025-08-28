@@ -12742,7 +12742,22 @@ app.post('/apply-store-credit', async (req, res) => {
 
     if (!debitResult.success) {
       console.error('❌ All debit attempts failed:', JSON.stringify(debitResult.errors || debitResult, null, 2));
-      return res.status(500).json({ success: false, error: 'Admin API debit failed (all attempts)', debugInfo: debitResult.errors || debitResult });
+      console.warn('⚠️ Falling back: will create discount code and adjust local ledger (reservation) to keep UX working');
+
+      // Fallback: create discount code anyway (attempt) and mark local ledger as consumed/reserved
+      try {
+        const before = getStoreCredit(customerEmail);
+        const after = adjustStoreCredit(customerEmail, -amountToDeduct);
+        await persistStoreCreditLedger();
+        console.log(`💳 Fallback persisted local ledger for ${customerEmail}: ${before} -> ${after}`);
+        // set authoritativeBalance for response and for discount creation path below
+        var authoritativeBalance = after;
+      } catch (e) {
+        console.error('❌ Failed to persist fallback ledger change:', e?.message || e);
+        // still continue to attempt discount creation
+        var authoritativeBalance = getStoreCredit(customerEmail);
+      }
+      // proceed to discount creation (same as success path)
     }
 
     // debitResult.response contains the adminGraphQL response shape; try to locate the transaction/balance
