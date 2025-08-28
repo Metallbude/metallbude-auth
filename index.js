@@ -817,6 +817,151 @@ function safeStringify(e) {
   try { return typeof e === 'string' ? e : JSON.stringify(e); } catch { return String(e); }
 }
 
+// ===== Raffle participant management + pick-winner =====
+const RAFFLE_PARTICIPANTS_FILE = path.join(__dirname, 'data', 'raffle_participants.json');
+const RAFFLE_AUDIT_FILE = path.join(__dirname, 'data', 'raffle_audit.json');
+
+async function loadRaffleParticipants() {
+  try {
+    const raw = await fs.readFile(RAFFLE_PARTICIPANTS_FILE, 'utf8');
+    const arr = JSON.parse(raw);
+    // normalize to lowercase emails
+    return new Set((Array.isArray(arr) ? arr : []).map(e => String(e || '').toLowerCase()).filter(Boolean));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+async function persistRaffleParticipants(set) {
+  try {
+    const arr = Array.from(set.values());
+    await fs.mkdir(path.dirname(RAFFLE_PARTICIPANTS_FILE), { recursive: true });
+    await fs.writeFile(RAFFLE_PARTICIPANTS_FILE, JSON.stringify(arr, null, 2), 'utf8');
+  } catch (e) {
+    console.error('❌ Failed to persist raffle participants:', e?.message || e);
+  }
+}
+
+async function appendRaffleAudit(entry) {
+  try {
+    await fs.mkdir(path.dirname(RAFFLE_AUDIT_FILE), { recursive: true });
+    let current = [];
+    try {
+      const raw = await fs.readFile(RAFFLE_AUDIT_FILE, 'utf8');
+      current = JSON.parse(raw) || [];
+    } catch (_) {
+      current = [];
+    }
+    current.push(entry);
+    await fs.writeFile(RAFFLE_AUDIT_FILE, JSON.stringify(current, null, 2), 'utf8');
+  } catch (e) {
+    console.error('❌ Failed to append raffle audit:', e?.message || e);
+  }
+}
+
+// POST /raffle/signup { email }
+app.post('/raffle/signup', async (req, res) => {
+  try {
+    const email = (req.body?.email || '').toLowerCase();
+    if (!email) return res.status(400).json({ success: false, error: 'email required' });
+
+    const participants = await loadRaffleParticipants();
+    if (participants.has(email)) return res.json({ success: true, message: 'already registered' });
+    participants.add(email);
+    await persistRaffleParticipants(participants);
+    return res.json({ success: true, email });
+  } catch (err) {
+    console.error('❌ /raffle/signup error', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// POST /raffle/unsubscribe { email }
+app.post('/raffle/unsubscribe', async (req, res) => {
+  try {
+    const email = (req.body?.email || '').toLowerCase();
+    if (!email) return res.status(400).json({ success: false, error: 'email required' });
+    const participants = await loadRaffleParticipants();
+    if (!participants.has(email)) return res.json({ success: true, message: 'not registered' });
+    participants.delete(email);
+    await persistRaffleParticipants(participants);
+    return res.json({ success: true, email });
+  } catch (err) {
+    console.error('❌ /raffle/unsubscribe error', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// POST /raffle/pick-winner  (protected)
+// Headers: x-admin-secret: <RAFFLE_ADMIN_SECRET>
+app.post('/raffle/pick-winner', async (req, res) => {
+  try {
+    const secret = req.get('x-admin-secret') || req.body?.adminSecret;
+    if (!process.env.RAFFLE_ADMIN_SECRET) {
+      return res.status(503).json({ success: false, error: 'RAFFLE_ADMIN_SECRET not configured' });
+    }
+    if (!secret || secret !== process.env.RAFFLE_ADMIN_SECRET) {
+      return res.status(401).json({ success: false, error: 'unauthorized' });
+    }
+
+    const participants = Array.from(await loadRaffleParticipants());
+    if (!participants.length) return res.status(400).json({ success: false, error: 'no participants' });
+
+    // Randomly pick one
+    const idx = Math.floor(Math.random() * participants.length);
+    const winnerEmail = String(participants[idx] || '').toLowerCase();
+    const amount = 10.0;
+    const moneyAmount = toMoneyString(amount);
+
+    // Resolve customer GID by email
+    const data = await adminGraphQL(QUERY_CUSTOMER_BY_EMAIL, { query: `email:${winnerEmail}` });
+    const node = data?.data?.customers?.edges?.[0]?.node;
+    if (!node?.id) {
+      return res.status(404).json({ success: false, error: `customer not found for ${winnerEmail}` });
+    }
+    const customerGid = node.id;
+
+    // Credit via existing mutation
+    const creditRes = await adminGraphQL(MUTATION_CREDIT, {
+      id: customerGid,
+      creditInput: { creditAmount: { amount: moneyAmount, currencyCode: 'EUR' } }
+    });
+    const userErrors = creditRes?.data?.storeCreditAccountCredit?.userErrors || [];
+    if (userErrors.length) {
+      return res.status(422).json({ success: false, error: 'Credit error', details: userErrors });
+    }
+
+    // Fetch updated balance and persist
+    const balRes = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customerGid });
+    const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
+    const balances = accounts.map(e => e.node.balance);
+    const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalBalanceStr = toMoneyString(totalBalance);
+
+    try {
+      setStoreCredit(winnerEmail, Number(totalBalanceStr));
+      await persistStoreCreditLedger();
+      console.log(`💸 Raffle: credited ${moneyAmount} EUR to ${winnerEmail} (new balance ${totalBalanceStr})`);
+    } catch (e) {
+      console.error('❌ Failed to persist balance after raffle credit:', e?.message || e);
+    }
+
+    // Append audit
+    const auditEntry = {
+      time: new Date().toISOString(),
+      winner: winnerEmail,
+      amount: moneyAmount,
+      transaction: creditRes.data?.storeCreditAccountCredit?.storeCreditAccountTransaction || null
+    };
+    await appendRaffleAudit(auditEntry);
+
+    return res.json({ success: true, winner: winnerEmail, amount: moneyAmount, newBalance: totalBalanceStr, transaction: auditEntry.transaction });
+  } catch (err) {
+    console.error('❌ /raffle/pick-winner error', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
 
 // 🔥 ADDED: Customer Account API URL for returns
 const CUSTOMER_ACCOUNT_API_URL = 'https://shopify.com/48343744676/account/customer/api/2024-10/graphql';
