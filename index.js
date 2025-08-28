@@ -6,23 +6,40 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const axios = require('axios');
 
-// Firebase services
-const { initializeFirebase, isFirebaseReady } = require('./services/firebase');
-const WishlistService = require('./services/wishlist');
+// Firebase services (optional)
+let initializeFirebase = null;
+let isFirebaseReady = () => false;
+let WishlistService = null;
 
-// Initialize Firebase before Express app
+// Initialize Firebase before Express app if available
 let wishlistService = null;
 let firebaseEnabled = false;
-
 try {
-  initializeFirebase();
-  wishlistService = new WishlistService();
-  firebaseEnabled = true;
-  console.log('🔥 Firebase initialized successfully');
+  const fb = require('./services/firebase');
+  initializeFirebase = fb.initializeFirebase;
+  isFirebaseReady = fb.isFirebaseReady || isFirebaseReady;
+  try {
+    const ws = require('./services/wishlist');
+    WishlistService = ws;
+  } catch (e) {
+    // wishlist service optional
+    WishlistService = null;
+  }
+
+  if (typeof initializeFirebase === 'function') {
+    try {
+      initializeFirebase();
+      if (WishlistService) wishlistService = new WishlistService();
+      firebaseEnabled = true;
+      console.log('🔥 Firebase initialized successfully');
+    } catch (error) {
+      console.error('❌ Firebase initialization failed during init():', error?.message || error);
+      console.log('⚠️ Server will continue without Firebase - wishlist features will use Shopify fallback');
+    }
+  }
 } catch (error) {
-  console.error('❌ Firebase initialization failed:', error.message);
-  console.log('⚠️ Server will continue without Firebase - wishlist features will use Shopify fallback');
-  // Don't throw error - continue with fallback
+  // Missing services directory or modules - continue without Firebase/wishlist
+  console.log('⚠️ Optional services not available (./services/*), continuing without Firebase/wishlist');
 }
 
 // Initialize Express app
