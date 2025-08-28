@@ -555,6 +555,72 @@ mutation StoreCreditAccountCredit($input: StoreCreditAccountCreditInput!) {
   }
 }`;
 
+// Resilient debit helper: try multiple common GraphQL shapes until one succeeds
+async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amountStr, memo = '', reason = '' }) {
+  const attempts = [];
+
+  // Attempt A: modern owner-based input
+  attempts.push({
+    name: 'owner-based input',
+    query: MUTATION_DEBIT,
+    variables: { input: { owner: { customerId: customerGid }, amount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
+  });
+
+  // Attempt B: id + debitInput shape
+  const MUTATION_DEBIT_ALT1 = `
+    mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+      storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+        transaction { id createdAt amount { amount currencyCode } }
+        userErrors { field message }
+      }
+    }
+  `;
+  attempts.push({
+    name: 'id + debitInput',
+    query: MUTATION_DEBIT_ALT1,
+    variables: { id: storeCreditAccountId, debitInput: { amount: amountStr, note: memo } }
+  });
+
+  // Attempt C: legacy storeCreditAccountDebit wrapper variable
+  const MUTATION_DEBIT_ALT2 = `
+    mutation StoreCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
+      storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
+        transaction { id createdAt amount { amount currencyCode } }
+        userErrors { field message }
+      }
+    }
+  `;
+  attempts.push({
+    name: 'legacy wrapper',
+    query: MUTATION_DEBIT_ALT2,
+    variables: { storeCreditAccountDebit: { storeCreditAccountId, amount: amountStr, note: memo } }
+  });
+
+  const errors = [];
+  for (const att of attempts) {
+    try {
+      console.log(`🔁 Trying debit attempt: ${att.name}`);
+      const resp = await adminGraphQL(att.query, att.variables);
+      console.log(`🔁 Debit attempt '${att.name}' response:`, JSON.stringify(resp, null, 2));
+      const payload = resp?.data?.storeCreditAccountDebit || resp?.data?.storeCreditAccountDebit || resp?.data?.storeCreditAccountDebit;
+      // Some responses are nested differently; inspect for userErrors
+      const userErrors = (payload?.userErrors) || resp?.data?.storeCreditAccountDebit?.userErrors || [];
+      if (Array.isArray(userErrors) && userErrors.length) {
+        errors.push({ attempt: att.name, userErrors });
+        continue; // try next
+      }
+      // Success: return raw response and chosen attempt name
+      return { success: true, attempt: att.name, response: resp };
+    } catch (e) {
+      console.error(`❌ Debit attempt '${att.name}' threw:`, e?.message || e);
+      errors.push({ attempt: att.name, error: e?.response?.data || e?.message || String(e) });
+      // continue to next attempt
+    }
+  }
+
+  return { success: false, errors };
+}
+
 const QUERY_CUSTOMER_BY_EMAIL = `
 query GetCustomerByEmail($query: String!) {
   customers(first: 1, query: $query) {
