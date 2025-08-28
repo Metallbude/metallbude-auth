@@ -8951,6 +8951,27 @@ app.post('/customer/notifications/:notificationId/read', authenticateAppToken, a
 });
 
 // 🔥 ADDED: Return eligibility endpoint
+// Compatibility middleware: some clients may accidentally include raw GIDs with slashes
+// in the path (e.g. /orders/gid://shopify/Order/12345/return-eligibility). Express
+// treats slashes as segment separators, causing route mismatch. Normalize such
+// requests by encoding the orderId segment so the existing route can match.
+app.use((req, res, next) => {
+  try {
+    if (req.method === 'GET' && req.path.includes('/return-eligibility') && req.path.startsWith('/orders/') && req.path.includes('gid://')) {
+      const m = req.path.match(/^\/orders\/(.+)\/return-eligibility/);
+      if (m && m[1]) {
+        const raw = m[1];
+        const encoded = encodeURIComponent(raw);
+        req.url = req.url.replace(`/orders/${raw}/return-eligibility`, `/orders/${encoded}/return-eligibility`);
+        // non-fatal; continue with rewritten url
+      }
+    }
+  } catch (e) {
+    // ignore and continue
+  }
+  next();
+});
+
 app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -9017,6 +9038,9 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
     }
 
     // Get real order data to check return eligibility
+    // Use Admin API field names compatible with recent Admin schema:
+    // - use priceV2 for money selections
+    // - request fulfillments as a list (no edges) and be tolerant with return shapes
     const query = `
       query checkReturnEligibility($orderId: ID!) {
         order(id: $orderId) {
@@ -9036,7 +9060,7 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
                   id
                   title
                   sku
-                  price {
+                  priceV2 {
                     amount
                     currencyCode
                   }
@@ -9053,41 +9077,32 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
               }
             }
           }
-          fulfillments(first: 10) {
-            edges {
-              node {
-                id
-                status
-                createdAt
-                fulfillmentLineItems(first: 250) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                        title
-                      }
-                    }
+          fulfillments {
+            id
+            status
+            createdAt
+            fulfillmentLineItems {
+              edges {
+                node {
+                  id
+                  quantity
+                  lineItem {
+                    id
+                    title
                   }
                 }
               }
             }
           }
-          returns(first: 10) {
-            edges {
-              node {
-                id
-                status
-                returnLineItems(first: 250) {
-                  edges {
-                    node {
-                      fulfillmentLineItem {
-                        lineItem {
-                          id
-                        }
-                      }
-                    }
+          returns {
+            id
+            status
+            returnLineItems {
+              edges {
+                node {
+                  id
+                  lineItem {
+                    id
                   }
                 }
               }
@@ -9112,15 +9127,16 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
     );
 
     if (response.data.errors) {
+      // GraphQL schema mismatch or other API error; log and surface a clearer server error
       console.error('❌ Return eligibility check errors:', response.data.errors);
-      return res.status(404).json({
+      return res.status(500).json({
         eligible: false,
-        reason: 'Order not found',
+        reason: 'Error fetching order data from Shopify',
         returnableItems: []
       });
     }
 
-    const order = response.data.data.order;
+    const order = response.data?.data?.order;
     if (!order) {
       return res.status(404).json({
         eligible: false,
@@ -9143,24 +9159,38 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
       });
     }
 
-    // Get items already returned
+    // Get items already returned (tolerant to different shapes)
     const returnedLineItemIds = new Set();
-    order.returns.edges.forEach(returnEdge => {
-      returnEdge.node.returnLineItems.edges.forEach(returnLineItemEdge => {
-        const lineItemId = returnLineItemEdge.node.fulfillmentLineItem.lineItem.id;
-        returnedLineItemIds.add(lineItemId);
+    try {
+      const returnsArray = Array.isArray(order.returns)
+        ? order.returns
+        : (order.returns?.edges ? order.returns.edges.map(e => e.node) : []);
+
+      returnsArray.forEach(returnNode => {
+        const returnLineItemEdges = returnNode?.returnLineItems?.edges || [];
+        returnLineItemEdges.forEach(returnLineItemEdge => {
+          const lineItemId = returnLineItemEdge?.node?.lineItem?.id;
+          if (lineItemId) returnedLineItemIds.add(lineItemId);
+        });
       });
-    });
+    } catch (e) {
+      // ignore and continue
+    }
 
     // Build returnable items list
     const returnableItems = [];
-    order.lineItems.edges.forEach(lineItemEdge => {
+    const lineItemEdges = order.lineItems?.edges || [];
+    lineItemEdges.forEach(lineItemEdge => {
       const lineItem = lineItemEdge.node;
-      
+
       // Skip if already returned
-      if (returnedLineItemIds.has(lineItem.id)) {
+      if (!lineItem || returnedLineItemIds.has(lineItem.id)) {
         return;
       }
+
+      // Determine price (prefer priceV2)
+      const variant = lineItem.variant || {};
+      const priceAmount = variant.priceV2?.amount || variant.price?.amount || null;
 
       // Add to returnable items
       returnableItems.push({
@@ -9170,12 +9200,12 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
         title: lineItem.title,
         quantity: lineItem.quantity,
         variant: {
-          id: lineItem.variant.id,
-          title: lineItem.variant.title,
-          sku: lineItem.variant.sku,
-          price: lineItem.variant.price.amount,
-          image: lineItem.variant.image?.url || 'https://via.placeholder.com/150',
-          product: lineItem.variant.product
+          id: variant.id,
+          title: variant.title,
+          sku: variant.sku,
+          price: priceAmount,
+          image: variant.image?.url || 'https://via.placeholder.com/150',
+          product: variant.product
         }
       });
     });
