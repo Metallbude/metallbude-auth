@@ -115,9 +115,14 @@ const corsOptions = {
     'Content-Type', 
     'Authorization', 
     'X-Requested-With',
-    'Accept',
-    'Cache-Control',
-    'Origin'
+  'Accept',
+  'Cache-Control',
+  'Origin',
+  // Shopify customer access header used by Customer Account API calls from client
+  'X-Shopify-Customer-Access-Token',
+  // Admin/store headers (if proxied from client) and webhook verification
+  'X-Shopify-Access-Token',
+  'X-Shopify-Hmac-Sha256'
   ]
 };
 
@@ -972,8 +977,8 @@ app.post('/raffle/pick-winner', async (req, res) => {
 });
 
 
-// 🔥 ADDED: Customer Account API URL for returns
-const CUSTOMER_ACCOUNT_API_URL = 'https://shopify.com/48343744676/account/customer/api/2024-10/graphql';
+// 🔥 ADDED: Customer Account API URL for returns - derive from configured shop domain
+const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql.json`;
 
 // Helper functions
 function generateVerificationCode() {
