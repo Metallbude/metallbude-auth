@@ -1154,15 +1154,7 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
               node {
                 id
                 status
-                returnLineItems(first: 250) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      fulfillmentLineItem { id }
-                    }
-                  }
-                }
+                # returnLineItems shape varies across stores/API versions; do not request nested fulfillment fields here
               }
             }
           }
@@ -4929,7 +4921,11 @@ app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
           } : null,
           
           items: returnItem.returnLineItems.edges.map(itemEdge => {
-            const returnLineItem = itemEdge.node;
+            const returnLineItem = itemEdge.node || {};
+            // defensive extraction: some Admin schemas don't expose fulfillmentLineItem or nested lineItem
+            const fulfillmentLineItem = returnLineItem.fulfillmentLineItem || null;
+            const nestedLineItem = fulfillmentLineItem?.lineItem || returnLineItem.lineItem || null;
+
             return {
               id: returnLineItem.id,
               quantity: returnLineItem.quantity,
@@ -4940,15 +4936,15 @@ app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
               refundableQuantity: returnLineItem.refundableQuantity,
               refunded: returnLineItem.refunded,
               restocked: returnLineItem.restocked,
-              
+
               originalItem: {
-                id: returnLineItem.fulfillmentLineItem.id,
-                quantity: returnLineItem.fulfillmentLineItem.quantity,
-                lineItem: {
-                  id: returnLineItem.fulfillmentLineItem.lineItem.id,
-                  title: returnLineItem.fulfillmentLineItem.lineItem.title,
-                  variant: returnLineItem.fulfillmentLineItem.lineItem.variant
-                }
+                id: fulfillmentLineItem?.id || returnLineItem.id || null,
+                quantity: fulfillmentLineItem?.quantity || returnLineItem.quantity || 0,
+                lineItem: nestedLineItem ? {
+                  id: nestedLineItem.id || null,
+                  title: nestedLineItem.title || nestedLineItem.name || 'Unknown',
+                  variant: nestedLineItem.variant || null
+                } : null
               }
             };
           })
