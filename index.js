@@ -12712,9 +12712,19 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     );
 
-    const debitData = debitResponse.data?.data?.storeCreditAccountDebit;
-    const debitErrors = debitData?.userErrors || [];
+    // Validate debit response: check for top-level GraphQL errors and missing data
+    if (Array.isArray(debitResponse.data?.errors) && debitResponse.data.errors.length) {
+      console.error('❌ Admin API top-level GraphQL errors during debit:', JSON.stringify(debitResponse.data.errors, null, 2));
+      return res.status(500).json({ success: false, error: 'Admin API top-level errors during debit', debugInfo: { lastResponse: debitResponse.data } });
+    }
 
+    const debitData = debitResponse.data?.data?.storeCreditAccountDebit;
+    if (!debitData) {
+      console.error('❌ Debit mutation returned no data:', JSON.stringify(debitResponse.data || {}, null, 2));
+      return res.status(500).json({ success: false, error: 'Debit mutation returned no data', debugInfo: { lastResponse: debitResponse.data } });
+    }
+
+    const debitErrors = debitData?.userErrors || [];
     if (debitErrors.length > 0) {
       console.error('❌ Error deducting store credit:', debitErrors);
       return res.status(400).json({
