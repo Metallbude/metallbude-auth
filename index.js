@@ -12563,6 +12563,30 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
+    // If running with a local mock, short-circuit Shopify Admin calls
+    if (process.env.USE_SHOPIFY_MOCK === 'true') {
+      console.log('⚠️ Using Shopify mock mode (USE_SHOPIFY_MOCK=true) - skipping real Admin API calls');
+      // Simulate a customer and store credit account
+      const fakeCustomerId = 'gid://shopify/Customer/FAKE123';
+      const fakeAccountId = 'gid://shopify/StoreCreditAccount/FAKEACC123';
+      const fakeBalance = 20.0; // starting balance
+      const remaining = Number((fakeBalance - amountToDeduct).toFixed(2));
+
+      // Simulate creating a discount code (STORECREDIT-<random>)
+      const discountCode = `${STORE_CREDIT_PREFIX || 'STORECREDIT-'}MOCK${Math.floor(Math.random() * 90000) + 10000}`;
+
+      // Persist to in-memory ledger as reserved/consumed for the mock
+      const key = (customerEmail || '').toLowerCase();
+      storeCreditLedger.set(key, { balance: remaining });
+      await persistStoreCreditLedger();
+
+      return res.json({
+        success: true,
+        discountCode,
+        newStoreCreditBalance: remaining
+      });
+    }
+
     // Step 1: Get customer ID and verify store credit balance
     const customerQuery = `
       query getCustomer($email: String!) {
