@@ -234,6 +234,8 @@ const REFRESH_TOKENS_FILE = '/opt/render/project/src/data/refresh_tokens.json';
 // Persistent session storage
 const sessions = new Map();
 const appRefreshTokens = new Map();
+// Map to hold temporary/customer-scoped Shopify customer tokens (created for store-credit flows)
+const shopifyCustomerTokens = new Map();
 
 // Load sessions on startup
 async function loadPersistedSessionsWithLogging() {
@@ -419,8 +421,11 @@ function verifyShopifyHmac(req, secret) {
   try {
     const hmac = req.get('X-Shopify-Hmac-Sha256') || req.get('x-shopify-hmac-sha256') || '';
     let bodyBuf;
+    // express.raw will place a Buffer on req.body; some frameworks expose rawBody
     if (req.rawBody && Buffer.isBuffer(req.rawBody)) {
       bodyBuf = req.rawBody;
+    } else if (req.body && Buffer.isBuffer(req.body)) {
+      bodyBuf = req.body;
     } else {
       bodyBuf = Buffer.from(JSON.stringify(req.body || {}), 'utf8');
     }
