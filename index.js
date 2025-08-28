@@ -12736,48 +12736,22 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Step 2: Deduct store credit from customer account using shared MUTATION_DEBIT
-    // Use the owner-based input shape (owner.customerId + amount) which is accepted by the Admin API
-  const amountStrDebit = Number(amountToDeduct).toFixed(2);
-    let debitResponse;
-    try {
-      debitResponse = await adminGraphQL(MUTATION_DEBIT, {
-        input: {
-          owner: { customerId: customer.id },
-          amount: { amount: amountStrDebit, currencyCode: 'EUR' },
-          memo: `Store credit used for checkout - ${amountStrDebit}€`,
-          reason: 'Store credit used at checkout'
-        }
-      });
-    } catch (e) {
-      console.error('❌ Error calling debit mutation via adminGraphQL:', e?.message || e);
-      return res.status(500).json({ success: false, error: 'Admin API request failed during debit', debugInfo: { lastResponse: e?.response?.data || e?.message || String(e) } });
+    // Step 2: Deduct store credit from customer account using resilient helper
+    const amountStrDebit = Number(amountToDeduct).toFixed(2);
+    const debitResult = await tryDebitWithFallbacks({ customerGid: customer.id, storeCreditAccountId, amountStr: amountStrDebit, memo: `Store credit used for checkout - ${amountStrDebit}€`, reason: 'Store credit used at checkout' });
+
+    if (!debitResult.success) {
+      console.error('❌ All debit attempts failed:', JSON.stringify(debitResult.errors || debitResult, null, 2));
+      return res.status(500).json({ success: false, error: 'Admin API debit failed (all attempts)', debugInfo: debitResult.errors || debitResult });
     }
 
-    // Validate debit response: check for top-level GraphQL errors and missing data
-    if (Array.isArray(debitResponse.data?.errors) && debitResponse.data.errors.length) {
-      console.error('❌ Admin API top-level GraphQL errors during debit:', JSON.stringify(debitResponse.data.errors, null, 2));
-      return res.status(500).json({ success: false, error: 'Admin API top-level errors during debit', debugInfo: { lastResponse: debitResponse.data } });
-    }
+    // debitResult.response contains the adminGraphQL response shape; try to locate the transaction/balance
+    const chosenResp = debitResult.response;
+    const debitData = chosenResp?.data?.storeCreditAccountDebit || chosenResp?.data?.storeCreditAccountDebit || chosenResp?.data?.storeCreditAccountDebit;
+    const newBalance = debitData?.transaction?.amount?.amount || debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
+    console.log(`✅ Store credit deducted (via ${debitResult.attempt}). New balance reported (best-effort): ${newBalance}€`);
 
-    const debitData = debitResponse.data?.data?.storeCreditAccountDebit;
-    if (!debitData) {
-      console.error('❌ Debit mutation returned no data:', JSON.stringify(debitResponse.data || {}, null, 2));
-      return res.status(500).json({ success: false, error: 'Debit mutation returned no data', debugInfo: { lastResponse: debitResponse.data } });
-    }
-
-    const debitErrors = debitData?.userErrors || [];
-    if (debitErrors.length > 0) {
-      console.error('❌ Error deducting store credit:', debitErrors);
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to deduct store credit',
-        details: debitErrors
-      });
-    }
-
-    const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
-    console.log(`✅ Store credit deducted (mutation reported). New balance: ${newBalance}€`);
+  // (debit validated above via tryDebitWithFallbacks; proceeding with best-effort newBalance)
 
     // Fetch authoritative balances from Shopify and persist to local ledger
     try {
