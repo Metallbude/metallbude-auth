@@ -955,6 +955,15 @@ app.post('/raffle/pick-winner', async (req, res) => {
     };
     await appendRaffleAudit(auditEntry);
 
+    // Clear participants so everyone must re-opt-in weekly
+    try {
+      const emptySet = new Set();
+      await persistRaffleParticipants(emptySet);
+      console.log('🔄 Raffle: cleared participants after drawing winner');
+    } catch (e) {
+      console.error('❌ Failed to clear raffle participants after draw:', e?.message || e);
+    }
+
     return res.json({ success: true, winner: winnerEmail, amount: moneyAmount, newBalance: totalBalanceStr, transaction: auditEntry.transaction });
   } catch (err) {
     console.error('❌ /raffle/pick-winner error', err?.message || err);
