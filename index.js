@@ -12735,7 +12735,32 @@ app.post('/apply-store-credit', async (req, res) => {
     }
 
     const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
-    console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
+    console.log(`✅ Store credit deducted (mutation reported). New balance: ${newBalance}€`);
+
+    // Fetch authoritative balances from Shopify and persist to local ledger
+    try {
+      const balResAfter = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customer.id });
+      const accountsAfter = balResAfter?.data?.customer?.storeCreditAccounts?.edges || [];
+      const balancesAfter = accountsAfter.map(e => e.node.balance);
+      const totalBalanceAfter = balancesAfter.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+      const totalBalanceStr = toMoneyString(totalBalanceAfter);
+      console.log(`🔁 Authoritative Shopify balance after debit: ${totalBalanceStr}€`);
+
+      // Persist into local ledger so debug endpoints and client see consistent data
+      try {
+        setStoreCredit(customerEmail, Number(totalBalanceStr));
+        await persistStoreCreditLedger();
+        console.log(`💾 Persisted authoritative balance ${totalBalanceStr}€ for ${customerEmail} to local ledger`);
+      } catch (e) {
+        console.error('❌ Failed to persist authoritative balance to ledger:', e?.message || e);
+      }
+
+      // Use authoritative balance for responses
+      var authoritativeBalance = totalBalanceStr;
+    } catch (e) {
+      console.error('❌ Failed to fetch authoritative balance after debit:', e?.message || e);
+      var authoritativeBalance = newBalance;
+    }
 
     // Step 3: Create a discount code equivalent to the deducted amount
     const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
