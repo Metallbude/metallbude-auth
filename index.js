@@ -540,9 +540,9 @@ async function adminGraphQL(query, variables) {
 }
 
 const MUTATION_DEBIT = `
-mutation StoreCreditAccountDebit($input: StoreCreditAccountDebitInput!) {
-  storeCreditAccountDebit(input: $input) {
-    transaction { id createdAt amount { amount currencyCode } }
+mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+  storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+    storeCreditAccountTransaction { id createdAt amount { amount currencyCode } }
     userErrors { field message }
   }
 }`;
@@ -559,33 +559,33 @@ mutation StoreCreditAccountCredit($input: StoreCreditAccountCreditInput!) {
 async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amountStr, memo = '', reason = '' }) {
   const attempts = [];
 
-  // Attempt A: modern owner-based input
+  // Attempt A: id + debitInput shape (common and required for some API versions)
   attempts.push({
-    name: 'owner-based input',
+    name: 'id + debitInput',
     query: MUTATION_DEBIT,
-    variables: { input: { owner: { customerId: customerGid }, amount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
+    variables: { id: storeCreditAccountId, debitInput: { amount: amountStr, note: memo } }
   });
 
-  // Attempt B: id + debitInput shape
+  // Attempt B: owner-based input (older/alternate)
   const MUTATION_DEBIT_ALT1 = `
-    mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
-      storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
-        transaction { id createdAt amount { amount currencyCode } }
+    mutation StoreCreditAccountDebit($input: StoreCreditAccountDebitInput!) {
+      storeCreditAccountDebit(input: $input) {
+        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } }
         userErrors { field message }
       }
     }
   `;
   attempts.push({
-    name: 'id + debitInput',
+    name: 'owner-based input',
     query: MUTATION_DEBIT_ALT1,
-    variables: { id: storeCreditAccountId, debitInput: { amount: amountStr, note: memo } }
+    variables: { input: { owner: { customerId: customerGid }, amount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
   });
 
-  // Attempt C: legacy storeCreditAccountDebit wrapper variable
+  // Attempt C: legacy wrapper variable
   const MUTATION_DEBIT_ALT2 = `
     mutation StoreCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
       storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
-        transaction { id createdAt amount { amount currencyCode } }
+        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } }
         userErrors { field message }
       }
     }
