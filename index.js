@@ -9060,10 +9060,6 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
                   id
                   title
                   sku
-                  priceV2 {
-                    amount
-                    currencyCode
-                  }
                   image {
                     url
                     altText
@@ -9077,32 +9073,42 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
               }
             }
           }
-          fulfillments {
-            id
-            status
-            createdAt
-            fulfillmentLineItems {
-              edges {
-                node {
-                  id
-                  quantity
-                  lineItem {
-                    id
-                    title
+          fulfillments(first: 10) {
+            edges {
+              node {
+                id
+                status
+                createdAt
+                fulfillmentLineItems(first: 250) {
+                  edges {
+                    node {
+                      id
+                      quantity
+                      lineItem {
+                        id
+                        title
+                      }
+                    }
                   }
                 }
               }
             }
           }
-          returns {
-            id
-            status
-            returnLineItems {
-              edges {
-                node {
-                  id
-                  lineItem {
-                    id
+          returns(first: 10) {
+            edges {
+              node {
+                id
+                status
+                returnLineItems(first: 250) {
+                  edges {
+                    node {
+                      id
+                      # Different Shopify schema versions expose returned line item references differently.
+                      # We avoid selecting uncommon fields and will parse defensively below.
+                      lineItem {
+                        id
+                      }
+                    }
                   }
                 }
               }
@@ -9111,6 +9117,14 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
         }
       }
     `;
+
+    // Debug: log the exact GraphQL query and variables we're about to send to Admin API
+    try {
+      console.log('🔧 [Admin GraphQL] Query:', query.replace(/\s+/g, ' ').trim());
+      console.log('🔧 [Admin GraphQL] Variables:', { orderId: resolvedOrderId });
+    } catch (e) {
+      // ignore logging errors
+    }
 
     const response = await axios.post(
       config.adminApiUrl,
@@ -9169,8 +9183,20 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
       returnsArray.forEach(returnNode => {
         const returnLineItemEdges = returnNode?.returnLineItems?.edges || [];
         returnLineItemEdges.forEach(returnLineItemEdge => {
-          const lineItemId = returnLineItemEdge?.node?.lineItem?.id;
-          if (lineItemId) returnedLineItemIds.add(lineItemId);
+          const node = returnLineItemEdge?.node || {};
+          // Several schema shapes seen in the wild; check common variants
+          const candidateIds = [
+            node?.fulfillmentLineItem?.lineItem?.id,
+            node?.lineItem?.id,
+            node?.returnedLineItem?.lineItem?.id,
+            node?.line_item?.id
+          ];
+          for (const cid of candidateIds) {
+            if (cid) {
+              returnedLineItemIds.add(cid);
+              break;
+            }
+          }
         });
       });
     } catch (e) {
@@ -9188,9 +9214,24 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
         return;
       }
 
-      // Determine price (prefer priceV2)
+      // Determine price defensively: some shops expose variant.price as a scalar,
+      // others have variant.price as object, and some newer schemas have priceV2.
       const variant = lineItem.variant || {};
-      const priceAmount = variant.priceV2?.amount || variant.price?.amount || null;
+      let priceAmount = null;
+      try {
+        if (variant.priceV2 && variant.priceV2.amount) {
+          priceAmount = variant.priceV2.amount;
+        } else if (variant.price && typeof variant.price === 'object' && variant.price.amount) {
+          priceAmount = variant.price.amount;
+        } else if (variant.price) {
+          // price might be a scalar string/number
+          priceAmount = variant.price;
+        } else if (lineItem.originalUnitPriceV2 && lineItem.originalUnitPriceV2.amount) {
+          priceAmount = lineItem.originalUnitPriceV2.amount;
+        }
+      } catch (e) {
+        priceAmount = null;
+      }
 
       // Add to returnable items
       returnableItems.push({
