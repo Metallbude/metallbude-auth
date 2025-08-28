@@ -253,6 +253,8 @@ const sessions = new Map();
 const appRefreshTokens = new Map();
 // Map to hold temporary/customer-scoped Shopify customer tokens (created for store-credit flows)
 const shopifyCustomerTokens = new Map();
+// In-memory orders cache: customerId -> { orders: [...], fetchedAt: timestamp }
+const ordersCache = new Map();
 
 // Load sessions on startup
 async function loadPersistedSessionsWithLogging() {
@@ -3525,6 +3527,13 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
 
     const orderEdges = response.data?.data?.customer?.orders?.edges || [];
     console.log(`✅ Successfully fetched ${orderEdges.length} orders using SIMPLE query`);
+    // Cache orders for this customer for quick fallback if Admin API is temporarily unavailable
+    try {
+      ordersCache.set(req.session.customerId, { ordersRaw: orderEdges, fetchedAt: Date.now() });
+      console.log('✅ Cached orders for customer:', req.session.customerId);
+    } catch (cacheErr) {
+      console.error('⚠️ Failed to cache orders:', cacheErr.message || cacheErr);
+    }
     
     // Transform orders for Flutter app
     const orders = orderEdges.map(edge => {
@@ -3638,7 +3647,48 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Orders fetch error:', error);
+    console.error('❌ Orders fetch error:', error.message || error);
+    // Try returning cached orders if available
+    const cached = ordersCache.get(req.session.customerId);
+    if (cached && cached.ordersRaw) {
+      console.log('🔁 Returning cached orders due to upstream failure');
+      const orderEdges = cached.ordersRaw || [];
+      const orders = orderEdges.map(edge => {
+        const order = edge.node;
+        return {
+          id: order.id,
+          name: order.name,
+          orderNumber: parseInt(order.name.replace('#', '')) || 0,
+          processedAt: order.processedAt,
+          createdAt: order.createdAt,
+          updatedAt: order.updatedAt,
+          fulfillmentStatus: order.displayFulfillmentStatus,
+          financialStatus: order.displayFinancialStatus,
+          totalPrice: { amount: order.currentTotalPriceSet?.shopMoney?.amount || '0.00', currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' },
+          subtotalPrice: { amount: order.currentSubtotalPriceSet?.shopMoney?.amount || '0.00', currencyCode: order.currentSubtotalPriceSet?.shopMoney?.currencyCode || 'EUR' },
+          totalShipping: { amount: order.totalShippingPriceSet?.shopMoney?.amount || '0.00', currencyCode: order.totalShippingPriceSet?.shopMoney?.currencyCode || 'EUR' },
+          totalTax: order.currentTotalTaxSet ? { amount: order.currentTotalTaxSet.shopMoney?.amount || '0.00', currencyCode: order.currentTotalTaxSet.shopMoney?.currencyCode || 'EUR' } : { amount: '0.00', currencyCode: 'EUR' },
+          shippingAddress: order.shippingAddress || null,
+          lineItems: order.lineItems?.edges?.map(item => {
+            const lineItem = item.node;
+            const variant = lineItem.variant;
+            if (!variant) return { id: lineItem.id, title: lineItem.title, quantity: lineItem.quantity, variant: null, totalPrice: { amount: '0.00', currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' } };
+            const itemPrice = parseFloat(variant.price || '0');
+            const quantity = lineItem.quantity || 0;
+            return { id: lineItem.id, title: lineItem.title, quantity: quantity, variant: { id: variant.id, title: variant.title, sku: variant.sku, price: variant.price, image: variant.image?.url || null, product: variant.product ? { id: variant.product.id, title: variant.product.title, handle: variant.product.handle } : null }, totalPrice: { amount: (itemPrice * quantity).toFixed(2), currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' } };
+          }).filter(item => item !== null) || [],
+          note: order.note || '',
+          tags: order.tags || [],
+          phone: order.phone || '',
+          email: order.email || '',
+          canReorder: order.displayFulfillmentStatus === 'FULFILLED',
+          canReturn: order.displayFulfillmentStatus === 'FULFILLED' && order.displayFinancialStatus !== 'REFUNDED'
+        };
+      });
+
+      return res.json({ orders: orders, pagination: { hasNextPage: false, currentPage: 1, totalShown: orders.length }, cached: true });
+    }
+
     res.json({ orders: [] });
   }
 });
