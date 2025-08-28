@@ -694,13 +694,25 @@ app.post('/store-credit/debit', async (req, res) => {
     const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
     const balances = accounts.map(e => e.node.balance);
     const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalBalanceStr = toMoneyString(totalBalance);
+
+    // Persist authoritative balance to local ledger for consistency
+    try {
+      if (email) {
+        setStoreCredit(email, Number(totalBalanceStr));
+        await persistStoreCreditLedger();
+        console.log(`💾 Persisted authoritative balance ${totalBalanceStr} for ${email}`);
+      }
+    } catch (e) {
+      console.error('❌ Failed to persist authoritative balance after debit:', e?.message || e);
+    }
 
     return res.json({
       success: true,
       debited: moneyAmount,
       currencyCode,
       transaction: debitRes.data.storeCreditAccountDebit.storeCreditAccountTransaction,
-      newBalance: toMoneyString(totalBalance)
+      newBalance: totalBalanceStr
     });
   } catch (err) {
     console.error('❌ /store-credit/debit error', err.message);
@@ -741,13 +753,25 @@ app.post('/store-credit/credit', async (req, res) => {
     const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
     const balances = accounts.map(e => e.node.balance);
     const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalBalanceStr = toMoneyString(totalBalance);
+
+    // Persist authoritative balance to local ledger for consistency
+    try {
+      if (email) {
+        setStoreCredit(email, Number(totalBalanceStr));
+        await persistStoreCreditLedger();
+        console.log(`💾 Persisted authoritative balance ${totalBalanceStr} for ${email}`);
+      }
+    } catch (e) {
+      console.error('❌ Failed to persist authoritative balance after credit:', e?.message || e);
+    }
 
     return res.json({
       success: true,
       credited: moneyAmount,
       currencyCode,
       transaction: creditRes.data.storeCreditAccountCredit.storeCreditAccountTransaction,
-      newBalance: toMoneyString(totalBalance)
+      newBalance: totalBalanceStr
     });
   } catch (err) {
     console.error('❌ /store-credit/credit error', err.message);
