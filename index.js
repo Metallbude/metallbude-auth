@@ -3362,8 +3362,8 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       updatedAt: customer.updatedAt,
       verified: customer.verifiedEmail,
       
-      // 🔥 NEW: Include Shopify customer access token for store credit
-      shopifyCustomerAccessToken: shopifyCustomerAccessToken,
+    // 🔥 NEW: Include server-side store credit token (not a Shopify shcat_ token)
+    storeCreditToken: shopifyCustomerAccessToken,
       
       // Marketing preferences
       acceptsEmailMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
@@ -8974,6 +8974,48 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
     // 🔥 REMOVED: await ensureValidShopifyToken(customerEmail);
     console.log('🔍 Using Shopify Admin API directly to check return eligibility...');
 
+    // Resolve order identifier: accept full GID or plain order number (e.g. 135798)
+    let resolvedOrderId = orderId;
+    try {
+      if (!String(orderId).startsWith('gid://')) {
+        // Try searching orders by name (Shopify order name is usually like "#135798" or "135798")
+        const searchQueries = [
+          `name:${orderId}`,
+          `name:#${orderId}`,
+        ];
+
+        let foundOrder = null;
+        for (const q of searchQueries) {
+          try {
+            const findQuery = `query findOrder($query: String!) { orders(first:1, query: $query) { edges { node { id name } } } }`;
+            const findResp = await axios.post(
+              config.adminApiUrl,
+              { query: findQuery, variables: { query: q } },
+              { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+            );
+            const node = findResp.data?.data?.orders?.edges?.[0]?.node;
+            if (node && node.id) {
+              foundOrder = node;
+              break;
+            }
+          } catch (err) {
+            // continue to next pattern
+          }
+        }
+
+        if (foundOrder && foundOrder.id) {
+          resolvedOrderId = foundOrder.id;
+          console.log(`🔎 Resolved order number ${orderId} -> ${resolvedOrderId}`);
+        } else {
+          console.log(`❌ Could not resolve order identifier: ${orderId}`);
+          return res.status(404).json({ eligible: false, reason: 'Order not found', returnableItems: [] });
+        }
+      }
+    } catch (err) {
+      console.error('❌ Error resolving order identifier:', err?.message || err);
+      return res.status(500).json({ eligible: false, reason: 'Internal error resolving order', returnableItems: [] });
+    }
+
     // Get real order data to check return eligibility
     const query = `
       query checkReturnEligibility($orderId: ID!) {
@@ -9059,7 +9101,7 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
       config.adminApiUrl,
       {
         query,
-        variables: { orderId }
+        variables: { orderId: resolvedOrderId }
       },
       {
         headers: {
