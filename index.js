@@ -12753,21 +12753,8 @@ app.post('/apply-store-credit', async (req, res) => {
     // (create discount + adjust local ledger) will be allowed. Otherwise return an error.
     if (!debitResult.success) {
       console.error('❌ All debit attempts failed:', JSON.stringify(debitResult.errors || debitResult, null, 2));
-      if (process.env.ENABLE_STORE_CREDIT_FALLBACK === 'true') {
-        console.warn('⚠️ ENABLE_STORE_CREDIT_FALLBACK=true -> performing fallback: create discount & reserve locally');
-        try {
-          const before = getStoreCredit(customerEmail);
-          const after = adjustStoreCredit(customerEmail, -amountToDeduct);
-          await persistStoreCreditLedger();
-          console.log(`💳 Fallback persisted local ledger for ${customerEmail}: ${before} -> ${after}`);
-          var authoritativeBalance = after;
-        } catch (e) {
-          console.error('❌ Failed to persist fallback ledger change:', e?.message || e);
-          var authoritativeBalance = getStoreCredit(customerEmail);
-        }
-      } else {
-        return res.status(502).json({ success: false, error: 'Authoritative debit failed', debugInfo: debitResult.errors || debitResult });
-      }
+      // No fallback: require authoritative debit to succeed.
+      return res.status(502).json({ success: false, error: 'Authoritative debit failed', debugInfo: debitResult.errors || debitResult });
     }
 
     // If we reach here and the debit succeeded, tryDebitWithFallbacks returned a response we can inspect
