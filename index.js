@@ -542,16 +542,22 @@ async function adminGraphQL(query, variables) {
 const MUTATION_DEBIT = `
 mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
   storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
-    storeCreditAccountTransaction { id createdAt amount { amount currencyCode } }
-    userErrors { field message }
+    storeCreditAccountTransaction {
+      amount { amount currencyCode }
+      account { id balance { amount currencyCode } }
+    }
+    userErrors { message field }
   }
 }`;
 
 const MUTATION_CREDIT = `
-mutation StoreCreditAccountCredit($input: StoreCreditAccountCreditInput!) {
-  storeCreditAccountCredit(input: $input) {
-    transaction { id createdAt amount { amount currencyCode } }
-    userErrors { field message }
+mutation StoreCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+  storeCreditAccountCredit(id: $id, creditInput: $creditInput) {
+    storeCreditAccountTransaction {
+      amount { amount currencyCode }
+      account { id balance { amount currencyCode } }
+    }
+    userErrors { message field }
   }
 }`;
 
@@ -671,15 +677,11 @@ app.post('/store-credit/debit', async (req, res) => {
       customerGid = node.id;
     }
 
-    // Perform debit mutation
+    // Perform debit mutation using exact variable shape: { id, debitInput }
     const moneyAmount = toMoneyString(amount);
     const debitRes = await adminGraphQL(MUTATION_DEBIT, {
-      input: {
-        owner: { customerId: customerGid },
-        amount: { amount: moneyAmount, currencyCode },
-        reason,
-        memo
-      }
+      id: customerGid,
+      debitInput: { debitAmount: { amount: moneyAmount, currencyCode } }
     });
 
     const userErrors = debitRes?.data?.storeCreditAccountDebit?.userErrors || [];
@@ -697,7 +699,7 @@ app.post('/store-credit/debit', async (req, res) => {
       success: true,
       debited: moneyAmount,
       currencyCode,
-      transaction: debitRes.data.storeCreditAccountDebit.transaction,
+      transaction: debitRes.data.storeCreditAccountDebit.storeCreditAccountTransaction,
       newBalance: toMoneyString(totalBalance)
     });
   } catch (err) {
@@ -726,12 +728,8 @@ app.post('/store-credit/credit', async (req, res) => {
 
     const moneyAmount = toMoneyString(amount);
     const creditRes = await adminGraphQL(MUTATION_CREDIT, {
-      input: {
-        owner: { customerId: customerGid },
-        amount: { amount: moneyAmount, currencyCode },
-        reason,
-        memo
-      }
+      id: customerGid,
+      creditInput: { creditAmount: { amount: moneyAmount, currencyCode } }
     });
 
     const userErrors = creditRes?.data?.storeCreditAccountCredit?.userErrors || [];
@@ -748,7 +746,7 @@ app.post('/store-credit/credit', async (req, res) => {
       success: true,
       credited: moneyAmount,
       currencyCode,
-      transaction: creditRes.data.storeCreditAccountCredit.transaction,
+      transaction: creditRes.data.storeCreditAccountCredit.storeCreditAccountTransaction,
       newBalance: toMoneyString(totalBalance)
     });
   } catch (err) {
