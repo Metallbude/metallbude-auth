@@ -1190,7 +1190,7 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
       return { eligible: false, reason: 'Order has been voided or refunded', returnableItems: [] };
     }
 
-    // Collect already-returned fulfillment line item IDs
+  // Collect already-returned fulfillment line item IDs
     const existingReturns = order.returns?.edges || [];
     const returnedFulfillmentLineItemIds = new Set();
     for (const retEdge of existingReturns) {
@@ -1207,6 +1207,19 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
 
     // Build returnable items list from fulfillments' fulfillmentLineItems
     const returnableItems = [];
+    // Build a quick lookup from order.lineItems by id to retrieve variant/image info
+    const lineItemMap = new Map();
+    const orderLineEdges = order.lineItems?.edges || [];
+    for (const le of orderLineEdges) {
+      const node = le.node || {};
+      const variant = node.variant || {};
+      lineItemMap.set(node.id, {
+        variantId: variant.id || null,
+        variantTitle: variant.title || null,
+        variantPrice: variant.price || null,
+        image: (variant.image && variant.image.url) ? variant.image.url : null,
+      });
+    }
     const fulfillments = order.fulfillments || [];
     for (const f of fulfillments) {
       const fLineEdges = f.fulfillmentLineItems?.edges || [];
@@ -1216,16 +1229,17 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
         if (returnedFulfillmentLineItemIds.has(fl.id)) continue; // skip already returned
 
         const lineItem = fl.lineItem || {};
+        const mapped = lineItemMap.get(lineItem.id) || {};
         returnableItems.push({
           id: lineItem.id || null,
           fulfillmentLineItemId: fl.id,
           title: lineItem.title || 'Unknown',
           quantity: fl.quantity || 0,
           variant: {
-            id: null,
-            title: null,
-            price: null,
-            image: null,
+            id: mapped.variantId || null,
+            title: mapped.variantTitle || null,
+            price: mapped.variantPrice || null,
+            image: mapped.image || null,
           },
         });
       }
