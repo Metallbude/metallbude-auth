@@ -1067,7 +1067,7 @@ function mapShopifyReasonToInternal(reason) {
 
 function mapShopifyStatusToInternal(status) {
   const mapping = {
-    'REQUESTED': 'pending',
+  'REQUESTED': 'requested',
     'OPEN': 'approved',
     'CLOSED': 'completed',
     'DECLINED': 'rejected',
@@ -9357,7 +9357,7 @@ Customer Email: ${customerEmail}`
       shopifyStatus: shopifyResult.status,
       customerEmail: customerEmail,
       requestDate: new Date().toISOString(),
-      status: 'pending',
+      status: mapShopifyStatusToInternal(shopifyResult.status),
     };
 
     // Here you would save to your database
