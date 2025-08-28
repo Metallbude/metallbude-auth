@@ -12748,33 +12748,33 @@ app.post('/apply-store-credit', async (req, res) => {
     const amountStrDebit = Number(amountToDeduct).toFixed(2);
     const debitResult = await tryDebitWithFallbacks({ customerGid: customer.id, storeCreditAccountId, amountStr: amountStrDebit, memo: `Store credit used for checkout - ${amountStrDebit}€`, reason: 'Store credit used at checkout' });
 
+    // By default we require an authoritative Admin GraphQL debit to succeed.
+    // If ENABLE_STORE_CREDIT_FALLBACK=true is set in env, older fallback behavior
+    // (create discount + adjust local ledger) will be allowed. Otherwise return an error.
     if (!debitResult.success) {
       console.error('❌ All debit attempts failed:', JSON.stringify(debitResult.errors || debitResult, null, 2));
-      console.warn('⚠️ Falling back: will create discount code and adjust local ledger (reservation) to keep UX working');
-
-      // Fallback: create discount code anyway (attempt) and mark local ledger as consumed/reserved
-      try {
-        const before = getStoreCredit(customerEmail);
-        const after = adjustStoreCredit(customerEmail, -amountToDeduct);
-        await persistStoreCreditLedger();
-        console.log(`💳 Fallback persisted local ledger for ${customerEmail}: ${before} -> ${after}`);
-        // set authoritativeBalance for response and for discount creation path below
-        var authoritativeBalance = after;
-      } catch (e) {
-        console.error('❌ Failed to persist fallback ledger change:', e?.message || e);
-        // still continue to attempt discount creation
-        var authoritativeBalance = getStoreCredit(customerEmail);
+      if (process.env.ENABLE_STORE_CREDIT_FALLBACK === 'true') {
+        console.warn('⚠️ ENABLE_STORE_CREDIT_FALLBACK=true -> performing fallback: create discount & reserve locally');
+        try {
+          const before = getStoreCredit(customerEmail);
+          const after = adjustStoreCredit(customerEmail, -amountToDeduct);
+          await persistStoreCreditLedger();
+          console.log(`💳 Fallback persisted local ledger for ${customerEmail}: ${before} -> ${after}`);
+          var authoritativeBalance = after;
+        } catch (e) {
+          console.error('❌ Failed to persist fallback ledger change:', e?.message || e);
+          var authoritativeBalance = getStoreCredit(customerEmail);
+        }
+      } else {
+        return res.status(502).json({ success: false, error: 'Authoritative debit failed', debugInfo: debitResult.errors || debitResult });
       }
-      // proceed to discount creation (same as success path)
     }
 
-    // debitResult.response contains the adminGraphQL response shape; try to locate the transaction/balance
+    // If we reach here and the debit succeeded, tryDebitWithFallbacks returned a response we can inspect
     const chosenResp = debitResult.response;
     const debitData = chosenResp?.data?.storeCreditAccountDebit || chosenResp?.data?.storeCreditAccountDebit || chosenResp?.data?.storeCreditAccountDebit;
-    const newBalance = debitData?.transaction?.amount?.amount || debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
-    console.log(`✅ Store credit deducted (via ${debitResult.attempt}). New balance reported (best-effort): ${newBalance}€`);
-
-  // (debit validated above via tryDebitWithFallbacks; proceeding with best-effort newBalance)
+    const bestEffortNewBalance = debitData?.transaction?.amount?.amount || debitData?.storeCreditAccountTransaction?.account?.balance?.amount || null;
+    if (bestEffortNewBalance) console.log(`✅ Store credit deducted (via ${debitResult.attempt}). Reported new balance (best-effort): ${bestEffortNewBalance}€`);
 
     // Fetch authoritative balances from Shopify and persist to local ledger
     try {
@@ -12794,11 +12794,11 @@ app.post('/apply-store-credit', async (req, res) => {
         console.error('❌ Failed to persist authoritative balance to ledger:', e?.message || e);
       }
 
-      // Use authoritative balance for responses
-      var authoritativeBalance = totalBalanceStr;
+  // Use authoritative balance for responses
+  var authoritativeBalance = totalBalanceStr;
     } catch (e) {
       console.error('❌ Failed to fetch authoritative balance after debit:', e?.message || e);
-      var authoritativeBalance = newBalance;
+  var authoritativeBalance = bestEffortNewBalance || getStoreCredit(customerEmail) || '0';
     }
 
     // Step 3: Create a discount code equivalent to the deducted amount
@@ -12902,7 +12902,7 @@ app.post('/apply-store-credit', async (req, res) => {
       message: 'Store credit deducted and discount code created',
       discountCode: createdDiscountCode,
       appliedStoreCredit: amountToDeduct,
-      newStoreCreditBalance: parseFloat(newBalance),
+      newStoreCreditBalance: Number(authoritativeBalance),
       customerId: customer.id
     });
 
