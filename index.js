@@ -12670,47 +12670,23 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Step 2: Deduct store credit from customer account
-    const deductStoreCreditMutation = `
-      mutation storeCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
-        storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
-          storeCreditAccountTransaction {
-            id
-            account {
-              balance {
-                amount
-              }
-            }
-          }
-          userErrors {
-            field
-            message
-          }
+    // Step 2: Deduct store credit from customer account using shared MUTATION_DEBIT
+    // Use the owner-based input shape (owner.customerId + amount) which is accepted by the Admin API
+    const amountStr = Number(amountToDeduct).toFixed(2);
+    let debitResponse;
+    try {
+      debitResponse = await adminGraphQL(MUTATION_DEBIT, {
+        input: {
+          owner: { customerId: customer.id },
+          amount: { amount: amountStr, currencyCode: 'EUR' },
+          memo: `Store credit used for checkout - ${amountStr}€`,
+          reason: 'Store credit used at checkout'
         }
-      }
-    `;
-
-    const debitInput = {
-      storeCreditAccountDebit: {
-        storeCreditAccountId: storeCreditAccountId,
-        amount: amountToDeduct.toString(),
-        note: `Store credit used for checkout - ${amountToDeduct}€`
-      }
-    };
-
-    const debitResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: deductStoreCreditMutation,
-        variables: debitInput
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+      });
+    } catch (e) {
+      console.error('❌ Error calling debit mutation via adminGraphQL:', e?.message || e);
+      return res.status(500).json({ success: false, error: 'Admin API request failed during debit', debugInfo: { lastResponse: e?.response?.data || e?.message || String(e) } });
+    }
 
     // Validate debit response: check for top-level GraphQL errors and missing data
     if (Array.isArray(debitResponse.data?.errors) && debitResponse.data.errors.length) {
