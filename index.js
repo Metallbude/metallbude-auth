@@ -354,6 +354,152 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
+// ===== STORE-CREDIT LEDGER (persistent on disk) =====
+// Uses the same pattern as session persistence. Stored under project data.
+const STORE_CREDIT_FILE = path.join(__dirname, 'data', 'store_credit.json');
+const STORE_CREDIT_PREFIX = process.env.STORE_CREDIT_CODE_PREFIX || 'STORECREDIT-';
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || '';
+
+// In-memory map: email (lowercased) -> { balance: number }
+const storeCreditLedger = new Map();
+
+async function loadStoreCreditLedger() {
+  try {
+    const raw = await fs.readFile(STORE_CREDIT_FILE, 'utf8');
+    const entries = JSON.parse(raw);
+    storeCreditLedger.clear();
+    for (const [email, data] of entries) {
+      storeCreditLedger.set((email || '').toLowerCase(), { balance: Number(data?.balance || 0) });
+    }
+    console.log(`💳 Loaded ${storeCreditLedger.size} store-credit accounts`);
+  } catch (e) {
+    console.log('💳 No existing store credit file found - starting fresh');
+  }
+}
+
+async function persistStoreCreditLedger() {
+  try {
+    const entries = Array.from(storeCreditLedger.entries());
+    await fs.mkdir(path.dirname(STORE_CREDIT_FILE), { recursive: true });
+    await fs.writeFile(STORE_CREDIT_FILE, JSON.stringify(entries), 'utf8');
+    console.log(`💳 Persisted ${entries.length} store-credit accounts`);
+  } catch (e) {
+    console.error('❌ Failed to persist store credit ledger:', e?.message || e);
+  }
+}
+
+function getStoreCredit(email) {
+  const key = (email || '').toLowerCase();
+  return storeCreditLedger.get(key)?.balance || 0;
+}
+
+function setStoreCredit(email, amount) {
+  const key = (email || '').toLowerCase();
+  storeCreditLedger.set(key, { balance: Number(amount) });
+}
+
+function adjustStoreCredit(email, delta) {
+  const key = (email || '').toLowerCase();
+  const current = getStoreCredit(key);
+  const next = Number((current + Number(delta)).toFixed(2));
+  storeCreditLedger.set(key, { balance: next });
+  return next;
+}
+
+// Load at startup
+loadStoreCreditLedger().catch((e) => console.warn('Could not load store credit ledger at startup', e));
+
+// Periodic flush (every 60s)
+setInterval(() => {
+  persistStoreCreditLedger().catch(() => {});
+}, 60 * 1000);
+
+// Helper to verify Shopify Webhook HMAC. Uses raw body when available, falls back to JSON.stringify of parsed body.
+function verifyShopifyHmac(req, secret) {
+  try {
+    const hmac = req.get('X-Shopify-Hmac-Sha256') || req.get('x-shopify-hmac-sha256') || '';
+    let bodyBuf;
+    if (req.rawBody && Buffer.isBuffer(req.rawBody)) {
+      bodyBuf = req.rawBody;
+    } else {
+      bodyBuf = Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+    }
+    const digest = crypto.createHmac('sha256', secret).update(bodyBuf).digest('base64');
+    const digestBuf = Buffer.from(digest, 'base64');
+    const hmacBuf = Buffer.from(hmac, 'base64');
+    if (digestBuf.length !== hmacBuf.length) return false;
+    return crypto.timingSafeEqual(digestBuf, hmacBuf);
+  } catch (e) {
+    console.error('❌ HMAC verification failed:', e?.message || e);
+    return false;
+  }
+}
+
+// Webhook route: orders/create - deduct store credit when special codes are used
+app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!SHOPIFY_WEBHOOK_SECRET) {
+    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
+    return res.status(401).send('Webhook secret not configured');
+  }
+  if (!verifyShopifyHmac(req, SHOPIFY_WEBHOOK_SECRET)) {
+    console.warn('⚠️ Invalid HMAC for orders/create webhook');
+    return res.status(401).send('Invalid HMAC');
+  }
+
+  let payload;
+  try {
+    payload = typeof req.body === 'string' ? JSON.parse(req.body) : (Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body);
+  } catch (e) {
+    console.error('❌ Unable to parse orders/create body:', e?.message || e);
+    return res.status(400).send('Bad JSON');
+  }
+
+  try {
+    const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
+    const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
+    let totalStoreCreditUsed = 0;
+
+    for (const d of discounts) {
+      const code = String(d?.code || '');
+      const amountStr = String(d?.amount || '0');
+      if (code.startsWith(STORE_CREDIT_PREFIX)) {
+        const used = Number(parseFloat(amountStr));
+        if (!isNaN(used) && used > 0) totalStoreCreditUsed += used;
+      }
+    }
+
+    if (totalStoreCreditUsed > 0 && email) {
+      const before = getStoreCredit(email);
+      const after = adjustStoreCredit(email, -totalStoreCreditUsed);
+      await persistStoreCreditLedger();
+      console.log(`💳 Deducted ${totalStoreCreditUsed.toFixed(2)} from ${email} (before: ${before.toFixed(2)} -> after: ${after.toFixed(2)})  [order ${payload?.name || payload?.order_number || payload?.id}]`);
+    } else {
+      console.log('ℹ️ No store-credit code used on this order, or missing email');
+    }
+
+    return res.status(200).send('ok');
+  } catch (e) {
+    console.error('❌ Webhook processing error:', e);
+    return res.status(500).send('error');
+  }
+});
+
+// Debug routes
+app.get('/debug/store-credit', async (req, res) => {
+  const email = (req.query.email || '').toLowerCase();
+  if (!email) return res.status(400).json({ error: 'email query param required' });
+  return res.json({ email, balance: getStoreCredit(email) });
+});
+
+app.post('/debug/store-credit/adjust', express.json(), async (req, res) => {
+  const email = (req.body?.email || '').toLowerCase();
+  const delta = Number(req.body?.delta || 0);
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const after = adjustStoreCredit(email, delta);
+  await persistStoreCreditLedger();
+  return res.json({ email, newBalance: after });
+});
+
 // Shopify Customer Account API token management
 
 // ===== Store Credit helpers (Admin GraphQL) =====
