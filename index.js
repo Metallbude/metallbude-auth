@@ -563,7 +563,7 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
   attempts.push({
     name: 'id+debitInput (customerGid)',
     query: MUTATION_DEBIT,
-    variables: { id: customerGid, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
+    variables: { id: customerGid, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
   });
 
   // Attempt A2: id+debitInput using storeCreditAccountId (if provided)
@@ -571,7 +571,7 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
     attempts.push({
       name: 'id+debitInput (storeCreditAccountId)',
       query: MUTATION_DEBIT,
-      variables: { id: storeCreditAccountId, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
+      variables: { id: storeCreditAccountId, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
     });
   }
 
@@ -587,7 +587,7 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
   attempts.push({
     name: 'owner-based input',
     query: MUTATION_DEBIT_ALT1,
-    variables: { input: { owner: { customerId: customerGid }, debitAmount: { amount: amountStr, currencyCode: 'EUR' }, memo, reason } }
+    variables: { input: { owner: { customerId: customerGid }, debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
   });
 
   // Attempt C: legacy wrapper variable
@@ -602,7 +602,7 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
   attempts.push({
     name: 'legacy wrapper',
     query: MUTATION_DEBIT_ALT2,
-    variables: { storeCreditAccountDebit: { storeCreditAccountId, debitAmount: { amount: amountStr, currencyCode: 'EUR' }, note: memo } }
+    variables: { storeCreditAccountDebit: { storeCreditAccountId, debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
   });
 
   const errors = [];
