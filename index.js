@@ -1312,55 +1312,50 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       });
     }
 
-    // Use Customer Account API orderRequestReturn mutation
+    // Use Customer Account API returnRequest mutation (user-provided shape)
     const mutation = `
-      mutation orderRequestReturn($orderId: ID!, $returnLineItems: [OrderReturnLineItemInput!]!) {
-        orderRequestReturn(
-          orderId: $orderId
-          returnLineItems: $returnLineItems
-        ) {
+      mutation ReturnRequest($input: ReturnRequestInput!) {
+        returnRequest(input: $input) {
           userErrors {
             field
             message
-            code
           }
-          returnRequest {
+          return {
             id
             status
-            requestedAt
-            order {
-              id
-              name
-            }
-            returnLineItems(first: 50) {
+            returnLineItems(first: 10) {
               edges {
                 node {
                   id
-                  quantity
                   returnReason
                   customerNote
-                  fulfillmentLineItem {
-                    id
-                    lineItem {
-                      title
-                    }
-                  }
                 }
               }
             }
+            order { id }
           }
         }
       }
     `;
 
+    // Build variables according to the requested shape
+    const variables = {
+      input: {
+        orderId: returnRequest.orderId,
+        returnLineItems: returnLineItems.map(rli => ({
+          fulfillmentLineItemId: rli.fulfillmentLineItemId,
+          quantity: rli.quantity,
+          returnReason: rli.returnReason,
+          customerNote: rli.customerNote
+        }))
+      }
+    };
+
     const response = await axios.post(
       CUSTOMER_ACCOUNT_API_URL,
       {
         query: mutation,
-        variables: {
-          orderId: returnRequest.orderId,
-          returnLineItems: returnLineItems,
-        },
+        variables
       },
       {
         headers: {
@@ -1370,32 +1365,31 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       }
     );
 
-    console.log('📤 Shopify return request response:', response.status);
+    console.log('📤 Shopify returnRequest response status:', response.status);
 
     if (response.data.errors) {
       console.error('❌ GraphQL errors:', response.data.errors);
       throw new Error(`Shopify GraphQL error: ${response.data.errors[0].message}`);
     }
-    
-    const result = response.data.data.orderRequestReturn;
+
+    const result = response.data.data.returnRequest;
     const userErrors = result.userErrors || [];
-    
     if (userErrors.length > 0) {
       console.error('❌ User errors:', userErrors);
       throw new Error(`Return request failed: ${userErrors[0].message}`);
     }
-    
-    const returnRequestData = result.returnRequest;
-    if (!returnRequestData) {
-      throw new Error('Failed to create return request in Shopify');
+
+    const createdReturn = result.return;
+    if (!createdReturn) {
+      throw new Error('Failed to create return via Customer Account API');
     }
-    
-    console.log('✅ Shopify return request created:', returnRequestData.id);
-    
+
+    console.log('✅ Shopify return created via Customer Account API:', createdReturn.id);
+
     return {
       success: true,
-      shopifyReturnRequestId: returnRequestData.id,
-      status: returnRequestData.status,
+      shopifyReturnRequestId: createdReturn.id,
+      status: createdReturn.status,
     };
 
   } catch (error) {
@@ -2164,66 +2158,6 @@ app.post('/newsletter/subscribe', async (req, res) => {
       console.log('📧 Profile creation/list subscription failed with status:', profileError.response?.status);
       console.log('📧 Profile creation error data:', JSON.stringify(profileError.response?.data, null, 2));
       console.log('📧 Trying legacy method...');
-    }
-
-    // Method 2: Direct list subscription API (alternative approach)
-    try {
-      console.log('📧 Trying direct list subscription API...');
-      
-      const directSubscriptionData = {
-        data: {
-          type: 'subscription',
-          attributes: {
-            profiles: {
-              data: [{
-                type: 'profile',
-                attributes: {
-                  email: email,
-                  properties: {
-                    source: source || 'mobile_app',
-                    platform: platform || 'flutter',
-                    signup_timestamp: new Date().toISOString(),
-                    ...(first_name && { first_name }),
-                    ...(last_name && { last_name }),
-                    ...properties
-                  }
-                }
-              }]
-            }
-          },
-          relationships: {
-            list: {
-              data: {
-                type: 'list',
-                id: klaviyoListId
-              }
-            }
-          }
-        }
-      };
-
-      const directResponse = await axios.post(
-        `https://a.klaviyo.com/api/lists/${klaviyoListId}/relationships/profiles/`,
-        directSubscriptionData,
-        {
-          headers: {
-            'Authorization': `Klaviyo-API-Key ${klaviyoPrivateKey}`,
-            'Content-Type': 'application/json',
-            'revision': '2024-10-15'
-          }
-        }
-      );
-
-      console.log('📧 Direct subscription response status:', directResponse.status);
-      console.log('📧 Direct subscription response data:', JSON.stringify(directResponse.data, null, 2));
-
-      if (directResponse.status === 200 || directResponse.status === 201 || directResponse.status === 204) {
-        console.log(`✅ Newsletter subscription successful (direct): ${email} -> List: ${klaviyoListId}`);
-        return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
-      }
-    } catch (directError) {
-      console.log('📧 Direct subscription failed with status:', directError.response?.status);
-      console.log('📧 Direct subscription error data:', JSON.stringify(directError.response?.data, null, 2));
     }
 
     console.log(`❌ All subscription methods failed for: ${email}`);
@@ -9140,17 +9074,63 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
       }
     );
 
-    if (response.data.errors) {
-      // GraphQL schema mismatch or other API error; log and surface a clearer server error
+    let order = response.data?.data?.order;
+    if (response.data.errors || !order) {
       console.error('❌ Return eligibility check errors:', response.data.errors);
-      return res.status(500).json({
-        eligible: false,
-        reason: 'Error fetching order data from Shopify',
-        returnableItems: []
-      });
-    }
+      // Fallback: run a simplified query that only fetches line items and basic order info
+      try {
+        const fallbackQuery = `
+          query simpleOrder($orderId: ID!) {
+            order(id: $orderId) {
+              id
+              name
+              processedAt
+              displayFulfillmentStatus
+              displayFinancialStatus
+              lineItems(first: 250) {
+                edges {
+                  node {
+                    id
+                    title
+                    quantity
+                    variant {
+                      id
+                      title
+                      sku
+                      image { url altText }
+                      product { id title handle }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `;
 
-    const order = response.data?.data?.order;
+        console.log('🔧 [Admin GraphQL] Falling back to simple query');
+        const fbResp = await axios.post(
+          config.adminApiUrl,
+          { query: fallbackQuery, variables: { orderId: resolvedOrderId } },
+          { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+        );
+
+        if (fbResp.data.errors) {
+          console.error('❌ Fallback query also failed:', fbResp.data.errors);
+          return res.status(500).json({ eligible: false, reason: 'Error fetching order data from Shopify', returnableItems: [] });
+        }
+
+        order = fbResp.data?.data?.order;
+        if (!order) {
+          return res.status(404).json({ eligible: false, reason: 'Order not found', returnableItems: [] });
+        }
+
+        // Note: we couldn't inspect returns/fulfillments; proceed best-effort
+        console.log('⚠️ Proceeding with best-effort eligibility (could not inspect returns/fulfillments)');
+      } catch (fbErr) {
+        console.error('❌ Error during fallback query:', fbErr?.message || fbErr);
+        return res.status(500).json({ eligible: false, reason: 'Error fetching order data from Shopify', returnableItems: [] });
+      }
+    }
     if (!order) {
       return res.status(404).json({
         eligible: false,
@@ -9302,172 +9282,9 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       customer: customerEmail
     });
 
-    // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
-    if (config.adminToken) {
-      console.log('🚀 Using Admin API for return creation...');
-      
-      try {
-        // Step 1: Fetch order fulfillments via Admin API
-        const orderQuery = `
-          query getOrderFulfillments($orderId: ID!) {
-            order(id: $orderId) {
-              id
-              name
-              fulfillments {
-                id
-                status
-                fulfillmentLineItems(first: 50) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                        title
-                        variant {
-                          id
-                          title
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }`;
-        
-        const orderResponse = await axios.post(config.adminApiUrl, {
-          query: orderQuery,
-          variables: { orderId: returnRequest.orderId }
-        }, {
-          headers: {
-            'X-Shopify-Access-Token': config.adminToken,
-            'Content-Type': 'application/json',
-          }
-        });
-
-        if (orderResponse.data.errors) {
-          throw new Error('GraphQL errors: ' + JSON.stringify(orderResponse.data.errors));
-        }
-
-        const order = orderResponse.data.data.order;
-        if (!order) {
-          throw new Error('Order not found');
-        }
-
-        // Map return reason to Shopify enum values
-        const mapReturnReason = (reason) => {
-          switch (reason) {
-            case 'defective':
-            case 'damage':
-              return 'DEFECTIVE';
-            case 'color_finish':
-            case 'wrong_item':
-              return 'NOT_AS_DESCRIBED';
-            case 'size':
-              return 'SIZE_TOO_LARGE'; // or SIZE_TOO_SMALL
-            case 'unwanted':
-            case 'changed_mind':
-            default:
-              return 'UNWANTED';
-          }
-        };
-
-        // Step 2: Map items to fulfillmentLineItemIds
-        const returnLineItems = [];
-        for (const requestedItem of returnRequest.items) {
-          for (const fulfillment of order.fulfillments) {
-            for (const fulfillmentLineItemEdge of fulfillment.fulfillmentLineItems.edges) {
-              const fulfillmentLineItem = fulfillmentLineItemEdge.node;
-              if (fulfillmentLineItem.lineItem.id === requestedItem.lineItemId) {
-                returnLineItems.push({
-                  fulfillmentLineItemId: fulfillmentLineItem.id,
-                  quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity),
-                  returnReason: mapReturnReason(returnRequest.reason),
-                  customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason)
-                });
-              }
-            }
-          }
-        }
-
-        if (returnLineItems.length === 0) {
-          throw new Error('No matching fulfillment line items found for return');
-        }
-
-        // Step 3: Create return via Admin API returnCreate mutation
-        const returnMutation = `
-          mutation returnCreate($returnInput: ReturnInput!) {
-            returnCreate(returnInput: $returnInput) {
-              return {
-                id
-                name
-                status
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }`;
-
-        const returnInput = {
-          orderId: returnRequest.orderId,
-          returnLineItems: returnLineItems,
-          notifyCustomer: true,
-          note: `Return Request Details:
-Reason: ${returnRequest.reason}
-Preferred Resolution: ${returnRequest.preferredResolution || 'refund'}
-${returnRequest.additionalNotes ? 'Additional Notes: ' + returnRequest.additionalNotes : ''}
-
-Customer Email: ${customerEmail}`
-        };
-
-        console.log('🔥 Creating return with Admin API:', {
-          returnInput: returnInput,
-          returnLineItemsCount: returnLineItems.length
-        });
-
-        const returnResponse = await axios.post(config.adminApiUrl, {
-          query: returnMutation,
-          variables: { returnInput: returnInput }
-        }, {
-          headers: {
-            'X-Shopify-Access-Token': config.adminToken,
-            'Content-Type': 'application/json',
-          }
-        });
-
-        if (returnResponse.data.errors) {
-          throw new Error('GraphQL errors: ' + JSON.stringify(returnResponse.data.errors));
-        }
-
-        const returnResult = returnResponse.data.data.returnCreate;
-        if (returnResult.userErrors && returnResult.userErrors.length > 0) {
-          throw new Error('Return creation failed: ' + returnResult.userErrors.map(e => e.message).join(', '));
-        }
-
-        const createdReturn = returnResult.return;
-        console.log('✅ Return created via Admin API:', createdReturn.id);
-
-        return res.json({
-          success: true,
-          returnId: createdReturn.id,
-          returnName: createdReturn.name,
-          status: createdReturn.status,
-          method: 'admin_api'
-        });
-
-      } catch (adminError) {
-        console.error('❌ Admin API failed:', adminError.message);
-        console.log('🔄 Falling back to Customer Account API...');
-        // Fall through to Customer Account API
-      }
-    }
-
-    // Step 1: Submit to Shopify using Customer Account API
+    // Submit to Shopify using Customer Account API (no Admin fallback)
     const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
-    
+
     if (!shopifyResult.success) {
       return res.status(400).json({
         success: false,
