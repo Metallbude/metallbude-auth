@@ -1446,26 +1446,39 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
 
   console.log('📤 Shopify return request response:', response.status, 'from', triedUrl);
 
-    if (response.data.errors) {
+    // Ensure we received an HTTP 200 and a GraphQL data payload
+    if (!response || response.status !== 200) {
+      const preview = safeStringify(response?.data || response).slice(0, 1000);
+      console.error(`❌ Customer Account API returned HTTP ${response?.status} from ${triedUrl}:`, preview);
+      throw new Error(`Customer Account API returned HTTP ${response?.status} from ${triedUrl}`);
+    }
+
+    if (!response.data || !response.data.data || !response.data.data.orderRequestReturn) {
+      const preview = safeStringify(response.data).slice(0, 1000);
+      console.error('❌ Unexpected Customer Account API response shape:', preview);
+      throw new Error('Unexpected Customer Account API response: missing orderRequestReturn');
+    }
+
+    if (response.data.errors && response.data.errors.length) {
       console.error('❌ GraphQL errors:', response.data.errors);
       throw new Error(`Shopify GraphQL error: ${response.data.errors[0].message}`);
     }
-    
+
     const result = response.data.data.orderRequestReturn;
-    const userErrors = result.userErrors || [];
-    
+    const userErrors = (result && result.userErrors) || [];
+
     if (userErrors.length > 0) {
       console.error('❌ User errors:', userErrors);
       throw new Error(`Return request failed: ${userErrors[0].message}`);
     }
-    
+
     const returnRequestData = result.returnRequest;
     if (!returnRequestData) {
       throw new Error('Failed to create return request in Shopify');
     }
-    
+
     console.log('✅ Shopify return request created:', returnRequestData.id);
-    
+
     return {
       success: true,
       shopifyReturnRequestId: returnRequestData.id,
@@ -13091,161 +13104,7 @@ app.post('/apply-store-credit', async (req, res) => {
   }
 });
 
-/**
- * ========= Returns (Return Request) API =========
- */
-const CUSTOMER_API_URL = 'https://shopify.com/48343744676/account/customer/api/2024-10/graphql';
 
-// Map app reasons to Shopify return reasons
-function mapAppReasonToReturnReason(appReason) {
-  const m = {
-    size_dimensions: 'SIZE_TOO_SMALL',
-    color_finish: 'COLOR',
-    quality_material: 'QUALITY_ISSUE',
-    style_design: 'NOT_AS_DESCRIBED',
-    transport_damage: 'DAMAGED',
-    assembly_issues: 'NOT_AS_DESCRIBED',
-    defective: 'DEFECTIVE',
-    wrong_item: 'WRONG_ITEM',
-    not_as_described: 'NOT_AS_DESCRIBED',
-    changed_mind: 'BUYERS_REMORSE',
-    delivery_delay: 'OTHER',
-    duplicate_order: 'OTHER',
-    comfort_ergonomics: 'OTHER',
-    space_planning: 'OTHER',
-    other: 'OTHER',
-  };
-  return m[appReason] || 'OTHER';
-}
-
-// Build a note to attach to return
-function buildCustomerNote({ resolution, exchangeSelections, extraNote }) {
-  const parts = [];
-  parts.push(`Resolution: ${resolution}`);
-  if (exchangeSelections?.length) {
-    const items = exchangeSelections.map(x =>
-      `{ lineItemId=${x.lineItemId}, variantId=${x.wantedVariantId}, sku=${x.wantedSku || ''}, title=${x.wantedTitle || ''} }`
-    ).join('; ');
-    parts.push(`ExchangeSelections: [ ${items} ]`);
-  }
-  if (extraNote) parts.push(`Note: ${extraNote}`);
-  return parts.join(' | ').slice(0, 500);
-}
-
-// Call Shopify Customer Account API
-async function callCustomerAccountAPI(query, variables, customerJwt) {
-  const resp = await axios.post(CUSTOMER_API_URL, { query, variables }, {
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${customerJwt}` }
-  });
-  return resp.data;
-}
-
-// Create Return Request
-async function submitShopifyReturnRequestCustomerAPI(session, payload) {
-  const jwt = session?.shopifyCustomerJwt;
-  if (!jwt) throw new Error('Missing Shopify customer session token');
-
-  const requestedLineItems = payload.items.map(li => ({
-    lineItemId: li.lineItemId,
-    quantity: li.quantity,
-    returnReason: mapAppReasonToReturnReason(li.returnReason),
-  }));
-
-  const customerNote = buildCustomerNote({
-    resolution: payload.resolution,
-    exchangeSelections: payload.exchangeSelections,
-    extraNote: payload.customerNote,
-  });
-
-  const mutation = `
-    mutation orderRequestReturn($orderId: ID!, $requestedLineItems: [RequestedLineItemInput!]!, $customerNote: String) {
-      orderRequestReturn(
-        orderId: $orderId
-        requestedLineItems: $requestedLineItems
-        customerNote: $customerNote
-      ) {
-        userErrors { message }
-        returnRequest { id status requestedAt order { id name } }
-      }
-    }
-  `;
-
-  const data = await callCustomerAccountAPI(mutation, { orderId: payload.orderId, requestedLineItems, customerNote }, jwt);
-  if (data.errors?.length) throw new Error(data.errors[0].message);
-  return data.data.orderRequestReturn.returnRequest;
-}
-
-// ===== Routes =====
-
-// Create a return request
-app.post('/returns', async (req, res) => {
-  try {
-    const sessionToken = req.headers.authorization?.replace('Bearer ', '');
-    const session = config.sessions.get(sessionToken);
-    if (!session) return res.status(401).json({ error: 'Nicht autorisiert' });
-
-    const returnObj = await submitShopifyReturnRequestCustomerAPI(session, req.body);
-    res.status(201).json({ success: true, return: returnObj });
-  } catch (e) {
-    console.error('❌ /returns failed:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Get ALL return history
-app.get('/returns', async (req, res) => {
-  try {
-    const sessionToken = req.headers.authorization?.replace('Bearer ', '');
-    const session = config.sessions.get(sessionToken);
-    if (!session) return res.status(401).json({ error: 'Nicht autorisiert' });
-
-    const jwt = session?.shopifyCustomerJwt;
-    const query = `
-      query {
-        customer {
-          orders(first: 50) {
-            edges {
-              node {
-                id name
-                returns(first: 20) { edges { node { id status requestedAt } } }
-              }
-            }
-          }
-        }
-      }
-    `;
-    const data = await callCustomerAccountAPI(query, {}, jwt);
-    res.json({ success: true, returns: data.data.customer.orders.edges });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Get returns for one order
-app.get('/orders/:orderId/returns', async (req, res) => {
-  try {
-    const sessionToken = req.headers.authorization?.replace('Bearer ', '');
-    const session = config.sessions.get(sessionToken);
-    if (!session) return res.status(401).json({ error: 'Nicht autorisiert' });
-
-    const jwt = session?.shopifyCustomerJwt;
-    const orderId = decodeURIComponent(req.params.orderId);
-    const query = `
-      query($orderId: ID!) {
-        customer {
-          order(id: $orderId) {
-            id name
-            returns(first: 20) { edges { node { id status requestedAt } } }
-          }
-        }
-      }
-    `;
-    const data = await callCustomerAccountAPI(query, { orderId }, jwt);
-    res.json({ success: true, returns: data.data.customer.order.returns.edges });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
