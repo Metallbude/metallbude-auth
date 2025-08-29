@@ -1398,20 +1398,26 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     };
 
     console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
-
-    const response = await axios.post(
-      CUSTOMER_ACCOUNT_API_URL,
-      {
-        query: mutation,
-        variables: sanitizedVariables,
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${customerToken}`,
-        }
-      }
-    );
+    console.log('🔍 CUSTOMER_ACCOUNT_API_URL=', CUSTOMER_ACCOUNT_API_URL);
+    const requestBody = { query: mutation, variables: sanitizedVariables };
+    const requestHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${customerToken}` };
+    console.log('🔍 Request headers:', Object.keys(requestHeaders));
+    // Avoid logging full token in production logs
+    try {
+      const response = await axios.post(CUSTOMER_ACCOUNT_API_URL, requestBody, { headers: requestHeaders });
+      console.log('📤 Received status from Customer API:', response.status);
+      // pass through normal processing
+      // eslint-disable-next-line no-unused-vars
+      var _response_placeholder = response; // keep response reference for later blocks
+      // continue below with response variable
+      // NOTE: we'll use response variable as before
+      // (reassign via shadowing)
+      const responseReal = response;
+      // reassign for previous code path
+      response = responseReal;
+    } catch (errPost) {
+      throw errPost;
+    }
 
     console.log('📤 Shopify return request response:', response.status);
 
