@@ -1440,10 +1440,55 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     };
 
   } catch (error) {
-    console.error('❌ Error submitting return request to Shopify:', error);
+    console.error('❌ Error submitting return request to Shopify:', error?.response?.status || error?.message || error);
+
+    // If Shopify Customer Account API returned 404, fallback: create an admin order note
+    const statusCode = error?.response?.status;
+    const responseBody = error?.response?.data;
+    if (statusCode === 404) {
+      try {
+        console.log('⚠️ Customer Account API returned 404 - creating admin order note with return details');
+
+        // Build a human-readable note from returnRequest
+        const lines = [];
+        lines.push(`Customer return request (recorded by backend) - preferredResolution=${returnRequest.preferredResolution}`);
+        if (returnRequest.reason) lines.push(`reason=${returnRequest.reason}`);
+        if (returnRequest.additionalNotes) lines.push(`notes=${returnRequest.additionalNotes}`);
+        if (returnRequest.items && Array.isArray(returnRequest.items)) {
+          for (const it of returnRequest.items) {
+            lines.push(`- item ${it.title || it.lineItemId} x${it.quantity || 1} requestedExchange=${(returnRequest.exchangeOptions && returnRequest.exchangeOptions[it.lineItemId]) || it.requestedExchangeVariantId || ''}`);
+          }
+        }
+
+        const note = lines.join('\n');
+
+        // Append note to order using Admin API (orderUpdate with note)
+        if (config.adminToken) {
+          const orderUpdateMutation = `mutation orderUpdate($id: ID!, $input: OrderInput!) { orderUpdate(id: $id, input: $input) { order { id name note } userErrors { field message } } }`;
+          const orderInput = { id: returnRequest.orderId, note: note };
+
+          await axios.post(config.adminApiUrl, { query: orderUpdateMutation, variables: { id: returnRequest.orderId, input: orderInput } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+          console.log('✅ Admin order note appended for order:', returnRequest.orderId);
+        } else {
+          console.log('ℹ️ Admin token not configured - cannot append note to Shopify Order. Returning recorded note to caller.');
+        }
+
+        return {
+          success: true,
+          shopifyReturnRequestId: null,
+          status: 'requested',
+          recordedNote: note
+        };
+
+      } catch (noteError) {
+        console.error('❌ Failed to append admin order note fallback:', noteError?.message || noteError);
+        return { success: false, error: 'Customer API 404 and admin note fallback failed' };
+      }
+    }
+
     return {
       success: false,
-      error: error.message
+      error: error.message || 'Unknown error'
     };
   }
 }
