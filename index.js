@@ -1328,13 +1328,19 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
         throw new Error(`Item ${item.title} is not returnable`);
       }
 
-      // Build minimal allowed payload for OrderReturnLineItemInput; avoid unsupported fields
-      returnLineItems.push({
+      // Build payload for OrderReturnLineItemInput; include customerNote when available
+      const customerNote = item.reasonNote || item.customerNote || returnRequest.additionalNotes || '';
+      const line = {
         fulfillmentLineItemId: matchingItem.fulfillmentLineItemId,
         quantity: item.quantity,
-        returnReason: mapReasonToShopify(returnRequest.reason),
-        // NOTE: do not include customerNote here - Customer Account API may reject custom fields
-      });
+        returnReason: mapReasonToShopify(returnRequest.reason)
+      };
+      if (customerNote && customerNote.length > 0) line.customerNote = String(customerNote).substring(0, 255);
+      // Add resolution hint in the customerNote if provided (helps for Customer Account API flows)
+      if (returnRequest.preferredResolution) {
+        line.customerNote = (line.customerNote ? line.customerNote + ' | ' : '') + `preferredResolution:${returnRequest.preferredResolution}`;
+      }
+      returnLineItems.push(line);
     }
 
     // Use Customer Account API orderRequestReturn mutation
@@ -1384,7 +1390,9 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       returnLineItems: returnLineItems.map(li => ({
         fulfillmentLineItemId: li.fulfillmentLineItemId,
         quantity: Number(li.quantity || 1),
-        returnReason: li.returnReason
+  returnReason: li.returnReason,
+  // pass through customerNote when supported by the Customer Account API
+  ...(li.customerNote ? { customerNote: li.customerNote } : {})
       }))
     };
 
@@ -9207,18 +9215,40 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
           if (qty <= 0) continue;
 
-          // Build minimal allowed Admin ReturnLineItem input - omit unsupported fields like customerNote
-          returnLineItems.push({
+          // Build Admin ReturnLineItem input - include reason note if provided
+          const lineItemInput = {
             fulfillmentLineItemId: match.fulfillmentLineItemId,
             quantity: qty,
             returnReason: mapReturnReason(returnRequest.reason)
-          });
+          };
+
+          // If the customer provided per-item notes or an overall additionalNotes, include as returnReasonNote
+          const perItemNote = requestedItem.reasonNote || requestedItem.customerNote || returnRequest.additionalNotes || '';
+          if (perItemNote && perItemNote.length > 0) {
+            lineItemInput.returnReasonNote = String(perItemNote).substring(0, 255);
+          }
+
+          returnLineItems.push(lineItemInput);
         }
 
         if (returnLineItems.length === 0) {
           throw new Error('No matching fulfillment line items found for return (Admin API)');
         }
 
+        // Build exchangeLineItems when customer requests an exchange
+        const exchangeLineItems = [];
+        if ((returnRequest.preferredResolution || '').toLowerCase() === 'exchange') {
+          for (const requestedItem of returnRequest.items || []) {
+            const qty = Number(requestedItem.quantity || 1);
+            const requestedVariant = requestedItem.requestedExchangeVariantId || requestedItem.exchangeVariantId || null;
+            if (requestedVariant && qty > 0) {
+              exchangeLineItems.push({
+                variantId: requestedVariant,
+                quantity: qty
+              });
+            }
+          }
+        }
         const returnMutation = `
           mutation returnCreate($returnInput: ReturnInput!) {
             returnCreate(returnInput: $returnInput) {
@@ -9239,6 +9269,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           returnLineItems: returnLineItems,
           notifyCustomer: true
         };
+
+        // Attach exchangeLineItems when present (Admin API supports ExchangeLineItemInput)
+        if (exchangeLineItems.length > 0) {
+          returnInput.exchangeLineItems = exchangeLineItems;
+        }
 
         // Sanitize Admin payload: remove unsupported root-level fields like `note` before sending
         const sanitizedReturnInput = Object.assign({}, returnInput);
@@ -9281,8 +9316,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       }
     }
 
-    // Step 1: Submit to Shopify using Customer Account API
-    const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+  // Step 1: Submit to Shopify using Customer Account API (fallback path)
+  const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
     
     if (!shopifyResult.success) {
       return res.status(400).json({
@@ -9299,6 +9334,14 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       customerEmail: customerEmail,
       requestDate: new Date().toISOString(),
       status: mapShopifyStatusToInternal(shopifyResult.status),
+      preferredResolution: returnRequest.preferredResolution || 'refund',
+      // Keep requested exchange variants per item for backend tracking
+      items: (returnRequest.items || []).map(it => ({
+        lineItemId: it.lineItemId,
+        quantity: it.quantity,
+        requestedExchangeVariantId: it.requestedExchangeVariantId || it.exchangeVariantId || null,
+        reason: it.reason || returnRequest.reason || 'other'
+      }))
     };
 
     // Here you would save to your database
@@ -9399,6 +9442,50 @@ app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, r
   } catch (error) {
     console.error('❌ Error checking existing returns:', error);
     res.json({ hasExistingReturns: false });
+  }
+});
+
+// GET /orders/:orderId/returns - return history for a specific order
+app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const customerToken = req.headers.authorization?.substring(7);
+    const customerEmail = req.session.email;
+
+    if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
+
+    let results = [];
+
+    // Try Customer Account API first (requires customer token)
+    if (customerToken) {
+      try {
+        const allReturns = await getShopifyCustomerReturns(customerToken);
+        results = allReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
+        console.log(`🔎 Found ${results.length} returns for order ${orderId} via Customer Account API`);
+      } catch (err) {
+        console.log('⚠️ Customer Account API failed for order returns:', err.message);
+      }
+    }
+
+    // If none or to supplement, try Admin API
+    if (config.adminToken) {
+      try {
+        const adminReturns = await getAdminApiReturns(customerEmail);
+        const matchingAdmin = adminReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
+        console.log(`🔎 Found ${matchingAdmin.length} returns for order ${orderId} via Admin API`);
+        // Merge unique by id
+        const byId = new Map();
+        for (const r of [...results, ...matchingAdmin]) byId.set(r.id, r);
+        results = Array.from(byId.values());
+      } catch (err) {
+        console.log('⚠️ Admin API order-returns fetch failed:', err.message);
+      }
+    }
+
+    res.json({ success: true, orderId, returns: results });
+  } catch (error) {
+    console.error('❌ Error fetching order returns:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch order returns' });
   }
 });
 
