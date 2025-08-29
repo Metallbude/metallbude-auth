@@ -245,8 +245,10 @@ async function getRealCustomerEmail(customerId) {
 const fs = require('fs').promises;
 const path = require('path');
 
-const SESSION_FILE = '/opt/render/project/src/data/sessions.json';
-const REFRESH_TOKENS_FILE = '/opt/render/project/src/data/refresh_tokens.json';
+// Use configurable data dir so local dev doesn't try to write into /opt by default
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const SESSION_FILE = process.env.SESSION_FILE || path.join(DATA_DIR, 'sessions.json');
+const REFRESH_TOKENS_FILE = process.env.REFRESH_TOKENS_FILE || path.join(DATA_DIR, 'refresh_tokens.json');
 
 // Persistent session storage
 const sessions = new Map();
@@ -1328,13 +1330,18 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
         throw new Error(`Item ${item.title} is not returnable`);
       }
 
-      // Build minimal allowed payload for OrderReturnLineItemInput; avoid unsupported fields
-      returnLineItems.push({
+      // Build minimal allowed payload for OrderReturnLineItemInput; include requestedExchangeVariantId
+      // when the customer selected an exchange option.
+      const requestedVariant = (returnRequest.exchangeOptions && returnRequest.exchangeOptions[item.lineItemId]) || item.requestedExchangeVariantId || null;
+      const customerLine = {
         fulfillmentLineItemId: matchingItem.fulfillmentLineItemId,
-        quantity: item.quantity,
+        quantity: Number(item.quantity || 1),
         returnReason: mapReasonToShopify(returnRequest.reason),
-        // NOTE: do not include customerNote here - Customer Account API may reject custom fields
-      });
+      };
+      if (requestedVariant) {
+        customerLine.requestedExchangeVariantId = requestedVariant;
+      }
+      returnLineItems.push(customerLine);
     }
 
     // Use Customer Account API orderRequestReturn mutation
@@ -9183,8 +9190,12 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       customer: customerEmail
     });
 
-    // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
-    if (config.adminToken) {
+    // 🔥 NEW: Prefer Customer Account API for customer-initiated exchanges.
+    // If the customer explicitly requested an exchange, create the return via the
+    // Customer Account API so Shopify treats it as a customer request ("Rückgabe angefragt").
+    // Otherwise, if an admin token is configured, use the Admin API as a faster/delegated path.
+    const useAdminApi = Boolean(config.adminToken) && (returnRequest.preferredResolution !== 'exchange');
+    if (useAdminApi) {
       console.log('🚀 Using Admin API for return creation (safer path)...');
       try {
         // Reuse the API-version-safe eligibility checker to get fulfillmentLineItem IDs
@@ -9197,7 +9208,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         const returnLineItems = [];
         const mapReturnReason = (reason) => mapReasonToShopify(reason || 'other');
 
-        for (const requestedItem of returnRequest.items || []) {
+  for (const requestedItem of returnRequest.items || []) {
           const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId || ri.title === requestedItem.title);
           if (!match) {
             console.log('⚠️ Requested item not found among returnable items:', requestedItem);
@@ -9207,12 +9218,18 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
           if (qty <= 0) continue;
 
-          // Build minimal allowed Admin ReturnLineItem input - omit unsupported fields like customerNote
-          returnLineItems.push({
+          // Build minimal allowed Admin ReturnLineItem input - include requested exchange variant id
+          // when the customer requested an exchange. We avoid unsupported custom fields.
+          const requestedVariant = (returnRequest.exchangeOptions && returnRequest.exchangeOptions[requestedItem.lineItemId]) || requestedItem.requestedExchangeVariantId || null;
+          const adminLine = {
             fulfillmentLineItemId: match.fulfillmentLineItemId,
             quantity: qty,
             returnReason: mapReturnReason(returnRequest.reason)
-          });
+          };
+          if (requestedVariant) {
+            adminLine.requestedExchangeVariantId = requestedVariant;
+          }
+          returnLineItems.push(adminLine);
         }
 
         if (returnLineItems.length === 0) {
