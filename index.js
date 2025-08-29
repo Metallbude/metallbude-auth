@@ -1694,10 +1694,49 @@ async function getAdminApiReturns(customerEmail) {
         }
       }`;
 
-    // Query the specific return that was created successfully
+    // Find recent orders for this customer and aggregate their returns
+    const ordersQuery = `
+      query ordersWithReturns($email: String!) {
+        orders(first: 50, query: $email) {
+          edges {
+            node {
+              id
+              name
+              customer {
+                email
+              }
+              returns(first: 50) {
+                edges {
+                  node {
+                    id
+                    status
+                    totalQuantity
+                    requestDate: createdAt
+                    returnLineItems(first:50) {
+                      edges {
+                        node {
+                          id
+                          quantity
+                          returnReason
+                          returnReasonNote
+                          fulfillmentLineItem {
+                            id
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
     const response = await axios.post(config.adminApiUrl, {
-      query: returnQuery,
-      variables: { id: 'gid://shopify/Return/17455055116' }
+      query: ordersQuery,
+      variables: { email: `email:${customerEmail}` }
     }, {
       headers: {
         'X-Shopify-Access-Token': config.adminToken,
@@ -1706,18 +1745,39 @@ async function getAdminApiReturns(customerEmail) {
     });
 
     if (response.data.errors) {
-      console.error('❌ GraphQL errors:', response.data.errors);
+      console.error('❌ GraphQL errors querying orders with returns:', response.data.errors);
       return [];
     }
 
-    const returnData = response.data.data?.return;
-    if (!returnData) {
-      console.log('❌ Return not found');
-      return [];
+    const orders = response.data.data?.orders?.edges || [];
+    const aggregatedReturns = [];
+
+    for (const orderEdge of orders) {
+      const order = orderEdge.node;
+      const returns = order.returns?.edges || [];
+      for (const retEdge of returns) {
+        const r = retEdge.node;
+        aggregatedReturns.push({
+          id: r.id,
+          orderId: order.id,
+          orderNumber: order.name?.replace('#', ''),
+          items: (r.returnLineItems?.edges || []).map(e => ({
+            lineItemId: e.node.id,
+            quantity: e.node.quantity,
+            returnReason: e.node.returnReason,
+            returnReasonNote: e.node.returnReasonNote
+          })),
+          preferredResolution: 'refund',
+          additionalNotes: r.returnReasonNote || '',
+          requestDate: r.requestDate || new Date().toISOString(),
+          status: mapShopifyStatusToInternal(r.status),
+          shopifyReturnRequestId: r.id
+        });
+      }
     }
 
-    // Verify this return belongs to the customer
-    const orderCustomerEmail = returnData.order?.customer?.email;
+    console.log(`✅ Aggregated ${aggregatedReturns.length} returns from Admin API for ${customerEmail}`);
+    return aggregatedReturns;
     if (orderCustomerEmail !== customerEmail) {
       console.log('❌ Return does not belong to this customer');
       return [];
@@ -9408,19 +9468,24 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
       console.log('⚠️ Customer Account API failed, trying Admin API fallback:', error.message);
     }
 
-    // If we have few or no returns from Customer Account API, also try Admin API
-    // This helps with returns created via Admin API that might not show up immediately
-    if (shopifyReturns.length === 0) {
-      try {
-        console.log('🔄 Fetching returns from Admin API as fallback...');
-        const adminReturns = await getAdminApiReturns(customerEmail);
-        console.log(`✅ Admin API returned ${adminReturns.length} returns`);
-        
-        // Merge results (Admin API format should match our expected format)
-        shopifyReturns = [...shopifyReturns, ...adminReturns];
-      } catch (adminError) {
-        console.log('⚠️ Admin API fallback also failed:', adminError.message);
+    // Also fetch returns from Admin API and merge results so admin-created returns
+    // are not missed. We will merge and deduplicate by shopifyReturnRequestId/id.
+    try {
+      console.log('🔄 Fetching returns from Admin API to merge with Customer API results...');
+      const adminReturns = await getAdminApiReturns(customerEmail);
+      console.log(`✅ Admin API returned ${adminReturns.length} returns`);
+
+      // Merge with dedupe: prefer existing shopifyReturns entries, but include admin results
+      const existingIds = new Set(shopifyReturns.map(r => r.shopifyReturnRequestId ?? r.id).filter(Boolean));
+      for (const a of adminReturns) {
+        const aid = a.shopifyReturnRequestId || a.id;
+        if (!aid || !existingIds.has(aid)) {
+          shopifyReturns.push(a);
+          existingIds.add(aid);
+        }
       }
+    } catch (adminError) {
+      console.log('⚠️ Admin API merge failed:', adminError?.message || adminError);
     }
     
     // Log final results
