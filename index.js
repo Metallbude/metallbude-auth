@@ -1449,6 +1449,139 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
   }
 }
 
+// 🔥 ADDED: Get customer returns from Shopify Customer Account API
+async function getShopifyCustomerReturns(customerToken) {
+  try {
+    console.log('📥 Fetching returns from Shopify Customer Account API');
+
+    const query = `
+      query customerReturns {
+        customer {
+          id
+          orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+            edges {
+              node {
+                id
+                name
+                processedAt
+                returns(first: 50) {
+                  edges {
+                    node {
+                      id
+                      status
+                      totalQuantity
+                      order {
+                        id
+                        name
+                      }
+                      returnLineItems(first: 50) {
+                        edges {
+                          node {
+                            id
+                            quantity
+                            returnReason
+                            returnReasonNote
+                            lineItem {
+                              id
+                              title
+                              variant {
+                                id
+                                title
+                                price {
+                                  amount
+                                  currencyCode
+                                }
+                                image {
+                                  url
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      CUSTOMER_ACCOUNT_API_URL,
+      { query },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${customerToken}`,
+        }
+      }
+    );
+
+    if (response.data.errors) {
+      console.error('❌ GraphQL errors:', response.data.errors);
+      return [];
+    }
+
+    const orders = response.data.data.customer.orders.edges || [];
+    const returnRequests = [];
+
+    for (const orderEdge of orders) {
+      const order = orderEdge.node;
+      const returns = order.returns.edges || [];
+      
+      for (const returnEdge of returns) {
+        const returnData = returnEdge.node;
+        const returnLineItems = returnData.returnLineItems.edges || [];
+        
+        const items = [];
+        for (const lineItemEdge of returnLineItems) {
+          const returnLineItem = lineItemEdge.node;
+          const lineItem = returnLineItem.lineItem;  // Direct access, no fulfillmentLineItem
+          const variant = lineItem?.variant;
+          
+          items.push({
+            lineItemId: lineItem?.id || 'unknown',
+            productId: variant?.id || 'unknown',
+            title: lineItem?.title || 'Unknown Product',
+            imageUrl: variant?.image?.url || null,
+            quantity: returnLineItem.quantity || 1,
+            price: parseFloat(variant?.price?.amount || '0'),
+            sku: variant?.id || '',
+            variantTitle: variant?.title || 'Standard',
+          });
+        }
+
+        returnRequests.push({
+          id: returnData.id,
+          orderId: order.id,
+          orderNumber: order.name.replace('#', ''),
+          items: items,
+          reason: mapShopifyReasonToInternal(returnLineItems.length > 0 
+              ? returnLineItems[0].node.returnReason 
+              : 'OTHER'),
+          additionalNotes: returnLineItems.length > 0 
+              ? (returnLineItems[0].node.returnReasonNote || '') 
+              : '',
+          preferredResolution: 'refund',
+          customerEmail: '',
+          requestDate: new Date().toISOString(), // Remove createdAt which doesn't exist
+          status: mapShopifyStatusToInternal(returnData.status),
+          shopifyReturnRequestId: returnData.id,
+        });
+      }
+    }
+
+    console.log(`✅ Retrieved ${returnRequests.length} return requests from Shopify`);
+    return returnRequests;
+
+  } catch (error) {
+    console.error('❌ Error fetching returns from Shopify:', error);
+    return [];
+  }
+}
 
 // 🔥 ADDED: Get returns from Admin API (for returns created via Admin API)
 async function getAdminApiReturns(customerEmail) {
@@ -9058,8 +9191,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       customer: customerEmail
     });
 
-  // 🔥 NEW: Only use Admin API if we don't have a customer token (self-service should use Customer Account API first)
-  if (config.adminToken && !customerToken) {
+    // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
+    if (config.adminToken) {
       console.log('🚀 Using Admin API for return creation (safer path)...');
       try {
         // Reuse the API-version-safe eligibility checker to get fulfillmentLineItem IDs
@@ -9193,7 +9326,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       });
     }
 
-  // Step 2: Save to backend database for additional tracking
+    // Step 2: Save to backend database for additional tracking
     const backendReturnData = {
       ...returnRequest,
       shopifyReturnRequestId: shopifyResult.shopifyReturnRequestId,
@@ -9214,39 +9347,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     // Here you would save to your database
     // await saveReturnToDatabase(backendReturnData);
 
-    console.log('✅ Return request submitted successfully:', shopifyResult?.shopifyReturnRequestId);
-
-    // If we have an Admin token, append a merchant-visible note on the Order with the customer's choices
-    try {
-      if (config.adminToken && shopifyResult && shopifyResult.shopifyReturnRequestId) {
-        const orderNoteParts = [];
-        orderNoteParts.push(`ReturnRequest:${shopifyResult.shopifyReturnRequestId}`);
-        if (backendReturnData.preferredResolution) orderNoteParts.push(`Preferred:${backendReturnData.preferredResolution}`);
-        const exchangeInfo = (backendReturnData.items || []).filter(i => i.requestedExchangeVariantId).map(i => `${i.lineItemId}->${i.requestedExchangeVariantId}`).join(',');
-        if (exchangeInfo) orderNoteParts.push(`Exchange:${exchangeInfo}`);
-
-        const noteText = `Self-return details: ${orderNoteParts.join(' | ')}`;
-
-        const orderUpdateMutation = `
-          mutation orderUpdate($input: OrderInput!) {
-            orderUpdate(input: $input) {
-              order { id }
-              userErrors { field message }
-            }
-          }
-        `;
-
-        await axios.post(config.adminApiUrl, {
-          query: orderUpdateMutation,
-          variables: { input: { id: returnRequest.orderId, note: noteText } }
-        }, {
-          headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' }
-        });
-        console.log('✅ Appended order note with return details for merchant');
-      }
-    } catch (noteErr) {
-      console.error('⚠️ Failed to append order note with return details:', noteErr.message || noteErr);
-    }
+    console.log('✅ Return request submitted successfully:', shopifyResult.shopifyReturnRequestId);
 
     res.json({
       success: true,
