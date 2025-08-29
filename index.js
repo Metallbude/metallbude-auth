@@ -981,8 +981,7 @@ app.post('/raffle/pick-winner', async (req, res) => {
 
 
 // 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
-// Note: correct path is /account/api/<version>/graphql.json (no extra 'customer' segment)
-const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/api/2024-10/graphql.json`;
+const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql`;
 
 // Helper functions
 function generateVerificationCode() {
@@ -1398,26 +1397,20 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     };
 
     console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
-    console.log('🔍 CUSTOMER_ACCOUNT_API_URL=', CUSTOMER_ACCOUNT_API_URL);
-    const requestBody = { query: mutation, variables: sanitizedVariables };
-    const requestHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${customerToken}` };
-    console.log('🔍 Request headers:', Object.keys(requestHeaders));
-    // Avoid logging full token in production logs
-    try {
-      const response = await axios.post(CUSTOMER_ACCOUNT_API_URL, requestBody, { headers: requestHeaders });
-      console.log('📤 Received status from Customer API:', response.status);
-      // pass through normal processing
-      // eslint-disable-next-line no-unused-vars
-      var _response_placeholder = response; // keep response reference for later blocks
-      // continue below with response variable
-      // NOTE: we'll use response variable as before
-      // (reassign via shadowing)
-      const responseReal = response;
-      // reassign for previous code path
-      response = responseReal;
-    } catch (errPost) {
-      throw errPost;
-    }
+
+    const response = await axios.post(
+      CUSTOMER_ACCOUNT_API_URL,
+      {
+        query: mutation,
+        variables: sanitizedVariables,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${customerToken}`,
+        }
+      }
+    );
 
     console.log('📤 Shopify return request response:', response.status);
 
@@ -1448,15 +1441,10 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     };
 
   } catch (error) {
-    // Improved diagnostics for axios errors
-    if (error && error.response) {
-      console.error('❌ Shopify Customer API responded with status', error.response.status, 'and data:', safeStringify(error.response.data));
-    } else {
-      console.error('❌ Error submitting return request to Shopify:', error?.message || error);
-    }
+    console.error('❌ Error submitting return request to Shopify:', error);
     return {
       success: false,
-      error: error?.message || 'Unknown error'
+      error: error.message
     };
   }
 }
@@ -9049,10 +9037,8 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 // 🔥 UPDATED: Submit return request with Shopify Customer Account API integration
 app.post('/returns', authenticateAppToken, async (req, res) => {
   try {
-  const returnRequest = req.body;
-  // Prefer explicit customer token header set by client (X-Shopify-Customer-Token)
-  const headerCustomerToken = req.headers['x-shopify-customer-token'] || req.headers['X-Shopify-Customer-Token'];
-  const customerToken = (typeof headerCustomerToken === 'string' && headerCustomerToken.length > 0) ? headerCustomerToken : req.headers.authorization?.substring(7);
+    const returnRequest = req.body;
+    const customerToken = req.headers.authorization?.substring(7);
     const customerEmail = req.session.email;
 
     if (!customerToken) {
