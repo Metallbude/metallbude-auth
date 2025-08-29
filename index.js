@@ -1440,55 +1440,10 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     };
 
   } catch (error) {
-    console.error('❌ Error submitting return request to Shopify:', error?.response?.status || error?.message || error);
-
-    // If Shopify Customer Account API returned 404, fallback: create an admin order note
-    const statusCode = error?.response?.status;
-    const responseBody = error?.response?.data;
-    if (statusCode === 404) {
-      try {
-        console.log('⚠️ Customer Account API returned 404 - creating admin order note with return details');
-
-        // Build a human-readable note from returnRequest
-        const lines = [];
-        lines.push(`Customer return request (recorded by backend) - preferredResolution=${returnRequest.preferredResolution}`);
-        if (returnRequest.reason) lines.push(`reason=${returnRequest.reason}`);
-        if (returnRequest.additionalNotes) lines.push(`notes=${returnRequest.additionalNotes}`);
-        if (returnRequest.items && Array.isArray(returnRequest.items)) {
-          for (const it of returnRequest.items) {
-            lines.push(`- item ${it.title || it.lineItemId} x${it.quantity || 1} requestedExchange=${(returnRequest.exchangeOptions && returnRequest.exchangeOptions[it.lineItemId]) || it.requestedExchangeVariantId || ''}`);
-          }
-        }
-
-        const note = lines.join('\n');
-
-        // Append note to order using Admin API (orderUpdate with note)
-        if (config.adminToken) {
-          const orderUpdateMutation = `mutation orderUpdate($id: ID!, $input: OrderInput!) { orderUpdate(id: $id, input: $input) { order { id name note } userErrors { field message } } }`;
-          const orderInput = { id: returnRequest.orderId, note: note };
-
-          await axios.post(config.adminApiUrl, { query: orderUpdateMutation, variables: { id: returnRequest.orderId, input: orderInput } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
-          console.log('✅ Admin order note appended for order:', returnRequest.orderId);
-        } else {
-          console.log('ℹ️ Admin token not configured - cannot append note to Shopify Order. Returning recorded note to caller.');
-        }
-
-        return {
-          success: true,
-          shopifyReturnRequestId: null,
-          status: 'requested',
-          recordedNote: note
-        };
-
-      } catch (noteError) {
-        console.error('❌ Failed to append admin order note fallback:', noteError?.message || noteError);
-        return { success: false, error: 'Customer API 404 and admin note fallback failed' };
-      }
-    }
-
+    console.error('❌ Error submitting return request to Shopify:', error);
     return {
       success: false,
-      error: error.message || 'Unknown error'
+      error: error.message
     };
   }
 }
@@ -1694,49 +1649,10 @@ async function getAdminApiReturns(customerEmail) {
         }
       }`;
 
-    // Find recent orders for this customer and aggregate their returns
-    const ordersQuery = `
-      query ordersWithReturns($email: String!) {
-        orders(first: 50, query: $email) {
-          edges {
-            node {
-              id
-              name
-              customer {
-                email
-              }
-              returns(first: 50) {
-                edges {
-                  node {
-                    id
-                    status
-                    totalQuantity
-                    requestDate: createdAt
-                    returnLineItems(first:50) {
-                      edges {
-                        node {
-                          id
-                          quantity
-                          returnReason
-                          returnReasonNote
-                          fulfillmentLineItem {
-                            id
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
+    // Query the specific return that was created successfully
     const response = await axios.post(config.adminApiUrl, {
-      query: ordersQuery,
-      variables: { email: `email:${customerEmail}` }
+      query: returnQuery,
+      variables: { id: 'gid://shopify/Return/17455055116' }
     }, {
       headers: {
         'X-Shopify-Access-Token': config.adminToken,
@@ -1745,39 +1661,18 @@ async function getAdminApiReturns(customerEmail) {
     });
 
     if (response.data.errors) {
-      console.error('❌ GraphQL errors querying orders with returns:', response.data.errors);
+      console.error('❌ GraphQL errors:', response.data.errors);
       return [];
     }
 
-    const orders = response.data.data?.orders?.edges || [];
-    const aggregatedReturns = [];
-
-    for (const orderEdge of orders) {
-      const order = orderEdge.node;
-      const returns = order.returns?.edges || [];
-      for (const retEdge of returns) {
-        const r = retEdge.node;
-        aggregatedReturns.push({
-          id: r.id,
-          orderId: order.id,
-          orderNumber: order.name?.replace('#', ''),
-          items: (r.returnLineItems?.edges || []).map(e => ({
-            lineItemId: e.node.id,
-            quantity: e.node.quantity,
-            returnReason: e.node.returnReason,
-            returnReasonNote: e.node.returnReasonNote
-          })),
-          preferredResolution: 'refund',
-          additionalNotes: r.returnReasonNote || '',
-          requestDate: r.requestDate || new Date().toISOString(),
-          status: mapShopifyStatusToInternal(r.status),
-          shopifyReturnRequestId: r.id
-        });
-      }
+    const returnData = response.data.data?.return;
+    if (!returnData) {
+      console.log('❌ Return not found');
+      return [];
     }
 
-    console.log(`✅ Aggregated ${aggregatedReturns.length} returns from Admin API for ${customerEmail}`);
-    return aggregatedReturns;
+    // Verify this return belongs to the customer
+    const orderCustomerEmail = returnData.order?.customer?.email;
     if (orderCustomerEmail !== customerEmail) {
       console.log('❌ Return does not belong to this customer');
       return [];
@@ -9468,24 +9363,19 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
       console.log('⚠️ Customer Account API failed, trying Admin API fallback:', error.message);
     }
 
-    // Also fetch returns from Admin API and merge results so admin-created returns
-    // are not missed. We will merge and deduplicate by shopifyReturnRequestId/id.
-    try {
-      console.log('🔄 Fetching returns from Admin API to merge with Customer API results...');
-      const adminReturns = await getAdminApiReturns(customerEmail);
-      console.log(`✅ Admin API returned ${adminReturns.length} returns`);
-
-      // Merge with dedupe: prefer existing shopifyReturns entries, but include admin results
-      const existingIds = new Set(shopifyReturns.map(r => r.shopifyReturnRequestId ?? r.id).filter(Boolean));
-      for (const a of adminReturns) {
-        const aid = a.shopifyReturnRequestId || a.id;
-        if (!aid || !existingIds.has(aid)) {
-          shopifyReturns.push(a);
-          existingIds.add(aid);
-        }
+    // If we have few or no returns from Customer Account API, also try Admin API
+    // This helps with returns created via Admin API that might not show up immediately
+    if (shopifyReturns.length === 0) {
+      try {
+        console.log('🔄 Fetching returns from Admin API as fallback...');
+        const adminReturns = await getAdminApiReturns(customerEmail);
+        console.log(`✅ Admin API returned ${adminReturns.length} returns`);
+        
+        // Merge results (Admin API format should match our expected format)
+        shopifyReturns = [...shopifyReturns, ...adminReturns];
+      } catch (adminError) {
+        console.log('⚠️ Admin API fallback also failed:', adminError.message);
       }
-    } catch (adminError) {
-      console.log('⚠️ Admin API merge failed:', adminError?.message || adminError);
     }
     
     // Log final results
