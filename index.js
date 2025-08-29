@@ -486,6 +486,32 @@ async function getRealCustomerEmail(customerId) {
     }
 }
 
+// Helper: extract Shopify customer access token (shcat_) from request
+function extractCustomerToken(req) {
+  // Prefer a dedicated header set by the mobile app to avoid clashing with the app's Authorization header
+  const headerNames = ['x-shopify-customer-token', 'x-shopify-customer-jwt', 'x-shopify-customer_token'];
+  for (const hn of headerNames) {
+    const v = req.headers[hn];
+    if (v) {
+      // Accept either raw token or 'Bearer <token>'
+      if (typeof v === 'string' && v.startsWith('Bearer ')) return v.substring(7);
+      return v;
+    }
+  }
+
+  // Next, check request body for a submitted customerToken (apps that can't set headers easily)
+  if (req.body && req.body.customerToken) return req.body.customerToken;
+
+  // If a session stored the Shopify token, use it
+  if (req.session && req.session.shopifyCustomerToken) return req.session.shopifyCustomerToken;
+
+  // Last-resort fallback: use Authorization header (may contain the app token; not ideal)
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) return auth.substring(7);
+
+  return null;
+}
+
 // 🔥 PERSISTENT SESSION STORAGE - Add this RIGHT AFTER the config object
 const fs = require('fs').promises;
 const path = require('path');
@@ -1591,10 +1617,11 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
 
     // Use Customer Account API orderRequestReturn mutation
     const mutation = `
-      mutation orderRequestReturn($orderId: ID!, $returnLineItems: [OrderReturnLineItemInput!]!) {
+      mutation orderRequestReturn($orderId: ID!, $returnLineItems: [OrderReturnLineItemInput!]!, $customerNote: String) {
         orderRequestReturn(
           orderId: $orderId
           returnLineItems: $returnLineItems
+          customerNote: $customerNote
         ) {
           userErrors {
             field
@@ -1630,54 +1657,147 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       }
     `;
 
+    // Build a customerNote object that preserves per-line requested exchange selections
+    const notePayload = {
+      source: 'mobile_app',
+      preferredResolution: returnRequest.preferredResolution || null,
+      additionalNotes: returnRequest.additionalNotes || null,
+      exchangeOptions: {}
+    };
+    for (const it of returnRequest.items || []) {
+      const requestedVariant = (returnRequest.exchangeOptions && returnRequest.exchangeOptions[it.lineItemId]) || it.requestedExchangeVariantId || null;
+      if (requestedVariant) notePayload.exchangeOptions[it.lineItemId] = requestedVariant;
+    }
+
     // Sanitize payload before sending to Shopify Customer Account API and log the minimal shape
     const sanitizedVariables = {
       orderId: returnRequest.orderId,
-      returnLineItems: returnLineItems.map(li => ({
-        fulfillmentLineItemId: li.fulfillmentLineItemId,
-        quantity: Number(li.quantity || 1),
-        returnReason: li.returnReason
-      }))
+      returnLineItems: returnLineItems.map(li => {
+        // include requestedExchangeVariantId if present
+        const out = {
+          fulfillmentLineItemId: li.fulfillmentLineItemId,
+          quantity: Number(li.quantity || 1),
+          returnReason: li.returnReason
+        };
+        if (li.requestedExchangeVariantId) out.requestedExchangeVariantId = li.requestedExchangeVariantId;
+        return out;
+      }),
+      customerNote: JSON.stringify(notePayload)
     };
 
     console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
 
-    const response = await axios.post(
-      CUSTOMER_ACCOUNT_API_URL,
-      {
-        query: mutation,
-        variables: sanitizedVariables,
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${customerToken}`,
+    // Try multiple Customer Account API endpoint shapes to handle shops with different account API routes
+    const shopBase = `https://${config.shopDomain}`;
+    const candidateUrls = [
+      `${shopBase}/account/customer/api/2024-10/graphql`,
+      `${shopBase}/account/customer/api/2024-10/graphql.json`,
+      `${shopBase}/account/api/2024-10/graphql`,
+      `${shopBase}/customer/api/2024-10/graphql`
+    ];
+
+    let response = null;
+    let lastError = null;
+    for (const url of candidateUrls) {
+      try {
+        console.log(`📤 Attempting orderRequestReturn at ${url}`);
+        response = await axios.post(
+          url,
+          {
+            query: mutation,
+            variables: sanitizedVariables,
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${customerToken}`,
+            },
+            timeout: 10000
+          }
+        );
+
+        // If we got a success-ish HTTP code, break and evaluate the body
+        if (response && response.status && response.status < 500) {
+          console.log(`📤 orderRequestReturn attempt succeeded HTTP ${response.status} at ${url}`);
+          break;
         }
+      } catch (err) {
+        lastError = err;
+        const status = err?.response?.status || 'no-status';
+        console.warn(`⚠️ orderRequestReturn attempt failed for ${url}: ${status}`);
+        // try next URL
       }
-    );
+    }
 
-    console.log('📤 Shopify return request response:', response.status);
+    if (!response) {
+      const statusCode = lastError?.response?.status;
+      console.error('❌ All Customer Account API attempts failed', statusCode || lastError?.message || lastError);
+      // bubble up a 404-like error so caller can fallback
+      const fakeError = new Error('Customer Account API unavailable');
+      fakeError.response = { status: statusCode || 404, data: lastError?.response?.data || null };
+      throw fakeError;
+    }
 
-    if (response.data.errors) {
+    console.log('📤 Shopify return request response status:', response.status);
+
+    if (response.data && response.data.errors) {
       console.error('❌ GraphQL errors:', response.data.errors);
       throw new Error(`Shopify GraphQL error: ${response.data.errors[0].message}`);
     }
-    
-    const result = response.data.data.orderRequestReturn;
+
+    const result = response.data?.data?.orderRequestReturn;
+    if (!result) {
+      console.error('❌ orderRequestReturn missing from response body, preview:', response.data ? JSON.stringify(response.data).substring(0, 400) : 'no-body');
+      throw new Error('Unexpected response shape from Customer Account API');
+    }
+
     const userErrors = result.userErrors || [];
-    
     if (userErrors.length > 0) {
       console.error('❌ User errors:', userErrors);
       throw new Error(`Return request failed: ${userErrors[0].message}`);
     }
-    
+
     const returnRequestData = result.returnRequest;
     if (!returnRequestData) {
       throw new Error('Failed to create return request in Shopify');
     }
-    
+
     console.log('✅ Shopify return request created:', returnRequestData.id);
-    
+
+    // Attempt to persist metadata on the order via Admin API so merchant tools can read requestedExchangeVariantId
+    try {
+      if (config.adminToken && returnRequestData.order && returnRequestData.order.id) {
+        const metafieldMutation = `mutation metafieldsSet($input: [MetafieldInput!]!) { metafieldsSet(metafields: $input) { metafields { id } userErrors { field message } } }`;
+        const orderGid = returnRequestData.order.id;
+        const metafieldKey = `return_${returnRequestData.id.replace(/[:\/]/g, '_')}`;
+        const metafieldValue = {
+          shopifyReturnRequestId: returnRequestData.id,
+          preferredResolution: returnRequest.preferredResolution || returnRequest.preferredResolution || null,
+          exchangeOptions: notePayload.exchangeOptions || {},
+          source: 'mobile_app'
+        };
+
+        const input = [{
+          namespace: 'app.returns',
+          key: metafieldKey,
+          type: 'json',
+          value: JSON.stringify(metafieldValue),
+          ownerId: orderGid
+        }];
+
+        const mfResp = await axios.post(config.adminApiUrl, { query: metafieldMutation, variables: { input } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+        if (mfResp.data && mfResp.data.errors) {
+          console.warn('⚠️ Admin metafieldsSet returned errors:', mfResp.data.errors);
+        } else {
+          const mfUserErrors = mfResp.data?.data?.metafieldsSet?.userErrors || [];
+          if (mfUserErrors.length) console.warn('⚠️ Admin metafieldsSet userErrors:', mfUserErrors);
+          else console.log('✅ Wrote admin metafield for return on order:', orderGid);
+        }
+      }
+    } catch (mfErr) {
+      console.warn('⚠️ Failed to write admin metafield for return:', mfErr?.message || mfErr);
+    }
+
     return {
       success: true,
       shopifyReturnRequestId: returnRequestData.id,
@@ -9460,7 +9580,15 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 app.post('/returns', authenticateAppToken, async (req, res) => {
   try {
     const returnRequest = req.body;
-    const customerToken = req.headers.authorization?.substring(7);
+    const customerToken = extractCustomerToken(req);
+    // Non-sensitive debug: log whether we received a Shopify customer token (do NOT log full token)
+    try {
+      if (customerToken) {
+        console.log(`🔐 Customer token present (prefix): ${customerToken.substring(0, Math.min(8, customerToken.length))}...`);
+      } else {
+        console.log('🔐 No Shopify customer token extracted from request');
+      }
+    } catch (e) { /* ignore logging errors */ }
     const customerEmail = req.session.email;
 
     if (!customerToken) {
@@ -9632,7 +9760,14 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 // 🔥 UPDATED: Get return history from both Customer Account API and Admin API
 app.get('/returns', authenticateAppToken, async (req, res) => {
   try {
-    const customerToken = req.headers.authorization?.substring(7);
+    const customerToken = extractCustomerToken(req);
+    try {
+      if (customerToken) {
+        console.log(`🔐 Customer token present for history fetch (prefix): ${customerToken.substring(0, Math.min(8, customerToken.length))}...`);
+      } else {
+        console.log('🔐 No Shopify customer token extracted for history fetch');
+      }
+    } catch (e) {}
     const customerEmail = req.session.email;
     
     if (!customerToken) {
@@ -9689,7 +9824,14 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
 app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, res) => {
   try {
     const { orderId } = req.params;
-    const customerToken = req.headers.authorization?.substring(7);
+    const customerToken = extractCustomerToken(req);
+    try {
+      if (customerToken) {
+        console.log(`🔐 Customer token present for existing-returns check (prefix): ${customerToken.substring(0, Math.min(8, customerToken.length))}...`);
+      } else {
+        console.log('🔐 No Shopify customer token extracted for existing-returns check');
+      }
+    } catch (e) {}
     
     if (!customerToken) {
       return res.status(401).json({ hasExistingReturns: false });
