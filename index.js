@@ -981,8 +981,8 @@ app.post('/raffle/pick-winner', async (req, res) => {
 
 
 // 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
-// Note: Shopify expects GraphQL endpoints to end with .json
-const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql.json`;
+// Note: correct path is /account/api/<version>/graphql.json (no extra 'customer' segment)
+const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/api/2024-10/graphql.json`;
 
 // Helper functions
 function generateVerificationCode() {
@@ -9049,8 +9049,10 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 // 🔥 UPDATED: Submit return request with Shopify Customer Account API integration
 app.post('/returns', authenticateAppToken, async (req, res) => {
   try {
-    const returnRequest = req.body;
-    const customerToken = req.headers.authorization?.substring(7);
+  const returnRequest = req.body;
+  // Prefer explicit customer token header set by client (X-Shopify-Customer-Token)
+  const headerCustomerToken = req.headers['x-shopify-customer-token'] || req.headers['X-Shopify-Customer-Token'];
+  const customerToken = (typeof headerCustomerToken === 'string' && headerCustomerToken.length > 0) ? headerCustomerToken : req.headers.authorization?.substring(7);
     const customerEmail = req.session.email;
 
     if (!customerToken) {
