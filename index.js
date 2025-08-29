@@ -1494,6 +1494,37 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
   }
 }
 
+// Fallback: append a merchant-visible note to the order via Admin API
+async function appendOrderNoteToOrder(orderId, noteText) {
+  try {
+    if (!config.adminToken) {
+      console.log('⚠️ No admin token configured: cannot append order note');
+      return null;
+    }
+
+    // Fetch existing order note
+    const fetchQuery = `query getOrder($id: ID!) { order(id: $id) { id name note } }`;
+    const fetched = await adminGraphQL(fetchQuery, { id: orderId });
+    const existingNote = fetched?.data?.order?.note || '';
+
+    const combined = `${existingNote}\n\n[App Rücksendeanfrage] ${noteText}`.slice(0, 4000);
+
+    const mutation = `mutation orderUpdate($id: ID!, $input: OrderInput!) { orderUpdate(id: $id, input: $input) { order { id name note } userErrors { field message } } }`;
+    const resp = await adminGraphQL(mutation, { id: orderId, input: { note: combined } });
+
+    const userErrors = resp?.data?.orderUpdate?.userErrors || [];
+    if (userErrors.length) {
+      console.error('❌ orderUpdate userErrors when appending note:', userErrors);
+      return null;
+    }
+
+    return resp?.data?.orderUpdate?.order || null;
+  } catch (e) {
+    console.error('❌ appendOrderNoteToOrder failed:', e?.message || e);
+    return null;
+  }
+}
+
 // 🔥 ADDED: Get customer returns from Shopify Customer Account API
 async function getShopifyCustomerReturns(customerToken) {
   try {
@@ -9345,13 +9376,41 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     }
 
     // Step 1: Submit to Shopify using Customer Account API
-    const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
-    
+    let shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+
+    // If Customer Account API failed (e.g., 404), attempt a safe admin-note fallback so merchant sees customer's choices
     if (!shopifyResult.success) {
-      return res.status(400).json({
-        success: false,
-        error: shopifyResult.error
-      });
+      console.warn('⚠️ Customer Account API failed to create return request:', shopifyResult.error);
+
+      // If admin token available, append a merchant-visible order note containing customer's selections
+      if (config.adminToken) {
+        try {
+          const noteParts = [];
+          noteParts.push(`Kunde: ${customerEmail}`);
+          noteParts.push(`Lösung: ${returnRequest.preferredResolution || 'unbekannt'}`);
+          if (returnRequest.reason) noteParts.push(`Grund: ${returnRequest.reason}`);
+          if (returnRequest.additionalNotes) noteParts.push(`Notiz: ${returnRequest.additionalNotes}`);
+          if (Array.isArray(returnRequest.items)) {
+            const items = returnRequest.items.map(it => `lineItem=${it.lineItemId} qty=${it.quantity || 1}`).join('; ');
+            noteParts.push(`Items: ${items}`);
+          }
+          if (returnRequest.exchangeOptions) {
+            const exchanges = Object.keys(returnRequest.exchangeOptions).map(k => `${k}->${returnRequest.exchangeOptions[k]}`).join('; ');
+            if (exchanges) noteParts.push(`ExchangeSelections: ${exchanges}`);
+          }
+
+          const noteText = noteParts.join(' | ');
+          const appended = await appendOrderNoteToOrder(returnRequest.orderId, noteText);
+          if (appended) {
+            console.log('📝 Appended fallback order note for merchant due to Customer API failure');
+            return res.json({ success: true, fallbackNote: true, message: 'Return request recorded for merchant review (Customer API not available)'});
+          }
+        } catch (e) {
+          console.error('❌ Fallback append note failed:', e?.message || e);
+        }
+      }
+
+      return res.status(400).json({ success: false, error: shopifyResult.error });
     }
 
     // Step 2: Save to backend database for additional tracking
