@@ -38,49 +38,258 @@ try {
     }
   }
 } catch (error) {
-  // CORS configuration with environment-specific origins
-  const corsOptions = {
-    origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl requests)
-      if (!origin) return callback(null, true);
+  // Missing services directory or modules - continue without Firebase/wishlist
+  console.log('⚠️ Optional services not available (./services/*), continuing without Firebase/wishlist');
+}
 
-      console.log(`🔍 CORS check for origin: ${origin}`);
+// Initialize Express app
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-      const allowedOrigins = process.env.NODE_ENV === 'production'
-        ? [
-            'https://metallbude.com',
-            'https://www.metallbude.com',
-            'https://metallbude-de.myshopify.com',
-            'https://metallbude.myshopify.com',
-            'https://checkout.shopify.com'
-          ]
-        : [
-            'http://localhost:3000',
-            'http://127.0.0.1:3000',
-            'http://localhost:8080',
-            'https://metallbude-de.myshopify.com',
-            'https://metallbude.myshopify.com',
-            'https://metallbude.com',
-            'https://www.metallbude.com',
-            'https://checkout.shopify.com'
-          ];
+// Security middleware - Add security headers
+app.use((req, res, next) => {
+  // Security headers
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  
+  // HTTPS enforcement in production
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  
+  next();
+});
 
-      // In development, also allow file:// origins for local testing
-      if (process.env.NODE_ENV !== 'production' && (origin === 'file://' || origin.startsWith('file://'))) {
-        return callback(null, true);
-      }
+// 🔥 REWRITTEN: Customer-token-only Rücksende-Endpoint (Deutsch)
+// Diese Route akzeptiert nur echte Shopify-Kunden-Token (shcat_) und erstellt
+// eine Kundeninitiierte Rückgabeanfrage via Customer Account API (orderRequestReturn).
+// Keine Admin-Fallbacks hier — wenn der Kunde nicht authentifiziert ist, wird die
+// Anfrage abgelehnt.
+app.post('/returns', authenticateAppToken, async (req, res) => {
+  try {
+    const returnRequest = req.body || {};
+    const customerToken = extractCustomerToken(req);
 
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-
-      // Not allowed
-      console.log(`🔒 CORS: rejecting origin ${origin}`);
-      return callback(new Error('Not allowed by CORS'));
+    if (!customerToken) {
+      return res.status(401).json({ success: false, error: 'Kein Shopify Kunden-Token (shcat_) im Request. Bitte im App-Login anmelden.' });
     }
-  };
 
-  // Apply CORS middleware
-  app.use(cors(corsOptions));
- 
+    // Non-sensitive logging (masked)
+    try {
+      console.log(`🔐 Eingehende Rücksendeanfrage (Token vorhanden: ${customerToken ? 'ja' : 'nein'}) - Auftrag: ${returnRequest.orderId || 'unbekannt'}`);
+    } catch (e) {}
+
+    // Call helper which uses the Customer Account API (orderRequestReturn)
+    const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+
+    if (!shopifyResult.success) {
+      return res.status(400).json({ success: false, error: shopifyResult.error });
+    }
+
+    // Optional: persist minimal backend record for your DB (left as comment)
+    // await saveReturnToDatabase({ orderId: returnRequest.orderId, shopifyId: shopifyResult.shopifyReturnRequestId, status: shopifyResult.status });
+
+    console.log('✅ Rücksendeanfrage erfolgreich erstellt:', shopifyResult.shopifyReturnRequestId || '(nicht in Shopify erstellt)');
+    return res.status(201).json({ success: true, returnId: shopifyResult.shopifyReturnRequestId, status: shopifyResult.status, message: 'Rückgabeanfrage erfolgreich übermittelt' });
+
+  } catch (err) {
+    console.error('❌ Fehler beim Verarbeiten der Rücksendeanfrage:', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Fehler beim Verarbeiten der Rücksendeanfrage' });
+  }
+});
+
+
+// Customer Account API Call (mit Fallback, da einige Shops /graphql.json oder /graphql nutzen)
+async function callCustomerAccountAPI(query, variables, customerJwt) {
+  const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${customerJwt}` };
+  try {
+    const resp = await axios.post(CUSTOMER_API_URL_PRIMARY, { query, variables }, { headers });
+    return resp.data;
+  } catch (e) {
+    // Bei 404 o.ä. auf Fallback wechseln
+    if (e?.response?.status === 404) {
+      const resp2 = await axios.post(CUSTOMER_API_URL_FALLBACK, { query, variables }, { headers });
+      return resp2.data;
+    }
+    throw e;
+  }
+}
+
+// Return-Request anlegen (Retoure-Anfrage) – NICHT "Retoure eingehend"
+async function submitReturnRequestViaCustomerAPI(session, payload) {
+  const jwt = session?.shopifyCustomerJwt;
+  if (!jwt) throw new Error('Kein Shopify Customer-Login vorhanden (JWT fehlt). Bitte in der App neu anmelden.');
+
+  // Eingabe aus App
+  const orderId = payload?.orderId;
+  if (!orderId) throw new Error('orderId fehlt.');
+
+  // Pflichtfeld: items -> RequestedLineItemInput
+  // Wir akzeptieren sowohl { lineItemId } als auch { fulfillmentLineItemId }
+  const requestedLineItems = (payload?.items || []).map(li => {
+    const out = {
+      quantity: Number(li.quantity || 1),
+      returnReason: mapAppReasonToReturnReason(li.returnReason),
+    };
+    if (li.fulfillmentLineItemId) out.fulfillmentLineItemId = li.fulfillmentLineItemId;
+    if (li.lineItemId) out.lineItemId = li.lineItemId;
+    return out;
+  });
+  if (!requestedLineItems.length) throw new Error('Mindestens ein Rücksendeposten ist erforderlich.');
+
+  // Optionale Felder
+  const resolution = normalizeResolution(payload?.resolution);
+  const exchangeSelections = Array.isArray(payload?.exchangeSelections) ? payload.exchangeSelections : [];
+  const extraNote = payload?.customerNote || '';
+
+  const customerNote = buildCustomerNoteDE({ resolution, exchangeSelections, extraNote });
+
+  const mutation = `
+    mutation orderRequestReturn($orderId: ID!, $requestedLineItems: [RequestedLineItemInput!]!, $customerNote: String) {
+      orderRequestReturn(
+        orderId: $orderId
+        requestedLineItems: $requestedLineItems
+        customerNote: $customerNote
+      ) {
+        userErrors { field message }
+        returnRequest {
+          id
+          status
+          requestedAt
+          order { id name }
+          totalQuantity
+        }
+      }
+    }
+  `;
+
+  const data = await callCustomerAccountAPI(mutation, { orderId, requestedLineItems, customerNote }, jwt);
+  if (data?.errors?.length) {
+    throw new Error(data.errors.map(e => e.message).join('; '));
+  }
+  const r = data?.data?.orderRequestReturn;
+  if (!r) throw new Error('Unerwartete Antwort von Shopify (orderRequestReturn fehlt).');
+  if (Array.isArray(r.userErrors) && r.userErrors.length) {
+    throw new Error(r.userErrors.map(u => u.message).join('; '));
+  }
+  return r.returnRequest;
+}
+
+// Hilfsfunktion: Erzeuge eine kompakte, deutsche Kunden-Notiz für die Rücksendeanfrage
+function buildCustomerNoteDE({ resolution, exchangeSelections, extraNote }) {
+  const parts = [];
+
+  // Menschlich lesbare Lösung
+  const resHuman = (function(r) {
+    if (!r) return '';
+    if (r === 'exchange') return 'Umtausch';
+    if (r === 'store_credit' || r === 'guthaben') return 'Guthaben';
+    if (r === 'refund' || r === 'rueckzahlung') return 'Rückzahlung';
+    return String(r);
+  })(resolution);
+
+  if (resHuman) parts.push(`Gewünschte Lösung: ${resHuman}`);
+
+  if (Array.isArray(exchangeSelections) && exchangeSelections.length) {
+    const items = exchangeSelections.map(x => {
+      const li = x?.lineItemId || '';
+      const v  = x?.wantedVariantId || '';
+      const sku = x?.wantedSku || '';
+      const title = x?.wantedTitle || '';
+      return `{lineItemId=${li}, gewünschteVariante=${v}${sku ? ', sku='+sku : ''}${title ? ', titel='+title : ''}}`;
+    }).join('; ');
+    parts.push(`Gewünschter Umtausch: [ ${items} ]`);
+  }
+  if (extraNote) parts.push(`Kundenhinweis: ${extraNote}`);
+
+  // Shopify-Begrenzung: wir halten das knapp
+  return parts.join(' | ').slice(0, 900);
+}
+
+// Gesamte Retoure-Historie (über Bestellungen des Kunden)
+app.get('/returns', async (req, res) => {
+  try {
+    const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+    const session = config.sessions.get(sessionToken);
+    if (!session) return res.status(401).json({ success: false, error: 'Nicht autorisiert' });
+
+    const jwt = session?.shopifyCustomerJwt;
+    if (!jwt) return res.status(401).json({ success: false, error: 'Kein Shopify Customer-Login (JWT) vorhanden' });
+
+    const query = `
+      query {
+        customer {
+          id
+          orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+            edges {
+              node {
+                id
+                name
+                processedAt
+                returns(first: 50) {
+                  edges { node { id status createdAt totalQuantity } }
+                }
+                returnRequests(first: 50) {
+                  edges { node { id status requestedAt totalQuantity } }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const data = await callCustomerAccountAPI(query, {}, jwt);
+    if (data?.errors?.length) {
+      throw new Error(data.errors.map(e => e.message).join('; '));
+    }
+    return res.json({ success: true, data: data?.data?.customer || {} });
+  } catch (e) {
+    console.error('❌ GET /returns:', e?.message || e);
+    return res.status(500).json({ success: false, error: e?.message || 'Unbekannter Fehler' });
+  }
+});
+
+// Retoure-Historie einer spezifischen Bestellung
+app.get('/orders/:orderId/returns', async (req, res) => {
+  try {
+    const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+    const session = config.sessions.get(sessionToken);
+    if (!session) return res.status(401).json({ success: false, error: 'Nicht autorisiert' });
+
+    const jwt = session?.shopifyCustomerJwt;
+    if (!jwt) return res.status(401).json({ success: false, error: 'Kein Shopify Customer-Login (JWT) vorhanden' });
+
+    const orderId = decodeURIComponent(req.params.orderId);
+    const query = `
+      query($orderId: ID!) {
+        customer {
+          order(id: $orderId) {
+            id
+            name
+            returns(first: 50) {
+              edges { node { id status createdAt totalQuantity } }
+            }
+            returnRequests(first: 50) {
+              edges { node { id status requestedAt totalQuantity } }
+            }
+          }
+        }
+      }
+    `;
+    const data = await callCustomerAccountAPI(query, { orderId }, jwt);
+    if (data?.errors?.length) {
+      throw new Error(data.errors.map(e => e.message).join('; '));
+    }
+    return res.json({ success: true, data: data?.data?.customer?.order || {} });
+  } catch (e) {
+    console.error('❌ GET /orders/:orderId/returns:', e?.message || e);
+    return res.status(500).json({ success: false, error: e?.message || 'Unbekannter Fehler' });
+  }
+});
+
+// Helper function to get real customer email from Shopify for public endpoints
 async function getRealCustomerEmail(customerId) {
     try {
         // Skip if it's a guest customer ID
@@ -1304,11 +1513,13 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       }
     `;
 
-    // Build a customerNote object that preserves per-line requested exchange selections
+    // Build a German customerNote object that preserves per-line requested exchange selections
+    // Keys: loesung (refund|store_credit|exchange), begruendung (reason), bemerkung (additional notes)
     const notePayload = {
-      source: 'mobile_app',
-      preferredResolution: returnRequest.preferredResolution || null,
-      additionalNotes: returnRequest.additionalNotes || null,
+      quelle: 'mobile_app',
+      loesung: returnRequest.preferredResolution || null,
+      begruendung: returnRequest.reason || null,
+      bemerkung: returnRequest.additionalNotes || null,
       exchangeOptions: {}
     };
     for (const it of returnRequest.items || []) {
@@ -9225,47 +9436,182 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 
 // 🔥 UPDATED: Submit return request with Shopify Customer Account API integration
 app.post('/returns', authenticateAppToken, async (req, res) => {
-  // Strict handler: requires a Shopify customer token and submits via Customer Account API only.
   try {
     const returnRequest = req.body;
     const customerToken = extractCustomerToken(req);
-    if (!customerToken) {
-      return res.status(401).json({ success: false, error: 'Missing Shopify customer token (shcat_)' });
-    }
-
-    console.log('📦 /returns received - orderId:', returnRequest?.orderId, 'items:', (returnRequest?.items || []).length);
-    // Diagnostic: list which candidate token headers/fields are present (masked)
+    // Non-sensitive debug: log whether we received a Shopify customer token (do NOT log full token)
     try {
-      const hdrKeys = ['x-shopify-customer-token', 'x-shopify-customer-jwt', 'x-shopify-customer_token', 'authorization'];
-      const found = {};
-      hdrKeys.forEach(k => {
-        const v = req.headers[k];
-        if (v) {
-          const s = String(v || '');
-          const masked = s.length > 12 ? `${s.substring(0,6)}...${s.substring(s.length-4)}` : s;
-          found[k] = masked;
-        }
-      });
-      if (req.body && req.body.customerToken) {
-        const s = String(req.body.customerToken || '');
-        found['body.customerToken'] = s.length > 12 ? `${s.substring(0,6)}...${s.substring(s.length-4)}` : s;
+      if (customerToken) {
+        console.log(`🔐 Customer token present (prefix): ${customerToken.substring(0, Math.min(8, customerToken.length))}...`);
+      } else {
+        console.log('🔐 No Shopify customer token extracted from request');
       }
-      console.log('🔍 Token diagnostics (masked):', found);
-    } catch (e) {
-      console.log('🔍 Token diagnostics failed:', e?.message || e);
+    } catch (e) { /* ignore logging errors */ }
+    const customerEmail = req.session.email;
+
+    if (!customerToken) {
+      return res.status(401).json({ 
+        success: false, 
+        error: 'No authentication token' 
+      });
     }
 
+    console.log('📦 Processing return request:', {
+      orderId: returnRequest.orderId,
+      orderNumber: returnRequest.orderNumber,
+      itemCount: returnRequest.items?.length,
+      reason: returnRequest.reason,
+      additionalNotes: returnRequest.additionalNotes,
+      preferredResolution: returnRequest.preferredResolution,
+      customer: customerEmail
+    });
+
+    // 🔥 NEW: Prefer Customer Account API for customer-initiated exchanges.
+    // If the customer explicitly requested an exchange, create the return via the
+    // Customer Account API so Shopify treats it as a customer request ("Rückgabe angefragt").
+    // Otherwise, if an admin token is configured, use the Admin API as a faster/delegated path.
+    const useAdminApi = Boolean(config.adminToken) && (returnRequest.preferredResolution !== 'exchange');
+    if (useAdminApi) {
+      console.log('🚀 Using Admin API for return creation (safer path)...');
+      try {
+        // Reuse the API-version-safe eligibility checker to get fulfillmentLineItem IDs
+        const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
+        if (!eligibility || !eligibility.eligible || !Array.isArray(eligibility.returnableItems) || eligibility.returnableItems.length === 0) {
+          throw new Error(eligibility?.reason || 'No returnable items available via Admin API');
+        }
+
+        // Map return request items to fulfillmentLineItemIds from eligibility result
+        const returnLineItems = [];
+        const mapReturnReason = (reason) => mapReasonToShopify(reason || 'other');
+
+  for (const requestedItem of returnRequest.items || []) {
+          const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId || ri.title === requestedItem.title);
+          if (!match) {
+            console.log('⚠️ Requested item not found among returnable items:', requestedItem);
+            continue;
+          }
+
+          const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
+          if (qty <= 0) continue;
+
+          // Build minimal allowed Admin ReturnLineItem input - include requested exchange variant id
+          // when the customer requested an exchange. We avoid unsupported custom fields.
+          const requestedVariant = (returnRequest.exchangeOptions && returnRequest.exchangeOptions[requestedItem.lineItemId]) || requestedItem.requestedExchangeVariantId || null;
+          const adminLine = {
+            fulfillmentLineItemId: match.fulfillmentLineItemId,
+            quantity: qty,
+            returnReason: mapReturnReason(returnRequest.reason)
+          };
+          if (requestedVariant) {
+            adminLine.requestedExchangeVariantId = requestedVariant;
+          }
+          returnLineItems.push(adminLine);
+        }
+
+        if (returnLineItems.length === 0) {
+          throw new Error('No matching fulfillment line items found for return (Admin API)');
+        }
+
+        const returnMutation = `
+          mutation returnCreate($returnInput: ReturnInput!) {
+            returnCreate(returnInput: $returnInput) {
+              return {
+                id
+                name
+                status
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }`;
+
+        const returnInput = {
+          orderId: returnRequest.orderId,
+          returnLineItems: returnLineItems,
+          notifyCustomer: true
+        };
+
+        // Sanitize Admin payload: remove unsupported root-level fields like `note` before sending
+        const sanitizedReturnInput = Object.assign({}, returnInput);
+
+        console.log('🔥 Creating return with Admin API (delegated) - sanitized payload:', { returnLineItemsCount: returnLineItems.length });
+
+        const returnResponse = await axios.post(config.adminApiUrl, {
+          query: returnMutation,
+          variables: { returnInput: sanitizedReturnInput }
+        }, {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (returnResponse.data.errors) {
+          console.error('❌ Admin returnCreate GraphQL errors:', returnResponse.data.errors);
+          throw new Error('Admin API returnCreate failed');
+        }
+
+        const returnResult = returnResponse.data.data?.returnCreate;
+        const userErrors = returnResult?.userErrors || [];
+        if (userErrors.length > 0) {
+          console.error('❌ Admin returnCreate userErrors:', userErrors);
+          throw new Error('Return creation failed: ' + userErrors.map(u => u.message).join('; '));
+        }
+
+        const createdReturn = returnResult?.return;
+        if (!createdReturn || !createdReturn.id) {
+          throw new Error('Admin API did not return created return');
+        }
+
+        console.log('✅ Return created via Admin API:', createdReturn.id);
+        return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: createdReturn.status, method: 'admin_api' });
+
+      } catch (adminError) {
+        console.error('❌ Admin API path failed (will fallback):', adminError?.message || adminError);
+        // Fall through to Customer Account API
+      }
+    }
+
+    // Step 1: Submit to Shopify using Customer Account API
     const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+    
     if (!shopifyResult.success) {
-      return res.status(400).json({ success: false, error: shopifyResult.error || 'Shopify customer API error' });
+      return res.status(400).json({
+        success: false,
+        error: shopifyResult.error
+      });
     }
 
-    // minimal backend tracking (no DB in demo)
-    console.log('✅ /returns created shopifyReturnRequestId:', shopifyResult.shopifyReturnRequestId);
-    return res.status(201).json({ success: true, returnId: shopifyResult.shopifyReturnRequestId, status: shopifyResult.status });
-  } catch (err) {
-    console.error('❌ /returns handler error:', err?.response?.data || err?.message || err);
-    return res.status(500).json({ success: false, error: err?.message || 'Internal server error' });
+    // Step 2: Save to backend database for additional tracking
+    const backendReturnData = {
+      ...returnRequest,
+      shopifyReturnRequestId: shopifyResult.shopifyReturnRequestId,
+      shopifyStatus: shopifyResult.status,
+      customerEmail: customerEmail,
+      requestDate: new Date().toISOString(),
+      status: mapShopifyStatusToInternal(shopifyResult.status),
+    };
+
+    // Here you would save to your database
+    // await saveReturnToDatabase(backendReturnData);
+
+    console.log('✅ Return request submitted successfully:', shopifyResult.shopifyReturnRequestId);
+
+    res.json({
+      success: true,
+      returnId: shopifyResult.shopifyReturnRequestId,
+      status: shopifyResult.status,
+      message: 'Return request submitted successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error processing return request:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process return request'
+    });
   }
 });
 
@@ -13019,4 +13365,3 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   - Refresh Warning: ${config.refreshThresholds.warningDays} days before expiry`);
   console.log(`   - Users will stay logged in for MONTHS!`);
 });
-}
