@@ -981,7 +981,8 @@ app.post('/raffle/pick-winner', async (req, res) => {
 
 
 // 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
-const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql`;
+// Note: Shopify expects GraphQL endpoints to end with .json
+const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql.json`;
 
 // Helper functions
 function generateVerificationCode() {
@@ -1441,10 +1442,15 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     };
 
   } catch (error) {
-    console.error('❌ Error submitting return request to Shopify:', error);
+    // Improved diagnostics for axios errors
+    if (error && error.response) {
+      console.error('❌ Shopify Customer API responded with status', error.response.status, 'and data:', safeStringify(error.response.data));
+    } else {
+      console.error('❌ Error submitting return request to Shopify:', error?.message || error);
+    }
     return {
       success: false,
-      error: error.message
+      error: error?.message || 'Unknown error'
     };
   }
 }
