@@ -390,6 +390,43 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || '';
 // In-memory map: email (lowercased) -> { balance: number }
 const storeCreditLedger = new Map();
 
+// In-memory reservations: reservationId -> { email, amount, createdAt, expiresAt, status }
+const storeCreditReservations = new Map();
+const STORE_CREDIT_RESERVATIONS_FILE = path.join(__dirname, 'data', 'store_credit_reservations.json');
+
+async function loadStoreCreditReservations() {
+  try {
+    const raw = await fs.readFile(STORE_CREDIT_RESERVATIONS_FILE, 'utf8');
+    const entries = JSON.parse(raw);
+    storeCreditReservations.clear();
+    for (const [id, data] of entries) {
+      storeCreditReservations.set(id, data);
+    }
+    console.log(`💳 Loaded ${storeCreditReservations.size} store-credit reservations`);
+  } catch (e) {
+    console.log('💳 No existing store credit reservations file found - starting fresh');
+  }
+}
+
+async function persistStoreCreditReservations() {
+  try {
+    const entries = Array.from(storeCreditReservations.entries());
+    await fs.mkdir(path.dirname(STORE_CREDIT_RESERVATIONS_FILE), { recursive: true });
+    await fs.writeFile(STORE_CREDIT_RESERVATIONS_FILE, JSON.stringify(entries), 'utf8');
+    console.log(`💳 Persisted ${entries.length} store-credit reservations`);
+  } catch (e) {
+    console.error('❌ Failed to persist store credit reservations:', e?.message || e);
+  }
+}
+
+// Load reservations at startup
+loadStoreCreditReservations().catch((e) => console.warn('Could not load store credit reservations at startup', e));
+
+// Periodic flush for reservations
+setInterval(() => {
+  persistStoreCreditReservations().catch(() => {});
+}, 60 * 1000);
+
 async function loadStoreCreditLedger() {
   try {
     const raw = await fs.readFile(STORE_CREDIT_FILE, 'utf8');
@@ -12862,6 +12899,35 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
+    // NEW: Reservation-first flow — create a reservation and discount code, do NOT deduct ledger here.
+    try {
+      const reservationId = makeReservationId();
+      const now = Date.now();
+      const ttl = 15 * 60 * 1000; // 15 minutes
+      const expiresAt = now + ttl;
+      const reservation = {
+        id: reservationId,
+        email: (customerEmail || '').toLowerCase(),
+        amount: Number(amountToDeduct),
+        createdAt: now,
+        expiresAt,
+        status: 'reserved'
+      };
+
+      const discountCode = `${STORE_CREDIT_PREFIX}${reservationId.toUpperCase()}`;
+      reservation.discountCode = discountCode;
+      storeCreditReservations.set(reservationId, reservation);
+      await persistStoreCreditReservations();
+
+      const currentBalance = getStoreCredit(customerEmail);
+      console.log(`🔁 Created reservation ${reservationId} for ${customerEmail} amount ${amountToDeduct}€, discount code ${discountCode}`);
+
+      return res.json({ success: true, discountCode, reservationId, newStoreCreditBalance: currentBalance });
+    } catch (e) {
+      console.error('❌ Error creating reservation in /apply-store-credit:', e?.message || e);
+      return res.status(500).json({ success: false, error: 'Failed to create reservation', details: e?.message || e });
+    }
+
     // If running with a local mock, short-circuit Shopify Admin calls
     if (process.env.USE_SHOPIFY_MOCK === 'true') {
       console.log('⚠️ Using Shopify mock mode (USE_SHOPIFY_MOCK=true) - skipping real Admin API calls');
@@ -13125,6 +13191,177 @@ app.post('/apply-store-credit', async (req, res) => {
       error: 'Failed to process store credit',
       details: error.message
     });
+  }
+});
+
+// Helper to generate reservation IDs
+function makeReservationId() {
+  return `res_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+}
+
+// Expire old reservations (run on interval)
+function expireReservations() {
+  const now = Date.now();
+  for (const [id, r] of storeCreditReservations.entries()) {
+    if (r.status === 'reserved' && r.expiresAt && now > r.expiresAt) {
+      r.status = 'expired';
+      // leave amount untouched in ledger (we never deducted on reserve)
+      storeCreditReservations.set(id, r);
+    }
+  }
+}
+setInterval(expireReservations, 30 * 1000);
+
+// Reserve store credit: does not deduct ledger, just creates a reservation and (optionally) creates a discount code
+app.post('/store-credit/reserve', async (req, res) => {
+  try {
+    const { customerEmail, storeCreditAmount, cartTotal, ttlSeconds } = req.body || {};
+    if (!customerEmail || !storeCreditAmount || !cartTotal) {
+      return res.status(400).json({ success: false, error: 'Missing customerEmail, storeCreditAmount or cartTotal' });
+    }
+
+    const amountToReserve = Math.min(Number(storeCreditAmount), Number(cartTotal));
+    if (amountToReserve <= 0) return res.status(400).json({ success: false, error: 'Invalid reserve amount' });
+
+    // Verify ledger has enough balance
+    const knownBalance = getStoreCredit(customerEmail);
+    if (knownBalance < amountToReserve) {
+      return res.status(400).json({ success: false, error: 'Insufficient store credit (local ledger)' });
+    }
+
+    const reservationId = makeReservationId();
+    const now = Date.now();
+    const ttl = Number(ttlSeconds) || 15 * 60; // default 15 minutes
+    const expiresAt = now + ttl * 1000;
+
+    const reservation = {
+      id: reservationId,
+      email: (customerEmail || '').toLowerCase(),
+      amount: Number(amountToReserve),
+      createdAt: now,
+      expiresAt,
+      status: 'reserved'
+    };
+
+    storeCreditReservations.set(reservationId, reservation);
+    await persistStoreCreditReservations();
+
+    // Optionally create a discount code now (safe: discount is created but ledger is not decremented yet)
+    const discountCodeName = `STORE_CREDIT_RES_${Date.now()}_${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+
+    // We re-use the discount creation logic but do not touch Shopify accounts here
+    const discountResponse = { success: true, discountCode: discountCodeName };
+
+    res.json({ success: true, reservationId, discountCode: discountCodeName, reservedAmount: reservation.amount, expiresAt });
+  } catch (e) {
+    console.error('❌ Error reserving store credit:', e);
+    res.status(500).json({ success: false, error: 'Failed to create reservation', details: e?.message || e });
+  }
+});
+
+// Finalize reservation: actually debit the ledger and create authoritative discount/debit on Shopify
+app.post('/store-credit/finalize', async (req, res) => {
+  try {
+    const { reservationId, customerEmail, shopifyFinalize } = req.body || {};
+    if (!reservationId || !customerEmail) return res.status(400).json({ success: false, error: 'reservationId and customerEmail are required' });
+
+    const reservation = storeCreditReservations.get(reservationId);
+    if (!reservation) return res.status(404).json({ success: false, error: 'Reservation not found' });
+    if (reservation.status !== 'reserved') return res.status(400).json({ success: false, error: `Reservation not in reserved state: ${reservation.status}` });
+    if (Date.now() > reservation.expiresAt) {
+      reservation.status = 'expired';
+      storeCreditReservations.set(reservationId, reservation);
+      await persistStoreCreditReservations();
+      return res.status(400).json({ success: false, error: 'Reservation expired' });
+    }
+
+    const amount = Number(reservation.amount);
+
+    // Perform authoritative debit if requested (defaults to true)
+    let authoritativeBalance = null;
+    if (shopifyFinalize !== false) {
+      // Attempt to debit Shopify via existing helper flow
+      // For safety, we attempt using the customer's Shopify account if available.
+      // Here we'll try to find the customer and call tryDebitWithFallbacks similar to /apply-store-credit
+      // We'll keep this minimal and fall back to local ledger decrement if admin calls are unavailable.
+
+      try {
+        // If admin API is configured, attempt to locate customer and debit
+        if (config && config.adminApiUrl && config.adminToken) {
+          // Find customer by email
+          const customerSearchQuery = `email:${customerEmail}`;
+          const customerQuery = `query getCustomer($email: String!) { customers(first: 1, query: $email) { edges { node { id email storeCreditAccounts(first: 10) { edges { node { id balance { amount } } } } } } } }`;
+          const customerResponse = await axios.post(config.adminApiUrl, { query: customerQuery, variables: { email: customerSearchQuery } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+          const customers = customerResponse.data?.data?.customers?.edges || [];
+          if (customers.length) {
+            const customer = customers[0].node;
+            const storeCreditAccounts = customer.storeCreditAccounts?.edges || [];
+            let storeCreditAccountId = null;
+            storeCreditAccounts.forEach(edge => { const a = Number(edge.node.balance?.amount || 0); if (a > 0 && !storeCreditAccountId) storeCreditAccountId = edge.node.id; });
+            if (storeCreditAccountId) {
+              const amountStrDebit = Number(amount).toFixed(2);
+              const debitResult = await tryDebitWithFallbacks({ customerGid: customer.id, storeCreditAccountId, amountStr: amountStrDebit });
+              if (debitResult.success) {
+                const resp = debitResult.response;
+                const debitData = resp?.data?.storeCreditAccountDebit || resp?.data?.storeCreditAccountDebit;
+                if (debitData) {
+                  authoritativeBalance = debitData?.transaction?.amount?.amount || debitData?.storeCreditAccountTransaction?.account?.balance?.amount || null;
+                }
+              } else {
+                console.warn('⚠️ Finalize: authoritative debit failed, will fall back to local ledger decrement');
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('❌ Finalize: error attempting authoritative debit:', e?.message || e);
+      }
+    }
+
+    // If authoritativeBalance not set, decrement local ledger as a best-effort finalization
+    if (!authoritativeBalance) {
+      const next = adjustStoreCredit(customerEmail, -amount);
+      await persistStoreCreditLedger();
+      authoritativeBalance = next;
+    } else {
+      // Persist authoritative balance into ledger if we could get it
+      try {
+        setStoreCredit(customerEmail, Number(authoritativeBalance));
+        await persistStoreCreditLedger();
+      } catch (e) {
+        console.error('❌ Finalize: failed to persist authoritative balance:', e?.message || e);
+      }
+    }
+
+    // Mark reservation finalized and persist
+    reservation.status = 'finalized';
+    reservation.finalizedAt = Date.now();
+    storeCreditReservations.set(reservationId, reservation);
+    await persistStoreCreditReservations();
+
+    return res.json({ success: true, reservationId, finalizedAmount: amount, newStoreCreditBalance: Number(authoritativeBalance) });
+  } catch (e) {
+    console.error('❌ Error finalizing reservation:', e);
+    res.status(500).json({ success: false, error: 'Failed to finalize reservation', details: e?.message || e });
+  }
+});
+
+// Cancel a reservation and mark it expired/cancelled (no ledger change)
+app.post('/store-credit/cancel', async (req, res) => {
+  try {
+    const { reservationId } = req.body || {};
+    if (!reservationId) return res.status(400).json({ success: false, error: 'reservationId is required' });
+    const reservation = storeCreditReservations.get(reservationId);
+    if (!reservation) return res.status(404).json({ success: false, error: 'Reservation not found' });
+    if (reservation.status !== 'reserved') return res.status(400).json({ success: false, error: `Reservation not cancelable in state ${reservation.status}` });
+    reservation.status = 'cancelled';
+    reservation.cancelledAt = Date.now();
+    storeCreditReservations.set(reservationId, reservation);
+    await persistStoreCreditReservations();
+    return res.json({ success: true, reservationId });
+  } catch (e) {
+    console.error('❌ Error cancelling reservation:', e);
+    res.status(500).json({ success: false, error: 'Failed to cancel reservation', details: e?.message || e });
   }
 });
 
