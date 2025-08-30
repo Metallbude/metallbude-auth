@@ -13050,8 +13050,8 @@ app.post('/apply-store-credit', async (req, res) => {
     }
 
     // Step 3: Create a discount code equivalent to the deducted amount
-    const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-    console.log(`💳 Creating discount code: ${discountCodeName} for ${amountToDeduct}€`);
+    const finalDiscountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    console.log(`💳 Creating discount code: ${finalDiscountCodeName} for ${amountToDeduct}€`);
 
     // GraphQL mutation to create a basic code discount. Keep selection minimal:
     // return the created node id and any userErrors. We already generate the
@@ -13075,7 +13075,7 @@ app.post('/apply-store-credit', async (req, res) => {
     const discountInput = {
       basicCodeDiscount: {
         title: `Store Credit Used - ${customerEmail}`,
-        code: discountCodeName,
+        code: finalDiscountCodeName,
         startsAt: new Date().toISOString(),
         endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
         combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
@@ -13127,7 +13127,7 @@ app.post('/apply-store-credit', async (req, res) => {
 
       // Success
       console.log('✅ Admin API reported success for discount creation (no userErrors)');
-      createdDiscountCode = discountCodeName;
+      createdDiscountCode = finalDiscountCodeName;
       
       // Mark reservation as debited (money has been deducted)
       reservation.status = 'debited';
