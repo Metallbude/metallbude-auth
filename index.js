@@ -521,6 +521,34 @@ app.get('/debug/store-credit', async (req, res) => {
   return res.json({ email, balance: getStoreCredit(email) });
 });
 
+// 🔍 Debug: return both Admin and Ledger store credit for the current session or a provided email
+app.get('/debug/customer-store-credit', authenticateAppToken, async (req, res) => {
+  try {
+    const email = (req.query.email || req.session?.email || '').toLowerCase();
+    if (!email) return res.status(400).json({ success: false, error: 'email required (query or session)' });
+
+    let adminAmount = null;
+    let adminErr = null;
+    if (config.adminToken) {
+      try {
+        const query = `query getCustomerStoreCredit($customerId: ID!) { customer(id: $customerId) { storeCreditAccounts(first: 10) { edges { node { balance { amount currencyCode } } } } } }`;
+        const resp = await axios.post(config.adminApiUrl, { query, variables: { customerId: req.session?.customerId } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+        const accounts = resp.data?.data?.customer?.storeCreditAccounts?.edges || [];
+        adminAmount = accounts.reduce((sum, e) => sum + Number(e.node?.balance?.amount || 0), 0);
+      } catch (e) {
+        adminErr = e?.message || String(e);
+      }
+    }
+
+    const ledgerAmount = getStoreCredit(email);
+
+    return res.json({ success: true, email, admin: adminAmount, ledger: ledgerAmount, adminError: adminErr });
+  } catch (e) {
+    console.error('❌ /debug/customer-store-credit failed:', e?.message || e);
+    return res.status(500).json({ success: false, error: 'internal' });
+  }
+});
+
 app.post('/debug/store-credit/adjust', express.json(), async (req, res) => {
   const email = (req.body?.email || '').toLowerCase();
   const delta = Number(req.body?.delta || 0);
