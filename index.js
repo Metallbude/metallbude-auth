@@ -3771,6 +3771,34 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
   }
 });
 
+// ===== DEBUG: Store credit ledger inspection & modification =====
+// Protected by app session token (authenticateAppToken) — only call from trusted clients
+app.get('/debug/store-credit-ledger', authenticateAppToken, async (req, res) => {
+  try {
+    const entries = Array.from(storeCreditLedger.entries()).map(([email, data]) => ({ email, balance: data.balance }));
+    res.json({ success: true, entries });
+  } catch (e) {
+    console.error('❌ Failed to read store credit ledger debug:', e?.message || e);
+    res.status(500).json({ success: false, error: 'Failed to read ledger' });
+  }
+});
+
+// Set or update a store credit balance for an email (body: { email, amount })
+app.post('/debug/store-credit', authenticateAppToken, async (req, res) => {
+  try {
+    const { email, amount } = req.body || {};
+    if (!email || typeof amount === 'undefined') return res.status(400).json({ success: false, error: 'email and amount required' });
+    const numeric = Number(amount || 0);
+    setStoreCredit(email, numeric);
+    await persistStoreCreditLedger();
+    console.log(`🔧 Debug: set store credit for ${email} -> ${numeric}`);
+    res.json({ success: true, email, amount: numeric });
+  } catch (e) {
+    console.error('❌ Failed to set debug store credit:', e?.message || e);
+    res.status(500).json({ success: false, error: 'Failed to set ledger entry' });
+  }
+});
+
 // GET /customer/orders/:orderId - Get single order with COMPLETE details
 app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
   try {
