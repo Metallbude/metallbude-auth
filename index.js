@@ -253,6 +253,8 @@ const sessions = new Map();
 const appRefreshTokens = new Map();
 // Map to hold temporary/customer-scoped Shopify customer tokens (created for store-credit flows)
 const shopifyCustomerTokens = new Map();
+// In-memory orders cache: customerId -> { orders: [...], fetchedAt: timestamp }
+const ordersCache = new Map();
 
 // Load sessions on startup
 async function loadPersistedSessionsWithLogging() {
@@ -338,7 +340,13 @@ async function persistSessions() {
   try {
     const sessionEntries = Array.from(sessions.entries());
     const refreshEntries = Array.from(appRefreshTokens.entries());
-    
+    // Ensure directory exists to avoid ENOENT when writing files
+    try {
+      await fs.mkdir(path.dirname(SESSION_FILE), { recursive: true });
+    } catch (e) {
+      // proceed - writeFile will throw if this fails
+    }
+
     await Promise.all([
       fs.writeFile(SESSION_FILE, JSON.stringify(sessionEntries), 'utf8'),
       fs.writeFile(REFRESH_TOKENS_FILE, JSON.stringify(refreshEntries), 'utf8')
@@ -540,20 +548,100 @@ async function adminGraphQL(query, variables) {
 }
 
 const MUTATION_DEBIT = `
-mutation StoreCreditAccountDebit($input: StoreCreditAccountDebitInput!) {
-  storeCreditAccountDebit(input: $input) {
-    transaction { id createdAt amount { amount currencyCode } }
-    userErrors { field message }
+mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+  storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+    storeCreditAccountTransaction {
+      amount { amount currencyCode }
+      account { id balance { amount currencyCode } }
+    }
+    userErrors { message field }
   }
 }`;
 
 const MUTATION_CREDIT = `
-mutation StoreCreditAccountCredit($input: StoreCreditAccountCreditInput!) {
-  storeCreditAccountCredit(input: $input) {
-    transaction { id createdAt amount { amount currencyCode } }
-    userErrors { field message }
+mutation StoreCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+  storeCreditAccountCredit(id: $id, creditInput: $creditInput) {
+    storeCreditAccountTransaction {
+      amount { amount currencyCode }
+      account { id balance { amount currencyCode } }
+    }
+    userErrors { message field }
   }
 }`;
+
+// Resilient debit helper: try multiple common GraphQL shapes until one succeeds
+async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amountStr, memo = '', reason = '' }) {
+  const attempts = [];
+
+  // Attempt A: official id + debitInput with debitAmount (use customerGid first)
+  attempts.push({
+    name: 'id+debitInput (customerGid)',
+    query: MUTATION_DEBIT,
+    variables: { id: customerGid, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
+  });
+
+  // Attempt A2: id+debitInput using storeCreditAccountId (if provided)
+  if (storeCreditAccountId) {
+    attempts.push({
+      name: 'id+debitInput (storeCreditAccountId)',
+      query: MUTATION_DEBIT,
+      variables: { id: storeCreditAccountId, debitInput: { debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
+    });
+  }
+
+  // Attempt B: owner-based input (older/alternate)
+  const MUTATION_DEBIT_ALT1 = `
+    mutation StoreCreditAccountDebit($input: StoreCreditAccountDebitInput!) {
+      storeCreditAccountDebit(input: $input) {
+        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } account { id balance { amount currencyCode } } }
+        userErrors { field message }
+      }
+    }
+  `;
+  attempts.push({
+    name: 'owner-based input',
+    query: MUTATION_DEBIT_ALT1,
+    variables: { input: { owner: { customerId: customerGid }, debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
+  });
+
+  // Attempt C: legacy wrapper variable
+  const MUTATION_DEBIT_ALT2 = `
+    mutation StoreCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
+      storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
+        storeCreditAccountTransaction { id createdAt amount { amount currencyCode } account { id balance { amount currencyCode } } }
+        userErrors { field message }
+      }
+    }
+  `;
+  attempts.push({
+    name: 'legacy wrapper',
+    query: MUTATION_DEBIT_ALT2,
+    variables: { storeCreditAccountDebit: { storeCreditAccountId, debitAmount: { amount: amountStr, currencyCode: 'EUR' } } }
+  });
+
+  const errors = [];
+  for (const att of attempts) {
+    try {
+      console.log(`🔁 Trying debit attempt: ${att.name}`);
+      const resp = await adminGraphQL(att.query, att.variables);
+      console.log(`🔁 Debit attempt '${att.name}' response:`, JSON.stringify(resp, null, 2));
+      const payload = resp?.data?.storeCreditAccountDebit;
+      const userErrors = (payload?.userErrors) || [];
+      if (Array.isArray(userErrors) && userErrors.length) {
+        errors.push({ attempt: att.name, userErrors });
+        continue; // try next
+      }
+      // Success: return raw response and chosen attempt name
+      return { success: true, attempt: att.name, response: resp };
+    } catch (e) {
+      console.error(`❌ Debit attempt '${att.name}' threw:`, e?.message || e);
+      errors.push({ attempt: att.name, error: e?.response?.data || e?.message || String(e) });
+      // continue to next attempt
+    }
+  }
+
+  return { success: false, errors };
+}
 
 const QUERY_CUSTOMER_BY_EMAIL = `
 query GetCustomerByEmail($query: String!) {
@@ -597,15 +685,11 @@ app.post('/store-credit/debit', async (req, res) => {
       customerGid = node.id;
     }
 
-    // Perform debit mutation
+    // Perform debit mutation using exact variable shape: { id, debitInput }
     const moneyAmount = toMoneyString(amount);
     const debitRes = await adminGraphQL(MUTATION_DEBIT, {
-      input: {
-        owner: { customerId: customerGid },
-        amount: { amount: moneyAmount, currencyCode },
-        reason,
-        memo
-      }
+      id: customerGid,
+      debitInput: { debitAmount: { amount: moneyAmount, currencyCode } }
     });
 
     const userErrors = debitRes?.data?.storeCreditAccountDebit?.userErrors || [];
@@ -618,13 +702,25 @@ app.post('/store-credit/debit', async (req, res) => {
     const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
     const balances = accounts.map(e => e.node.balance);
     const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalBalanceStr = toMoneyString(totalBalance);
+
+    // Persist authoritative balance to local ledger for consistency
+    try {
+      if (email) {
+        setStoreCredit(email, Number(totalBalanceStr));
+        await persistStoreCreditLedger();
+        console.log(`💾 Persisted authoritative balance ${totalBalanceStr} for ${email}`);
+      }
+    } catch (e) {
+      console.error('❌ Failed to persist authoritative balance after debit:', e?.message || e);
+    }
 
     return res.json({
       success: true,
       debited: moneyAmount,
       currencyCode,
-      transaction: debitRes.data.storeCreditAccountDebit.transaction,
-      newBalance: toMoneyString(totalBalance)
+      transaction: debitRes.data.storeCreditAccountDebit.storeCreditAccountTransaction,
+      newBalance: totalBalanceStr
     });
   } catch (err) {
     console.error('❌ /store-credit/debit error', err.message);
@@ -652,12 +748,8 @@ app.post('/store-credit/credit', async (req, res) => {
 
     const moneyAmount = toMoneyString(amount);
     const creditRes = await adminGraphQL(MUTATION_CREDIT, {
-      input: {
-        owner: { customerId: customerGid },
-        amount: { amount: moneyAmount, currencyCode },
-        reason,
-        memo
-      }
+      id: customerGid,
+      creditInput: { creditAmount: { amount: moneyAmount, currencyCode } }
     });
 
     const userErrors = creditRes?.data?.storeCreditAccountCredit?.userErrors || [];
@@ -669,13 +761,25 @@ app.post('/store-credit/credit', async (req, res) => {
     const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
     const balances = accounts.map(e => e.node.balance);
     const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalBalanceStr = toMoneyString(totalBalance);
+
+    // Persist authoritative balance to local ledger for consistency
+    try {
+      if (email) {
+        setStoreCredit(email, Number(totalBalanceStr));
+        await persistStoreCreditLedger();
+        console.log(`💾 Persisted authoritative balance ${totalBalanceStr} for ${email}`);
+      }
+    } catch (e) {
+      console.error('❌ Failed to persist authoritative balance after credit:', e?.message || e);
+    }
 
     return res.json({
       success: true,
       credited: moneyAmount,
       currencyCode,
-      transaction: creditRes.data.storeCreditAccountCredit.transaction,
-      newBalance: toMoneyString(totalBalance)
+      transaction: creditRes.data.storeCreditAccountCredit.storeCreditAccountTransaction,
+      newBalance: totalBalanceStr
     });
   } catch (err) {
     console.error('❌ /store-credit/credit error', err.message);
@@ -721,9 +825,163 @@ function safeStringify(e) {
   try { return typeof e === 'string' ? e : JSON.stringify(e); } catch { return String(e); }
 }
 
+// ===== Raffle participant management + pick-winner =====
+const RAFFLE_PARTICIPANTS_FILE = path.join(__dirname, 'data', 'raffle_participants.json');
+const RAFFLE_AUDIT_FILE = path.join(__dirname, 'data', 'raffle_audit.json');
 
-// 🔥 ADDED: Customer Account API URL for returns
-const CUSTOMER_ACCOUNT_API_URL = 'https://shopify.com/48343744676/account/customer/api/2024-10/graphql';
+async function loadRaffleParticipants() {
+  try {
+    const raw = await fs.readFile(RAFFLE_PARTICIPANTS_FILE, 'utf8');
+    const arr = JSON.parse(raw);
+    // normalize to lowercase emails
+    return new Set((Array.isArray(arr) ? arr : []).map(e => String(e || '').toLowerCase()).filter(Boolean));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+async function persistRaffleParticipants(set) {
+  try {
+    const arr = Array.from(set.values());
+    await fs.mkdir(path.dirname(RAFFLE_PARTICIPANTS_FILE), { recursive: true });
+    await fs.writeFile(RAFFLE_PARTICIPANTS_FILE, JSON.stringify(arr, null, 2), 'utf8');
+  } catch (e) {
+    console.error('❌ Failed to persist raffle participants:', e?.message || e);
+  }
+}
+
+async function appendRaffleAudit(entry) {
+  try {
+    await fs.mkdir(path.dirname(RAFFLE_AUDIT_FILE), { recursive: true });
+    let current = [];
+    try {
+      const raw = await fs.readFile(RAFFLE_AUDIT_FILE, 'utf8');
+      current = JSON.parse(raw) || [];
+    } catch (_) {
+      current = [];
+    }
+    current.push(entry);
+    await fs.writeFile(RAFFLE_AUDIT_FILE, JSON.stringify(current, null, 2), 'utf8');
+  } catch (e) {
+    console.error('❌ Failed to append raffle audit:', e?.message || e);
+  }
+}
+
+// POST /raffle/signup { email }
+app.post('/raffle/signup', async (req, res) => {
+  try {
+    const email = (req.body?.email || '').toLowerCase();
+    if (!email) return res.status(400).json({ success: false, error: 'email required' });
+
+    const participants = await loadRaffleParticipants();
+    if (participants.has(email)) return res.json({ success: true, message: 'already registered' });
+    participants.add(email);
+    await persistRaffleParticipants(participants);
+    return res.json({ success: true, email });
+  } catch (err) {
+    console.error('❌ /raffle/signup error', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// POST /raffle/unsubscribe { email }
+app.post('/raffle/unsubscribe', async (req, res) => {
+  try {
+    const email = (req.body?.email || '').toLowerCase();
+    if (!email) return res.status(400).json({ success: false, error: 'email required' });
+    const participants = await loadRaffleParticipants();
+    if (!participants.has(email)) return res.json({ success: true, message: 'not registered' });
+    participants.delete(email);
+    await persistRaffleParticipants(participants);
+    return res.json({ success: true, email });
+  } catch (err) {
+    console.error('❌ /raffle/unsubscribe error', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// POST /raffle/pick-winner  (protected)
+// Headers: x-admin-secret: <RAFFLE_ADMIN_SECRET>
+app.post('/raffle/pick-winner', async (req, res) => {
+  try {
+    const secret = req.get('x-admin-secret') || req.body?.adminSecret;
+    if (!process.env.RAFFLE_ADMIN_SECRET) {
+      return res.status(503).json({ success: false, error: 'RAFFLE_ADMIN_SECRET not configured' });
+    }
+    if (!secret || secret !== process.env.RAFFLE_ADMIN_SECRET) {
+      return res.status(401).json({ success: false, error: 'unauthorized' });
+    }
+
+    const participants = Array.from(await loadRaffleParticipants());
+    if (!participants.length) return res.status(400).json({ success: false, error: 'no participants' });
+
+    // Randomly pick one
+    const idx = Math.floor(Math.random() * participants.length);
+    const winnerEmail = String(participants[idx] || '').toLowerCase();
+    const amount = 10.0;
+    const moneyAmount = toMoneyString(amount);
+
+    // Resolve customer GID by email
+    const data = await adminGraphQL(QUERY_CUSTOMER_BY_EMAIL, { query: `email:${winnerEmail}` });
+    const node = data?.data?.customers?.edges?.[0]?.node;
+    if (!node?.id) {
+      return res.status(404).json({ success: false, error: `customer not found for ${winnerEmail}` });
+    }
+    const customerGid = node.id;
+
+    // Credit via existing mutation
+    const creditRes = await adminGraphQL(MUTATION_CREDIT, {
+      id: customerGid,
+      creditInput: { creditAmount: { amount: moneyAmount, currencyCode: 'EUR' } }
+    });
+    const userErrors = creditRes?.data?.storeCreditAccountCredit?.userErrors || [];
+    if (userErrors.length) {
+      return res.status(422).json({ success: false, error: 'Credit error', details: userErrors });
+    }
+
+    // Fetch updated balance and persist
+    const balRes = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customerGid });
+    const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
+    const balances = accounts.map(e => e.node.balance);
+    const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalBalanceStr = toMoneyString(totalBalance);
+
+    try {
+      setStoreCredit(winnerEmail, Number(totalBalanceStr));
+      await persistStoreCreditLedger();
+      console.log(`💸 Raffle: credited ${moneyAmount} EUR to ${winnerEmail} (new balance ${totalBalanceStr})`);
+    } catch (e) {
+      console.error('❌ Failed to persist balance after raffle credit:', e?.message || e);
+    }
+
+    // Append audit
+    const auditEntry = {
+      time: new Date().toISOString(),
+      winner: winnerEmail,
+      amount: moneyAmount,
+      transaction: creditRes.data?.storeCreditAccountCredit?.storeCreditAccountTransaction || null
+    };
+    await appendRaffleAudit(auditEntry);
+
+    // Clear participants so everyone must re-opt-in weekly
+    try {
+      const emptySet = new Set();
+      await persistRaffleParticipants(emptySet);
+      console.log('🔄 Raffle: cleared participants after drawing winner');
+    } catch (e) {
+      console.error('❌ Failed to clear raffle participants after draw:', e?.message || e);
+    }
+
+    return res.json({ success: true, winner: winnerEmail, amount: moneyAmount, newBalance: totalBalanceStr, transaction: auditEntry.transaction });
+  } catch (err) {
+    console.error('❌ /raffle/pick-winner error', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+
+// 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
+const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql`;
 
 // Helper functions
 function generateVerificationCode() {
@@ -817,7 +1075,7 @@ function mapShopifyReasonToInternal(reason) {
 
 function mapShopifyStatusToInternal(status) {
   const mapping = {
-    'REQUESTED': 'pending',
+  'REQUESTED': 'requested',
     'OPEN': 'approved',
     'CLOSED': 'completed',
     'DECLINED': 'rejected',
@@ -846,66 +1104,63 @@ function getReasonDescription(reason) {
   return descriptions[reason] || 'Rücksendung angefordert';
 }
 
-// 🔥 ADDED: Check return eligibility using proper Customer Account API
+// 🔥 ADDED: Check return eligibility (version-safe query)
 async function checkShopifyReturnEligibility(orderId, customerToken) {
   try {
     console.log('🔍 Checking return eligibility for order:', orderId);
 
     const query = `
-      query returnableFulfillments($orderId: ID!) {
+      query checkReturnEligibility($orderId: ID!) {
         order(id: $orderId) {
           id
           name
           processedAt
-          fulfillmentStatus
-          financialStatus
-          returnableFulfillments(first: 10) {
-            edges {
-              node {
-                id
-                status
-                fulfillmentLineItems(first: 50) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                        title
-                        variant {
-                          id
-                          title
-                          image {
-                            url
-                          }
-                          price {
-                            amount
-                            currencyCode
-                          }
-                        }
-                      }
-                    }
+          displayFulfillmentStatus
+          displayFinancialStatus
+
+          fulfillments {
+            id
+            status
+            createdAt
+            fulfillmentLineItems(first: 250) {
+              edges {
+                node {
+                  id
+                  quantity
+                  lineItem {
+                    id
+                    title
                   }
                 }
               }
             }
           }
-          returns(first: 50) {
+
+          lineItems(first: 250) {
+            edges {
+              node {
+                id
+                title
+                quantity
+                fulfillableQuantity
+                variant {
+                  id
+                  title
+                  sku
+                  image { url altText }
+                  product { id title handle }
+                  price
+                }
+              }
+            }
+          }
+
+          returns(first: 10) {
             edges {
               node {
                 id
                 status
-                totalQuantity
-                returnLineItems(first: 50) {
-                  edges {
-                    node {
-                      fulfillmentLineItem {
-                        id
-                      }
-                      quantity
-                    }
-                  }
-                }
+                # returnLineItems shape varies across stores/API versions; do not request nested fulfillment fields here
               }
             }
           }
@@ -914,120 +1169,139 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
     `;
 
     const response = await axios.post(
-      CUSTOMER_ACCOUNT_API_URL,
-      {
-        query,
-        variables: { orderId }
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${customerToken}`,
-        }
-      }
+      config.adminApiUrl, // use Admin API for order-level queries (store-specific)
+      { query, variables: { orderId } },
+      { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
     );
 
-    if (response.data.errors) {
+    if (response.data?.errors) {
       console.error('GraphQL errors:', response.data.errors);
-      return {
-        eligible: false,
-        reason: 'Error checking eligibility',
-        returnableItems: []
-      };
+      return { eligible: false, reason: 'Error checking eligibility', returnableItems: [] };
     }
 
-    const order = response.data.data.order;
+    const order = response.data?.data?.order;
     if (!order) {
-      return {
-        eligible: false,
-        reason: 'Order not found',
-        returnableItems: []
-      };
+      return { eligible: false, reason: 'Order not found', returnableItems: [] };
     }
 
-    // Check order status
-    if (order.fulfillmentStatus !== 'FULFILLED') {
-      return {
-        eligible: false,
-        reason: 'Order must be fulfilled to be returned',
-        returnableItems: []
-      };
+    // Basic status checks (use display fields where available)
+    const fulfillmentStatus = order.displayFulfillmentStatus || '';
+    const financialStatus = order.displayFinancialStatus || '';
+
+    if (fulfillmentStatus.toUpperCase() !== 'FULFILLED' && fulfillmentStatus.toUpperCase() !== 'PARTIALLY_FULFILLED') {
+      return { eligible: false, reason: 'Order must be fulfilled to be returned', returnableItems: [] };
     }
 
-    if (['VOIDED', 'REFUNDED'].includes(order.financialStatus)) {
-      return {
-        eligible: false,
-        reason: 'Order has been voided or refunded',
-        returnableItems: []
-      };
+    if (['VOIDED', 'REFUNDED'].includes(financialStatus.toUpperCase())) {
+      return { eligible: false, reason: 'Order has been voided or refunded', returnableItems: [] };
     }
 
-    // Get returnable items
-    const returnableFulfillments = order.returnableFulfillments.edges || [];
-    const existingReturns = order.returns.edges || [];
-    
-    // Track items already returned
-    const returnedItemIds = new Set();
-    for (const returnEdge of existingReturns) {
-      const returnStatus = returnEdge.node.status;
-      if (['REQUESTED', 'OPEN', 'PROCESSING'].includes(returnStatus)) {
-        const returnLineItems = returnEdge.node.returnLineItems.edges || [];
-        for (const lineItemEdge of returnLineItems) {
-          const fulfillmentLineItemId = lineItemEdge.node.fulfillmentLineItem.id;
-          returnedItemIds.add(fulfillmentLineItemId);
+  // Collect already-returned fulfillment line item IDs
+    const existingReturns = order.returns?.edges || [];
+    const returnedFulfillmentLineItemIds = new Set();
+    for (const retEdge of existingReturns) {
+      const ret = retEdge.node;
+      const status = (ret.status || '').toUpperCase();
+      if (['REQUESTED', 'OPEN', 'PROCESSING', 'APPROVED'].includes(status)) {
+        const rlines = ret.returnLineItems?.edges || [];
+        for (const rl of rlines) {
+          const fulfillmentLineItem = rl.node?.fulfillmentLineItem;
+          if (fulfillmentLineItem && fulfillmentLineItem.id) returnedFulfillmentLineItemIds.add(fulfillmentLineItem.id);
         }
       }
     }
 
+    // Build returnable items list from fulfillments' fulfillmentLineItems
     const returnableItems = [];
-    
-    for (const fulfillmentEdge of returnableFulfillments) {
-      const fulfillment = fulfillmentEdge.node;
-      const lineItems = fulfillment.fulfillmentLineItems.edges || [];
-      
-      for (const lineItemEdge of lineItems) {
-        const fulfillmentLineItem = lineItemEdge.node;
-        const fulfillmentLineItemId = fulfillmentLineItem.id;
-        
-        // Skip if already returned
-        if (returnedItemIds.has(fulfillmentLineItemId)) {
-          continue;
-        }
-        
-        const lineItem = fulfillmentLineItem.lineItem;
-        const variant = lineItem.variant;
-        
+    // Build a quick lookup from order.lineItems by id to retrieve variant/image info
+    const lineItemMap = new Map();
+    const orderLineEdges = order.lineItems?.edges || [];
+    for (const le of orderLineEdges) {
+      const node = le.node || {};
+      const variant = node.variant || {};
+      lineItemMap.set(node.id, {
+        variantId: variant.id || null,
+        variantTitle: variant.title || null,
+        variantPrice: variant.price || null,
+        image: (variant.image && variant.image.url) ? variant.image.url : null,
+        productId: (variant.product && variant.product.id) ? variant.product.id : null,
+        productHandle: (variant.product && variant.product.handle) ? variant.product.handle : null,
+      });
+    }
+    const fulfillments = order.fulfillments || [];
+    for (const f of fulfillments) {
+      const fLineEdges = f.fulfillmentLineItems?.edges || [];
+      for (const fe of fLineEdges) {
+        const fl = fe.node;
+        if (!fl || !fl.id) continue;
+        if (returnedFulfillmentLineItemIds.has(fl.id)) continue; // skip already returned
+
+        const lineItem = fl.lineItem || {};
+        const mapped = lineItemMap.get(lineItem.id) || {};
         returnableItems.push({
-          id: lineItem.id,
-          fulfillmentLineItemId: fulfillmentLineItemId,
-          title: lineItem.title,
-          quantity: fulfillmentLineItem.quantity,
+          id: lineItem.id || null,
+          fulfillmentLineItemId: fl.id,
+          title: lineItem.title || 'Unknown',
+          quantity: fl.quantity || 0,
           variant: {
-            id: variant.id,
-            title: variant.title,
-            price: variant.price.amount,
-            image: variant.image?.url,
+            id: mapped.variantId || null,
+            title: mapped.variantTitle || null,
+            price: mapped.variantPrice || null,
+            image: mapped.image || null,
+            productId: mapped.productId || null,
+            productHandle: mapped.productHandle || null,
           },
         });
       }
     }
 
     console.log(`✅ Found ${returnableItems.length} returnable items`);
+    // Try to enrich returnable items with product variant lists so clients don't have to call storefront
+    for (let i = 0; i < returnableItems.length; i++) {
+      const it = returnableItems[i];
+      it.variants = [];
+      const productHandle = it.variant && it.variant.productHandle ? it.variant.productHandle : null;
+      const productId = it.variant && it.variant.productId ? it.variant.productId : null;
 
-    return {
-      eligible: returnableItems.length > 0,
-      reason: returnableItems.length === 0 ? 'No returnable items found' : null,
-      returnableItems: returnableItems,
-      existingReturns: existingReturns.length,
-    };
+      try {
+        let productResp = null;
+        if (productHandle) {
+          const q = `query productByHandle($handle: String!) { productByHandle(handle: $handle) { id title handle variants(first:50) { edges { node { id title sku availableForSale selectedOptions { name value } image { url altText } priceV2 { amount currencyCode } } } } }`;
+          const r = await axios.post(config.adminApiUrl, { query: q, variables: { handle: productHandle } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+          productResp = r.data?.data?.productByHandle || null;
+        }
+
+        if (!productResp && productId) {
+          const q2 = `query nodeById($id: ID!) { node(id: $id) { ... on Product { id title handle variants(first:50) { edges { node { id title sku availableForSale selectedOptions { name value } image { url altText } priceV2 { amount currencyCode } } } } } }`;
+          const r2 = await axios.post(config.adminApiUrl, { query: q2, variables: { id: productId } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } });
+          productResp = r2.data?.data?.node || null;
+        }
+
+        if (productResp) {
+          const edges = (productResp.variants && productResp.variants.edges) ? productResp.variants.edges : [];
+          it.variants = edges.map(e => {
+            const v = e.node || {};
+            return {
+              id: v.id || null,
+              title: v.title || null,
+              sku: v.sku || null,
+              availableForSale: v.availableForSale || false,
+              selectedOptions: v.selectedOptions || [],
+              image: v.image && v.image.url ? v.image.url : null,
+              price: v.priceV2 && v.priceV2.amount ? v.priceV2.amount : null,
+            };
+          });
+        }
+      } catch (e) {
+        // Non-fatal: leave variants empty
+        console.warn('Could not fetch variants for product', productHandle || productId, e?.message || e);
+      }
+    }
+    return { eligible: returnableItems.length > 0, reason: returnableItems.length === 0 ? 'No returnable items found' : null, returnableItems, existingReturns: existingReturns.length };
 
   } catch (error) {
-    console.error('❌ Error checking return eligibility:', error);
-    return {
-      eligible: false,
-      reason: 'Error checking return eligibility',
-      returnableItems: []
-    };
+    console.error('❌ Error checking return eligibility:', error?.response?.data || error?.message || error);
+    return { eligible: false, reason: 'Error checking return eligibility', returnableItems: [] };
   }
 }
 
@@ -1049,17 +1323,24 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       const matchingItem = eligibility.returnableItems.find(
         returnableItem => returnableItem.id === item.lineItemId
       );
-      
+
       if (!matchingItem) {
         throw new Error(`Item ${item.title} is not returnable`);
       }
-      
-      returnLineItems.push({
+
+      // Build payload for OrderReturnLineItemInput; include customerNote when available
+      const customerNote = item.reasonNote || item.customerNote || returnRequest.additionalNotes || '';
+      const line = {
         fulfillmentLineItemId: matchingItem.fulfillmentLineItemId,
         quantity: item.quantity,
-        returnReason: mapReasonToShopify(returnRequest.reason),
-        customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason),
-      });
+        returnReason: mapReasonToShopify(returnRequest.reason)
+      };
+      if (customerNote && customerNote.length > 0) line.customerNote = String(customerNote).substring(0, 255);
+      // Add resolution hint in the customerNote if provided (helps for Customer Account API flows)
+      if (returnRequest.preferredResolution) {
+        line.customerNote = (line.customerNote ? line.customerNote + ' | ' : '') + `preferredResolution:${returnRequest.preferredResolution}`;
+      }
+      returnLineItems.push(line);
     }
 
     // Use Customer Account API orderRequestReturn mutation
@@ -1103,14 +1384,25 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       }
     `;
 
+    // Sanitize payload before sending to Shopify Customer Account API and log the minimal shape
+    const sanitizedVariables = {
+      orderId: returnRequest.orderId,
+      returnLineItems: returnLineItems.map(li => ({
+        fulfillmentLineItemId: li.fulfillmentLineItemId,
+        quantity: Number(li.quantity || 1),
+  returnReason: li.returnReason,
+  // pass through customerNote when supported by the Customer Account API
+  ...(li.customerNote ? { customerNote: li.customerNote } : {})
+      }))
+    };
+
+    console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
+
     const response = await axios.post(
       CUSTOMER_ACCOUNT_API_URL,
       {
         query: mutation,
-        variables: {
-          orderId: returnRequest.orderId,
-          returnLineItems: returnLineItems,
-        },
+        variables: sanitizedVariables,
       },
       {
         headers: {
@@ -2814,11 +3106,18 @@ const authenticateAppToken = async (req, res, next) => {
   }
 
   const token = authHeader.substring(7);
+  // Non-sensitive debug: log token length and current session store size (do not log token value)
+  try {
+    console.log(`🔐 Authorization header present (token length: ${token.length}), sessions in memory: ${sessions.size}`);
+  } catch (e) {
+    console.log('🔐 Authorization debug logging skipped');
+  }
+
   let session = sessions.get(token);
-  
+
   if (!session) {
-    console.log(`❌ Session not found for token: ${token.substring(0, 20)}...`);
-    
+    console.log(`❌ Session not found for token prefix: ${token.substring(0, 8)}...`);
+
     // 🔥 FIX: Do NOT create temporary sessions - reject invalid tokens
     return res.status(401).json({ 
       error: 'Session expired or invalid',
@@ -2881,6 +3180,12 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 // Helper function to create Shopify customer access token for store credit functionality
 async function createShopifyCustomerAccessToken(customerEmail, customerId) {
   try {
+    // If Admin API token is not configured, skip Admin API calls and return null
+    if (!config.adminToken) {
+      console.log('⚠️ Admin token not configured - skipping shopify customer access token creation');
+      return null;
+    }
+
     console.log('🔑 Creating Shopify customer access token for:', customerEmail);
     
     // Since we don't have the customer's password (email verification system), 
@@ -2930,14 +3235,21 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
       }
     });
     
-    // Only create token if customer has store credit
+    // If Admin reports no store credit, consult local ledger before giving up
     if (totalStoreCredit <= 0) {
-      console.log(`💳 No store credit found (${totalStoreCredit}€) - no token needed`);
-      return null;
-      
-      // 🧪 TEMPORARY: Test store credit override (commented out to use real amounts)
-      // console.log('🧪 TESTING: Creating test store credit token (remove this in production!)');
-      // totalStoreCredit = 25.50; // Test amount
+      try {
+        const ledgerBalance = getStoreCredit(customerEmail || '');
+        if (ledgerBalance && Number(ledgerBalance) > 0) {
+          console.log(`💳 Admin reports 0 store credit, using ledger fallback: ${ledgerBalance}€`);
+          totalStoreCredit = Number(ledgerBalance);
+        } else {
+          console.log(`💳 No store credit found (${totalStoreCredit}€) - no token needed`);
+          return null;
+        }
+      } catch (e) {
+        console.log(`⚠️ Ledger fallback failed: ${e?.message || e} - no token created`);
+        return null;
+      }
     }
     
     console.log(`💰 Customer has store credit: ${totalStoreCredit}€ - creating access token`);
@@ -3057,23 +3369,40 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: { customerId: req.session.customerId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
+    let response;
+    try {
+      response = await axios.post(
+        config.adminApiUrl,
+        {
+          query,
+          variables: { customerId: req.session.customerId }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+    } catch (err) {
+      console.error('❌ Upstream Admin API error fetching profile:', err.message || err);
+      // If upstream returned a body (HTML or JSON), log a short preview but don't forward raw HTML
+      const upstreamBody = err.response?.data;
+      if (upstreamBody) {
+        try {
+          const preview = typeof upstreamBody === 'string' ? upstreamBody.substring(0, 400) : JSON.stringify(upstreamBody).substring(0,400);
+          console.error('❌ Upstream body preview:', preview);
+        } catch (e) {
+          // ignore preview errors
         }
       }
-    );
+      return res.status(502).json({ error: 'Upstream Admin API unavailable' });
+    }
 
-    if (response.data.errors) {
+    if (response.data?.errors) {
       console.error('❌ Profile fetch errors:', response.data.errors);
-      return res.status(500).json({ error: 'Failed to fetch profile' });
+      return res.status(502).json({ error: 'Failed to fetch profile from Admin API' });
     }
 
     const customer = response.data.data.customer;
@@ -3091,7 +3420,30 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
     });
 
     // 🔥 NEW: Create Shopify customer access token for store credit functionality
-    const shopifyCustomerAccessToken = await createShopifyCustomerAccessToken(customer.email, customer.id);
+    // createShopifyCustomerAccessToken will itself consult the Admin API and fall back to ledger
+    let shopifyCustomerAccessToken = await createShopifyCustomerAccessToken(customer.email, customer.id);
+
+    // If token was not created (Admin had 0) but we have a ledger balance, create a token using ledger balance
+    if (!shopifyCustomerAccessToken) {
+      try {
+        const ledgerBalance = getStoreCredit(customer.email);
+        if (ledgerBalance && Number(ledgerBalance) > 0) {
+          console.log(`💳 Creating shopify customer access token from ledger fallback: ${ledgerBalance}€`);
+          // Create a lightweight token here matching the createShopifyCustomerAccessToken shape
+          const tokenPayload = {
+            customerId: customer.id,
+            email: customer.email,
+            purpose: 'store_credit',
+            storeCredit: Number(ledgerBalance),
+            iat: Math.floor(Date.now() / 1000),
+            exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60)
+          };
+          shopifyCustomerAccessToken = jwt.sign(tokenPayload, config.privateKey, { algorithm: 'RS256' });
+        }
+      } catch (e) {
+        console.error('❌ Failed to create ledger-based shopifyCustomerAccessToken:', e?.message || e);
+      }
+    }
 
     // Transform response for Flutter app
     const profile = {
@@ -3105,8 +3457,8 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       updatedAt: customer.updatedAt,
       verified: customer.verifiedEmail,
       
-      // 🔥 NEW: Include Shopify customer access token for store credit
-      shopifyCustomerAccessToken: shopifyCustomerAccessToken,
+    // 🔥 NEW: Include server-side store credit token (not a Shopify shcat_ token)
+    storeCreditToken: shopifyCustomerAccessToken,
       
       // Marketing preferences
       acceptsEmailMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
@@ -3248,27 +3600,48 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: { customerId: req.session.customerId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
+    let response;
+    try {
+      response = await axios.post(
+        config.adminApiUrl,
+        {
+          query,
+          variables: { customerId: req.session.customerId }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
         }
+      );
+    } catch (err) {
+      console.error('❌ Upstream Admin API error fetching orders:', err.message || err);
+      const upstreamBody = err.response?.data;
+      if (upstreamBody) {
+        try {
+          const preview = typeof upstreamBody === 'string' ? upstreamBody.substring(0, 400) : JSON.stringify(upstreamBody).substring(0,400);
+          console.error('❌ Upstream body preview:', preview);
+        } catch (e) {}
       }
-    );
+      return res.status(502).json({ orders: [] });
+    }
 
-    if (response.data.errors) {
+    if (response.data?.errors) {
       console.error('❌ Orders fetch errors:', response.data.errors);
       return res.json({ orders: [] });
     }
 
     const orderEdges = response.data?.data?.customer?.orders?.edges || [];
     console.log(`✅ Successfully fetched ${orderEdges.length} orders using SIMPLE query`);
+    // Cache orders for this customer for quick fallback if Admin API is temporarily unavailable
+    try {
+      ordersCache.set(req.session.customerId, { ordersRaw: orderEdges, fetchedAt: Date.now() });
+      console.log('✅ Cached orders for customer:', req.session.customerId);
+    } catch (cacheErr) {
+      console.error('⚠️ Failed to cache orders:', cacheErr.message || cacheErr);
+    }
     
     // Transform orders for Flutter app
     const orders = orderEdges.map(edge => {
@@ -3382,7 +3755,48 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Orders fetch error:', error);
+    console.error('❌ Orders fetch error:', error.message || error);
+    // Try returning cached orders if available
+    const cached = ordersCache.get(req.session.customerId);
+    if (cached && cached.ordersRaw) {
+      console.log('🔁 Returning cached orders due to upstream failure');
+      const orderEdges = cached.ordersRaw || [];
+      const orders = orderEdges.map(edge => {
+        const order = edge.node;
+        return {
+          id: order.id,
+          name: order.name,
+          orderNumber: parseInt(order.name.replace('#', '')) || 0,
+          processedAt: order.processedAt,
+          createdAt: order.createdAt,
+          updatedAt: order.updatedAt,
+          fulfillmentStatus: order.displayFulfillmentStatus,
+          financialStatus: order.displayFinancialStatus,
+          totalPrice: { amount: order.currentTotalPriceSet?.shopMoney?.amount || '0.00', currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' },
+          subtotalPrice: { amount: order.currentSubtotalPriceSet?.shopMoney?.amount || '0.00', currencyCode: order.currentSubtotalPriceSet?.shopMoney?.currencyCode || 'EUR' },
+          totalShipping: { amount: order.totalShippingPriceSet?.shopMoney?.amount || '0.00', currencyCode: order.totalShippingPriceSet?.shopMoney?.currencyCode || 'EUR' },
+          totalTax: order.currentTotalTaxSet ? { amount: order.currentTotalTaxSet.shopMoney?.amount || '0.00', currencyCode: order.currentTotalTaxSet.shopMoney?.currencyCode || 'EUR' } : { amount: '0.00', currencyCode: 'EUR' },
+          shippingAddress: order.shippingAddress || null,
+          lineItems: order.lineItems?.edges?.map(item => {
+            const lineItem = item.node;
+            const variant = lineItem.variant;
+            if (!variant) return { id: lineItem.id, title: lineItem.title, quantity: lineItem.quantity, variant: null, totalPrice: { amount: '0.00', currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' } };
+            const itemPrice = parseFloat(variant.price || '0');
+            const quantity = lineItem.quantity || 0;
+            return { id: lineItem.id, title: lineItem.title, quantity: quantity, variant: { id: variant.id, title: variant.title, sku: variant.sku, price: variant.price, image: variant.image?.url || null, product: variant.product ? { id: variant.product.id, title: variant.product.title, handle: variant.product.handle } : null }, totalPrice: { amount: (itemPrice * quantity).toFixed(2), currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' } };
+          }).filter(item => item !== null) || [],
+          note: order.note || '',
+          tags: order.tags || [],
+          phone: order.phone || '',
+          email: order.email || '',
+          canReorder: order.displayFulfillmentStatus === 'FULFILLED',
+          canReturn: order.displayFulfillmentStatus === 'FULFILLED' && order.displayFinancialStatus !== 'REFUNDED'
+        };
+      });
+
+      return res.json({ orders: orders, pagination: { hasNextPage: false, currentPage: 1, totalShown: orders.length }, cached: true });
+    }
+
     res.json({ orders: [] });
   }
 });
@@ -4626,7 +5040,11 @@ app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
           } : null,
           
           items: returnItem.returnLineItems.edges.map(itemEdge => {
-            const returnLineItem = itemEdge.node;
+            const returnLineItem = itemEdge.node || {};
+            // defensive extraction: some Admin schemas don't expose fulfillmentLineItem or nested lineItem
+            const fulfillmentLineItem = returnLineItem.fulfillmentLineItem || null;
+            const nestedLineItem = fulfillmentLineItem?.lineItem || returnLineItem.lineItem || null;
+
             return {
               id: returnLineItem.id,
               quantity: returnLineItem.quantity,
@@ -4637,15 +5055,15 @@ app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
               refundableQuantity: returnLineItem.refundableQuantity,
               refunded: returnLineItem.refunded,
               restocked: returnLineItem.restocked,
-              
+
               originalItem: {
-                id: returnLineItem.fulfillmentLineItem.id,
-                quantity: returnLineItem.fulfillmentLineItem.quantity,
-                lineItem: {
-                  id: returnLineItem.fulfillmentLineItem.lineItem.id,
-                  title: returnLineItem.fulfillmentLineItem.lineItem.title,
-                  variant: returnLineItem.fulfillmentLineItem.lineItem.variant
-                }
+                id: fulfillmentLineItem?.id || returnLineItem.id || null,
+                quantity: fulfillmentLineItem?.quantity || returnLineItem.quantity || 0,
+                lineItem: nestedLineItem ? {
+                  id: nestedLineItem.id || null,
+                  title: nestedLineItem.title || nestedLineItem.name || 'Unknown',
+                  variant: nestedLineItem.variant || null
+                } : null
               }
             };
           })
@@ -8707,191 +9125,67 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
       });
     }
 
-    console.log('🔍 Checking return eligibility for order:', orderId);
+    // Non-sensitive debug: log that eligibility check was received and which user requested it
+    try {
+      console.log(`🔍 Checking return eligibility for order: ${orderId} (user: ${customerEmail})`);
+    } catch (e) {
+      console.log('🔍 Checking return eligibility (user unknown)');
+    }
     
     // 🔥 REMOVED: await ensureValidShopifyToken(customerEmail);
     console.log('🔍 Using Shopify Admin API directly to check return eligibility...');
 
-    // Get real order data to check return eligibility
-    const query = `
-      query checkReturnEligibility($orderId: ID!) {
-        order(id: $orderId) {
-          id
-          name
-          processedAt
-          displayFulfillmentStatus
-          displayFinancialStatus
-          lineItems(first: 250) {
-            edges {
-              node {
-                id
-                title
-                quantity
-                fulfillableQuantity
-                variant {
-                  id
-                  title
-                  sku
-                  price {
-                    amount
-                    currencyCode
-                  }
-                  image {
-                    url
-                    altText
-                  }
-                  product {
-                    id
-                    title
-                    handle
-                  }
-                }
-              }
+    // Resolve order identifier: accept full GID or plain order number (e.g. 135798)
+    let resolvedOrderId = orderId;
+    try {
+      if (!String(orderId).startsWith('gid://')) {
+        // Try searching orders by name (Shopify order name is usually like "#135798" or "135798")
+        const searchQueries = [
+          `name:${orderId}`,
+          `name:#${orderId}`,
+        ];
+
+        let foundOrder = null;
+        for (const q of searchQueries) {
+          try {
+            const findQuery = `query findOrder($query: String!) { orders(first:1, query: $query) { edges { node { id name } } } }`;
+            const findResp = await axios.post(
+              config.adminApiUrl,
+              { query: findQuery, variables: { query: q } },
+              { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+            );
+            const node = findResp.data?.data?.orders?.edges?.[0]?.node;
+            if (node && node.id) {
+              foundOrder = node;
+              break;
             }
-          }
-          fulfillments(first: 10) {
-            edges {
-              node {
-                id
-                status
-                createdAt
-                fulfillmentLineItems(first: 250) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                        title
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-          returns(first: 10) {
-            edges {
-              node {
-                id
-                status
-                returnLineItems(first: 250) {
-                  edges {
-                    node {
-                      fulfillmentLineItem {
-                        lineItem {
-                          id
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+          } catch (err) {
+            // continue to next pattern
           }
         }
-      }
-    `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: { orderId }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
+        if (foundOrder && foundOrder.id) {
+          resolvedOrderId = foundOrder.id;
+          console.log(`🔎 Resolved order number ${orderId} -> ${resolvedOrderId}`);
+        } else {
+          console.log(`❌ Could not resolve order identifier: ${orderId}`);
+          return res.status(404).json({ eligible: false, reason: 'Order not found', returnableItems: [] });
         }
       }
-    );
-
-    if (response.data.errors) {
-      console.error('❌ Return eligibility check errors:', response.data.errors);
-      return res.status(404).json({
-        eligible: false,
-        reason: 'Order not found',
-        returnableItems: []
-      });
+    } catch (err) {
+      console.error('❌ Error resolving order identifier:', err?.message || err);
+      return res.status(500).json({ eligible: false, reason: 'Internal error resolving order', returnableItems: [] });
     }
 
-    const order = response.data.data.order;
-    if (!order) {
-      return res.status(404).json({
-        eligible: false,
-        reason: 'Order not found',
-        returnableItems: []
-      });
+    // Delegate to the shared, API-version-safe eligibility checker
+    try {
+      const eligibility = await checkShopifyReturnEligibility(resolvedOrderId, null);
+      // ensure we always return a consistent shape
+      return res.json(Object.assign({ existingReturns: eligibility.existingReturns ?? 0 }, eligibility));
+    } catch (err) {
+      console.error('❌ Error delegating eligibility check:', err?.message || err);
+      return res.status(500).json({ eligible: false, reason: 'Error checking return eligibility', returnableItems: [] });
     }
-
-    // Check basic return eligibility
-    const canReturn = order.displayFulfillmentStatus === 'FULFILLED' && 
-                     order.displayFinancialStatus !== 'REFUNDED';
-
-    if (!canReturn) {
-      return res.json({
-        eligible: false,
-        reason: order.displayFulfillmentStatus !== 'FULFILLED' ? 
-                'Order must be fulfilled to be returned' :
-                'Order has already been refunded',
-        returnableItems: []
-      });
-    }
-
-    // Get items already returned
-    const returnedLineItemIds = new Set();
-    order.returns.edges.forEach(returnEdge => {
-      returnEdge.node.returnLineItems.edges.forEach(returnLineItemEdge => {
-        const lineItemId = returnLineItemEdge.node.fulfillmentLineItem.lineItem.id;
-        returnedLineItemIds.add(lineItemId);
-      });
-    });
-
-    // Build returnable items list
-    const returnableItems = [];
-    order.lineItems.edges.forEach(lineItemEdge => {
-      const lineItem = lineItemEdge.node;
-      
-      // Skip if already returned
-      if (returnedLineItemIds.has(lineItem.id)) {
-        return;
-      }
-
-      // Add to returnable items
-      returnableItems.push({
-        id: lineItem.id,
-        lineItemId: lineItem.id,
-        fulfillmentLineItemId: `fulfillment_${lineItem.id}`,
-        title: lineItem.title,
-        quantity: lineItem.quantity,
-        variant: {
-          id: lineItem.variant.id,
-          title: lineItem.variant.title,
-          sku: lineItem.variant.sku,
-          price: lineItem.variant.price.amount,
-          image: lineItem.variant.image?.url || 'https://via.placeholder.com/150',
-          product: lineItem.variant.product
-        }
-      });
-    });
-
-    const eligibility = {
-      eligible: returnableItems.length > 0,
-      reason: returnableItems.length === 0 ? 'No returnable items found' : null,
-      returnableItems: returnableItems,
-      existingReturns: order.returns.edges.length,
-      orderInfo: {
-        id: order.id,
-        name: order.name,
-        processedAt: order.processedAt,
-        fulfillmentStatus: order.displayFulfillmentStatus,
-        financialStatus: order.displayFinancialStatus
-      }
-    };
-    
-    console.log(`✅ Return eligibility checked using Admin API - ${returnableItems.length} returnable items`);
-    res.json(eligibility);
     
   } catch (error) {
     console.error('❌ Error checking return eligibility:', error);
@@ -8929,98 +9223,62 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
     // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
     if (config.adminToken) {
-      console.log('🚀 Using Admin API for return creation...');
-      
+      console.log('🚀 Using Admin API for return creation (safer path)...');
       try {
-        // Step 1: Fetch order fulfillments via Admin API
-        const orderQuery = `
-          query getOrderFulfillments($orderId: ID!) {
-            order(id: $orderId) {
-              id
-              name
-              fulfillments {
-                id
-                status
-                fulfillmentLineItems(first: 50) {
-                  edges {
-                    node {
-                      id
-                      quantity
-                      lineItem {
-                        id
-                        title
-                        variant {
-                          id
-                          title
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }`;
-        
-        const orderResponse = await axios.post(config.adminApiUrl, {
-          query: orderQuery,
-          variables: { orderId: returnRequest.orderId }
-        }, {
-          headers: {
-            'X-Shopify-Access-Token': config.adminToken,
-            'Content-Type': 'application/json',
-          }
-        });
-
-        if (orderResponse.data.errors) {
-          throw new Error('GraphQL errors: ' + JSON.stringify(orderResponse.data.errors));
+        // Reuse the API-version-safe eligibility checker to get fulfillmentLineItem IDs
+        const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
+        if (!eligibility || !eligibility.eligible || !Array.isArray(eligibility.returnableItems) || eligibility.returnableItems.length === 0) {
+          throw new Error(eligibility?.reason || 'No returnable items available via Admin API');
         }
 
-        const order = orderResponse.data.data.order;
-        if (!order) {
-          throw new Error('Order not found');
-        }
-
-        // Map return reason to Shopify enum values
-        const mapReturnReason = (reason) => {
-          switch (reason) {
-            case 'defective':
-            case 'damage':
-              return 'DEFECTIVE';
-            case 'color_finish':
-            case 'wrong_item':
-              return 'NOT_AS_DESCRIBED';
-            case 'size':
-              return 'SIZE_TOO_LARGE'; // or SIZE_TOO_SMALL
-            case 'unwanted':
-            case 'changed_mind':
-            default:
-              return 'UNWANTED';
-          }
-        };
-
-        // Step 2: Map items to fulfillmentLineItemIds
+        // Map return request items to fulfillmentLineItemIds from eligibility result
         const returnLineItems = [];
-        for (const requestedItem of returnRequest.items) {
-          for (const fulfillment of order.fulfillments) {
-            for (const fulfillmentLineItemEdge of fulfillment.fulfillmentLineItems.edges) {
-              const fulfillmentLineItem = fulfillmentLineItemEdge.node;
-              if (fulfillmentLineItem.lineItem.id === requestedItem.lineItemId) {
-                returnLineItems.push({
-                  fulfillmentLineItemId: fulfillmentLineItem.id,
-                  quantity: Math.min(requestedItem.quantity, fulfillmentLineItem.quantity),
-                  returnReason: mapReturnReason(returnRequest.reason),
-                  customerNote: returnRequest.additionalNotes || getReasonDescription(returnRequest.reason)
-                });
-              }
-            }
+        const mapReturnReason = (reason) => mapReasonToShopify(reason || 'other');
+
+        for (const requestedItem of returnRequest.items || []) {
+          const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId || ri.title === requestedItem.title);
+          if (!match) {
+            console.log('⚠️ Requested item not found among returnable items:', requestedItem);
+            continue;
           }
+
+          const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
+          if (qty <= 0) continue;
+
+          // Build Admin ReturnLineItem input - include reason note if provided
+          const lineItemInput = {
+            fulfillmentLineItemId: match.fulfillmentLineItemId,
+            quantity: qty,
+            returnReason: mapReturnReason(returnRequest.reason)
+          };
+
+          // If the customer provided per-item notes or an overall additionalNotes, include as returnReasonNote
+          const perItemNote = requestedItem.reasonNote || requestedItem.customerNote || returnRequest.additionalNotes || '';
+          if (perItemNote && perItemNote.length > 0) {
+            lineItemInput.returnReasonNote = String(perItemNote).substring(0, 255);
+          }
+
+          returnLineItems.push(lineItemInput);
         }
 
         if (returnLineItems.length === 0) {
-          throw new Error('No matching fulfillment line items found for return');
+          throw new Error('No matching fulfillment line items found for return (Admin API)');
         }
 
-        // Step 3: Create return via Admin API returnCreate mutation
+        // Build exchangeLineItems when customer requests an exchange
+        const exchangeLineItems = [];
+        if ((returnRequest.preferredResolution || '').toLowerCase() === 'exchange') {
+          for (const requestedItem of returnRequest.items || []) {
+            const qty = Number(requestedItem.quantity || 1);
+            const requestedVariant = requestedItem.requestedExchangeVariantId || requestedItem.exchangeVariantId || null;
+            if (requestedVariant && qty > 0) {
+              exchangeLineItems.push({
+                variantId: requestedVariant,
+                quantity: qty
+              });
+            }
+          }
+        }
         const returnMutation = `
           mutation returnCreate($returnInput: ReturnInput!) {
             returnCreate(returnInput: $returnInput) {
@@ -9039,59 +9297,57 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         const returnInput = {
           orderId: returnRequest.orderId,
           returnLineItems: returnLineItems,
-          notifyCustomer: true,
-          note: `Return Request Details:
-Reason: ${returnRequest.reason}
-Preferred Resolution: ${returnRequest.preferredResolution || 'refund'}
-${returnRequest.additionalNotes ? 'Additional Notes: ' + returnRequest.additionalNotes : ''}
-
-Customer Email: ${customerEmail}`
+          notifyCustomer: true
         };
 
-        console.log('🔥 Creating return with Admin API:', {
-          returnInput: returnInput,
-          returnLineItemsCount: returnLineItems.length
-        });
+        // Attach exchangeLineItems when present (Admin API supports ExchangeLineItemInput)
+        if (exchangeLineItems.length > 0) {
+          returnInput.exchangeLineItems = exchangeLineItems;
+        }
+
+        // Sanitize Admin payload: remove unsupported root-level fields like `note` before sending
+        const sanitizedReturnInput = Object.assign({}, returnInput);
+
+        console.log('🔥 Creating return with Admin API (delegated) - sanitized payload:', { returnLineItemsCount: returnLineItems.length });
 
         const returnResponse = await axios.post(config.adminApiUrl, {
           query: returnMutation,
-          variables: { returnInput: returnInput }
+          variables: { returnInput: sanitizedReturnInput }
         }, {
           headers: {
             'X-Shopify-Access-Token': config.adminToken,
-            'Content-Type': 'application/json',
+            'Content-Type': 'application/json'
           }
         });
 
         if (returnResponse.data.errors) {
-          throw new Error('GraphQL errors: ' + JSON.stringify(returnResponse.data.errors));
+          console.error('❌ Admin returnCreate GraphQL errors:', returnResponse.data.errors);
+          throw new Error('Admin API returnCreate failed');
         }
 
-        const returnResult = returnResponse.data.data.returnCreate;
-        if (returnResult.userErrors && returnResult.userErrors.length > 0) {
-          throw new Error('Return creation failed: ' + returnResult.userErrors.map(e => e.message).join(', '));
+        const returnResult = returnResponse.data.data?.returnCreate;
+        const userErrors = returnResult?.userErrors || [];
+        if (userErrors.length > 0) {
+          console.error('❌ Admin returnCreate userErrors:', userErrors);
+          throw new Error('Return creation failed: ' + userErrors.map(u => u.message).join('; '));
         }
 
-        const createdReturn = returnResult.return;
+        const createdReturn = returnResult?.return;
+        if (!createdReturn || !createdReturn.id) {
+          throw new Error('Admin API did not return created return');
+        }
+
         console.log('✅ Return created via Admin API:', createdReturn.id);
-
-        return res.json({
-          success: true,
-          returnId: createdReturn.id,
-          returnName: createdReturn.name,
-          status: createdReturn.status,
-          method: 'admin_api'
-        });
+        return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: createdReturn.status, method: 'admin_api' });
 
       } catch (adminError) {
-        console.error('❌ Admin API failed:', adminError.message);
-        console.log('🔄 Falling back to Customer Account API...');
+        console.error('❌ Admin API path failed (will fallback):', adminError?.message || adminError);
         // Fall through to Customer Account API
       }
     }
 
-    // Step 1: Submit to Shopify using Customer Account API
-    const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+  // Step 1: Submit to Shopify using Customer Account API (fallback path)
+  const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
     
     if (!shopifyResult.success) {
       return res.status(400).json({
@@ -9107,7 +9363,15 @@ Customer Email: ${customerEmail}`
       shopifyStatus: shopifyResult.status,
       customerEmail: customerEmail,
       requestDate: new Date().toISOString(),
-      status: 'pending',
+      status: mapShopifyStatusToInternal(shopifyResult.status),
+      preferredResolution: returnRequest.preferredResolution || 'refund',
+      // Keep requested exchange variants per item for backend tracking
+      items: (returnRequest.items || []).map(it => ({
+        lineItemId: it.lineItemId,
+        quantity: it.quantity,
+        requestedExchangeVariantId: it.requestedExchangeVariantId || it.exchangeVariantId || null,
+        reason: it.reason || returnRequest.reason || 'other'
+      }))
     };
 
     // Here you would save to your database
@@ -9211,6 +9475,50 @@ app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, r
   }
 });
 
+// GET /orders/:orderId/returns - return history for a specific order
+app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const customerToken = req.headers.authorization?.substring(7);
+    const customerEmail = req.session.email;
+
+    if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
+
+    let results = [];
+
+    // Try Customer Account API first (requires customer token)
+    if (customerToken) {
+      try {
+        const allReturns = await getShopifyCustomerReturns(customerToken);
+        results = allReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
+        console.log(`🔎 Found ${results.length} returns for order ${orderId} via Customer Account API`);
+      } catch (err) {
+        console.log('⚠️ Customer Account API failed for order returns:', err.message);
+      }
+    }
+
+    // If none or to supplement, try Admin API
+    if (config.adminToken) {
+      try {
+        const adminReturns = await getAdminApiReturns(customerEmail);
+        const matchingAdmin = adminReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
+        console.log(`🔎 Found ${matchingAdmin.length} returns for order ${orderId} via Admin API`);
+        // Merge unique by id
+        const byId = new Map();
+        for (const r of [...results, ...matchingAdmin]) byId.set(r.id, r);
+        results = Array.from(byId.values());
+      } catch (err) {
+        console.log('⚠️ Admin API order-returns fetch failed:', err.message);
+      }
+    }
+
+    res.json({ success: true, orderId, returns: results });
+  } catch (error) {
+    console.error('❌ Error fetching order returns:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch order returns' });
+  }
+});
+
 // POST /returns/:returnId/cancel - Cancel return request
 app.post('/returns/:returnId/cancel', authenticateAppToken, async (req, res) => {
   try {
@@ -9265,59 +9573,80 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query,
-        variables: {
-          customerId: req.session.customerId
-        }
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    console.log('Store credit response status:', response.status);
-    console.log('Store credit response success:', !response.data.errors);
-
-    if (response.data.errors) {
-      console.error('GraphQL errors:', response.data.errors);
-      
-      const metafieldQuery = `
-        query getCustomerMetafield($customerId: ID!) {
-          customer(id: $customerId) {
-            metafield(namespace: "customer", key: "store_credit") {
-              value
-            }
-          }
-        }
-      `;
-      
-      const metafieldResponse = await axios.post(
+    let response;
+    try {
+      response = await axios.post(
         config.adminApiUrl,
         {
-          query: metafieldQuery,
-          variables: { customerId: req.session.customerId }
+          query,
+          variables: {
+            customerId: req.session.customerId
+          }
         },
         {
           headers: {
             'X-Shopify-Access-Token': config.adminToken,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: 10000
         }
       );
+    } catch (err) {
+      console.error('❌ Upstream Admin API error fetching store credit:', err.message || err);
+      const upstreamBody = err.response?.data;
+      if (upstreamBody) {
+        try {
+          const preview = typeof upstreamBody === 'string' ? upstreamBody.substring(0, 400) : JSON.stringify(upstreamBody).substring(0,400);
+          console.error('❌ Upstream body preview:', preview);
+        } catch (e) {}
+      }
+      return res.status(502).json({ amount: 0.0, currency: 'EUR' });
+    }
+
+    console.log('Store credit response status:', response.status);
+    console.log('Store credit response success:', !response.data.errors);
+
+    if (response.data?.errors) {
+      console.error('GraphQL errors:', response.data.errors);
       
-      const metafield = metafieldResponse.data?.data?.customer?.metafield;
-      const creditAmount = metafield?.value ? parseFloat(metafield.value) : 0.0;
-      
-      return res.json({
-        amount: creditAmount,
-        currency: 'EUR'
-      });
+      // Try fallback to metafield, but wrap in try/catch too
+      try {
+        const metafieldQuery = `
+          query getCustomerMetafield($customerId: ID!) {
+            customer(id: $customerId) {
+              metafield(namespace: "customer", key: "store_credit") {
+                value
+              }
+            }
+          }
+        `;
+        
+        const metafieldResponse = await axios.post(
+          config.adminApiUrl,
+          {
+            query: metafieldQuery,
+            variables: { customerId: req.session.customerId }
+          },
+          {
+            headers: {
+              'X-Shopify-Access-Token': config.adminToken,
+              'Content-Type': 'application/json'
+            },
+            timeout: 8000
+          }
+        );
+        
+        const metafield = metafieldResponse.data?.data?.customer?.metafield;
+        const creditAmount = metafield?.value ? parseFloat(metafield.value) : 0.0;
+        
+        return res.json({
+          amount: creditAmount,
+          currency: 'EUR'
+        });
+      } catch (metaErr) {
+        console.error('❌ Metafield fallback failed:', metaErr.message || metaErr);
+        return res.status(502).json({ amount: 0.0, currency: 'EUR' });
+      }
     }
 
     let totalCredit = 0.0;
@@ -9329,11 +9658,25 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       }
     });
     
-    console.log('Total store credit:', totalCredit);
+    console.log('Total store credit (Admin):', totalCredit);
+
+    // If Admin reports zero, try ledger fallback
+    if (!totalCredit || Number(totalCredit) <= 0) {
+      try {
+        const ledgerBalance = getStoreCredit(req.session.email);
+        if (ledgerBalance && Number(ledgerBalance) > 0) {
+          console.log('💳 Returning ledger balance as fallback:', ledgerBalance);
+          return res.json({ amount: Number(ledgerBalance), currency: 'EUR', source: 'ledger' });
+        }
+      } catch (e) {
+        console.error('❌ Ledger fallback failed while fetching store credit:', e?.message || e);
+      }
+    }
 
     res.json({
       amount: totalCredit,
-      currency: 'EUR'
+      currency: 'EUR',
+      source: 'admin'
     });
   } catch (error) {
     console.error('Store credit error:', error.response?.data || error.message);
@@ -10975,11 +11318,11 @@ app.post('/debug/returns/test', async (req, res) => {
       });
     }
 
-    // Map return items
+    // Map return items (use global helper)
     const returnLineItems = items.map(item => ({
       fulfillmentLineItemId: item.fulfillmentLineItemId,
       quantity: item.quantity,
-      returnReason: mapReturnReason(item.reason)
+      returnReason: mapReasonToShopify(item.reason)
     }));
 
     console.log('🧪 [DEBUG] Mapped return line items:', JSON.stringify(returnLineItems, null, 2));
@@ -12670,62 +13013,49 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Step 2: Deduct store credit from customer account
-    const deductStoreCreditMutation = `
-      mutation storeCreditAccountDebit($storeCreditAccountDebit: StoreCreditAccountDebitInput!) {
-        storeCreditAccountDebit(storeCreditAccountDebit: $storeCreditAccountDebit) {
-          storeCreditAccountTransaction {
-            id
-            account {
-              balance {
-                amount
-              }
-            }
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
+    // Step 2: Deduct store credit from customer account using resilient helper
+    const amountStrDebit = Number(amountToDeduct).toFixed(2);
+  const debitResult = await tryDebitWithFallbacks({ customerGid: customer.id, storeCreditAccountId, amountStr: amountStrDebit });
 
-    const debitInput = {
-      storeCreditAccountDebit: {
-        storeCreditAccountId: storeCreditAccountId,
-        amount: amountToDeduct.toString(),
-        note: `Store credit used for checkout - ${amountToDeduct}€`
-      }
-    };
-
-    const debitResponse = await axios.post(
-      config.adminApiUrl,
-      {
-        query: deductStoreCreditMutation,
-        variables: debitInput
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    const debitData = debitResponse.data?.data?.storeCreditAccountDebit;
-    const debitErrors = debitData?.userErrors || [];
-
-    if (debitErrors.length > 0) {
-      console.error('❌ Error deducting store credit:', debitErrors);
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to deduct store credit',
-        details: debitErrors
-      });
+    // By default we require an authoritative Admin GraphQL debit to succeed.
+    // If ENABLE_STORE_CREDIT_FALLBACK=true is set in env, older fallback behavior
+    // (create discount + adjust local ledger) will be allowed. Otherwise return an error.
+    if (!debitResult.success) {
+      console.error('❌ All debit attempts failed:', JSON.stringify(debitResult.errors || debitResult, null, 2));
+      // No fallback: require authoritative debit to succeed.
+      return res.status(502).json({ success: false, error: 'Authoritative debit failed', debugInfo: debitResult.errors || debitResult });
     }
 
-    const newBalance = debitData?.storeCreditAccountTransaction?.account?.balance?.amount || '0';
-    console.log(`✅ Store credit deducted. New balance: ${newBalance}€`);
+    // If we reach here and the debit succeeded, tryDebitWithFallbacks returned a response we can inspect
+    const chosenResp = debitResult.response;
+    const debitData = chosenResp?.data?.storeCreditAccountDebit || chosenResp?.data?.storeCreditAccountDebit || chosenResp?.data?.storeCreditAccountDebit;
+    const bestEffortNewBalance = debitData?.transaction?.amount?.amount || debitData?.storeCreditAccountTransaction?.account?.balance?.amount || null;
+    if (bestEffortNewBalance) console.log(`✅ Store credit deducted (via ${debitResult.attempt}). Reported new balance (best-effort): ${bestEffortNewBalance}€`);
+
+    // Fetch authoritative balances from Shopify and persist to local ledger
+    try {
+      const balResAfter = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customer.id });
+      const accountsAfter = balResAfter?.data?.customer?.storeCreditAccounts?.edges || [];
+      const balancesAfter = accountsAfter.map(e => e.node.balance);
+      const totalBalanceAfter = balancesAfter.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+      const totalBalanceStr = toMoneyString(totalBalanceAfter);
+      console.log(`🔁 Authoritative Shopify balance after debit: ${totalBalanceStr}€`);
+
+      // Persist into local ledger so debug endpoints and client see consistent data
+      try {
+        setStoreCredit(customerEmail, Number(totalBalanceStr));
+        await persistStoreCreditLedger();
+        console.log(`💾 Persisted authoritative balance ${totalBalanceStr}€ for ${customerEmail} to local ledger`);
+      } catch (e) {
+        console.error('❌ Failed to persist authoritative balance to ledger:', e?.message || e);
+      }
+
+  // Use authoritative balance for responses
+  var authoritativeBalance = totalBalanceStr;
+    } catch (e) {
+      console.error('❌ Failed to fetch authoritative balance after debit:', e?.message || e);
+  var authoritativeBalance = bestEffortNewBalance || getStoreCredit(customerEmail) || '0';
+    }
 
     // Step 3: Create a discount code equivalent to the deducted amount
     const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
@@ -12828,7 +13158,7 @@ app.post('/apply-store-credit', async (req, res) => {
       message: 'Store credit deducted and discount code created',
       discountCode: createdDiscountCode,
       appliedStoreCredit: amountToDeduct,
-      newStoreCreditBalance: parseFloat(newBalance),
+      newStoreCreditBalance: Number(authoritativeBalance),
       customerId: customer.id
     });
 
