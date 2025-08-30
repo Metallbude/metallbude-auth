@@ -3467,9 +3467,43 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
         totalStoreCredit += parseFloat(edge.node.balance.amount);
       }
     });
-
+    
     // 🔥 NEW: Create Shopify customer access token for store credit functionality
-    const shopifyCustomerAccessToken = await createShopifyCustomerAccessToken(customer.email, customer.id);
+    // Prefer Admin API-derived balance, but FALL BACK to local ledger when Admin reports 0
+    let shopifyCustomerAccessToken = null;
+
+    if (totalStoreCredit > 0) {
+      // Admin API shows a positive balance -> try to create the token via Admin-aware helper
+      shopifyCustomerAccessToken = await createShopifyCustomerAccessToken(customer.email, customer.id);
+    } else {
+      // Admin shows zero - check the local persistent ledger as a fallback
+      try {
+        const ledgerAmount = getStoreCredit(customer.email);
+        if (ledgerAmount > 0) {
+          totalStoreCredit = Number(ledgerAmount || 0);
+          // Create a short-lived server-signed token representing store credit (NOT a Shopify shcat_ token)
+          const tokenPayload = {
+            customerId: customer.id,
+            email: customer.email,
+            purpose: 'store_credit',
+            storeCredit: totalStoreCredit,
+            iat: Math.floor(Date.now() / 1000),
+            exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
+          };
+          try {
+            shopifyCustomerAccessToken = jwt.sign(tokenPayload, config.privateKey, { algorithm: 'RS256' });
+            console.log(`🧾 Created server store-credit token from local ledger for ${customer.email} (${totalStoreCredit} EUR)`);
+          } catch (e) {
+            console.error('❌ Failed to sign store-credit token from ledger:', e?.message || e);
+            shopifyCustomerAccessToken = null;
+          }
+        } else {
+          console.log(`💳 No store credit found (Admin: 0, Ledger: ${ledgerAmount || 0})`);
+        }
+      } catch (e) {
+        console.error('❌ Ledger fallback error:', e?.message || e);
+      }
+    }
 
     // Transform response for Flutter app
     const profile = {
