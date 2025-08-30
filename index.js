@@ -558,6 +558,37 @@ app.get('/debug/store-credit', async (req, res) => {
   return res.json({ email, balance: getStoreCredit(email) });
 });
 
+// 🔧 DEBUG: Return admin vs ledger store credit for the current authenticated customer
+app.get('/debug/customer-store-credit', authenticateAppToken, async (req, res) => {
+  try {
+    const customerEmail = req.session.email;
+    if (!customerEmail) return res.status(400).json({ success: false, error: 'No customer in session' });
+
+    // Admin-derived balance (if admin token present and available in previous query path)
+    let adminBalance = 0;
+    try {
+      if (config.adminToken) {
+        const query = `query getCustomerStoreCredit($customerId: ID!) { customer(id: $customerId) { storeCreditAccounts(first:10) { edges { node { balance { amount currencyCode } } } } } }`;
+        const resp = await axios.post(config.adminApiUrl, { query, variables: { customerId: req.session.customerId } }, { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' }, timeout: 8000 });
+        const edges = resp.data?.data?.customer?.storeCreditAccounts?.edges || [];
+        edges.forEach(e => { if (e.node?.balance?.amount) adminBalance += parseFloat(e.node.balance.amount); });
+      }
+    } catch (e) {
+      console.error('❌ Debug admin balance fetch failed:', e?.message || e);
+    }
+
+    const ledgerBalance = Number(getStoreCredit(customerEmail) || 0);
+
+    // Indicate whether a server-side store credit token would be created (heuristic)
+    const tokenWouldBeCreated = (adminBalance > 0) || (ledgerBalance > 0);
+
+    return res.json({ success: true, email: customerEmail, adminBalance, ledgerBalance, tokenWouldBeCreated });
+  } catch (e) {
+    console.error('❌ Debug customer-store-credit failed:', e?.message || e);
+    return res.status(500).json({ success: false, error: 'internal' });
+  }
+});
+
 app.post('/debug/store-credit/adjust', express.json(), async (req, res) => {
   const email = (req.body?.email || '').toLowerCase();
   const delta = Number(req.body?.delta || 0);
@@ -3471,16 +3502,18 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
     // 🔥 NEW: Create Shopify customer access token for store credit functionality
     // Prefer Admin API-derived balance, but FALL BACK to local ledger when Admin reports 0
     let shopifyCustomerAccessToken = null;
+    let adminDerivedCredit = Number(totalStoreCredit || 0);
+    let ledgerDerivedCredit = 0;
 
-    if (totalStoreCredit > 0) {
+    if (adminDerivedCredit > 0) {
       // Admin API shows a positive balance -> try to create the token via Admin-aware helper
       shopifyCustomerAccessToken = await createShopifyCustomerAccessToken(customer.email, customer.id);
     } else {
       // Admin shows zero - check the local persistent ledger as a fallback
       try {
-        const ledgerAmount = getStoreCredit(customer.email);
-        if (ledgerAmount > 0) {
-          totalStoreCredit = Number(ledgerAmount || 0);
+        ledgerDerivedCredit = Number(getStoreCredit(customer.email) || 0);
+        if (ledgerDerivedCredit > 0) {
+          totalStoreCredit = ledgerDerivedCredit;
           // Create a short-lived server-signed token representing store credit (NOT a Shopify shcat_ token)
           const tokenPayload = {
             customerId: customer.id,
@@ -3498,7 +3531,7 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
             shopifyCustomerAccessToken = null;
           }
         } else {
-          console.log(`💳 No store credit found (Admin: 0, Ledger: ${ledgerAmount || 0})`);
+          console.log(`💳 No store credit found (Admin: ${adminDerivedCredit}, Ledger: ${ledgerDerivedCredit})`);
         }
       } catch (e) {
         console.error('❌ Ledger fallback error:', e?.message || e);
