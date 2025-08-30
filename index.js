@@ -1020,6 +1020,25 @@ app.post('/raffle/pick-winner', async (req, res) => {
 // 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
 const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql`;
 
+// Helper: Prefer explicit Shopify customer token header (shcat_) if present.
+// Falls back to Authorization: Bearer <token> if the header is missing.
+function extractCustomerToken(req) {
+  try {
+    const headerToken = req.headers['x-shopify-customer-token'] || req.headers['X-Shopify-Customer-Token'];
+    if (headerToken && typeof headerToken === 'string' && headerToken.length > 0) {
+      // Prefer the explicit shcat_ token provided by the client
+      return headerToken;
+    }
+    const auth = req.headers.authorization || req.headers.Authorization;
+    if (auth && typeof auth === 'string' && auth.startsWith('Bearer ')) {
+      return auth.substring(7);
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Helper functions
 function generateVerificationCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -9235,14 +9254,14 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 // 🔥 UPDATED: Submit return request with Shopify Customer Account API integration
 app.post('/returns', authenticateAppToken, async (req, res) => {
   try {
-    const returnRequest = req.body;
-    const customerToken = req.headers.authorization?.substring(7);
+  const returnRequest = req.body;
+  const customerToken = extractCustomerToken(req);
     const customerEmail = req.session.email;
 
     if (!customerToken) {
       return res.status(401).json({ 
         success: false, 
-        error: 'No authentication token' 
+        error: 'No authentication token (customer token required)'
       });
     }
 
@@ -9433,13 +9452,13 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 // 🔥 UPDATED: Get return history from both Customer Account API and Admin API
 app.get('/returns', authenticateAppToken, async (req, res) => {
   try {
-    const customerToken = req.headers.authorization?.substring(7);
+  const customerToken = extractCustomerToken(req);
     const customerEmail = req.session.email;
     
     if (!customerToken) {
       return res.status(401).json({ 
         success: false, 
-        error: 'No authentication token' 
+        error: 'No authentication token (customer token required)'
       });
     }
 
@@ -9489,8 +9508,8 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
 // 🔥 ADDED: Check existing returns for order
 app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, res) => {
   try {
-    const { orderId } = req.params;
-    const customerToken = req.headers.authorization?.substring(7);
+  const { orderId } = req.params;
+  const customerToken = extractCustomerToken(req);
     
     if (!customerToken) {
       return res.status(401).json({ hasExistingReturns: false });
@@ -9514,7 +9533,7 @@ app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, r
 app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
   try {
     const { orderId } = req.params;
-    const customerToken = req.headers.authorization?.substring(7);
+  const customerToken = extractCustomerToken(req);
     const customerEmail = req.session.email;
 
     if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
@@ -9522,9 +9541,9 @@ app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
     let results = [];
 
     // Try Customer Account API first (requires customer token)
-    if (customerToken) {
-      try {
-        const allReturns = await getShopifyCustomerReturns(customerToken);
+    if (!customerToken) {
+      return res.status(401).json({ hasExistingReturns: false });
+    }
         results = allReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
         console.log(`🔎 Found ${results.length} returns for order ${orderId} via Customer Account API`);
       } catch (err) {
