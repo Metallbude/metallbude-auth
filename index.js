@@ -385,7 +385,7 @@ process.on('SIGINT', async () => {
 // ===== STORE-CREDIT LEDGER (persistent on disk) =====
 // Uses the same pattern as session persistence. Stored under project data.
 const STORE_CREDIT_FILE = path.join(__dirname, 'data', 'store_credit.json');
-const STORE_CREDIT_PREFIX = process.env.STORE_CREDIT_CODE_PREFIX || 'STORECREDIT-';
+const STORE_CREDIT_PREFIX = process.env.STORE_CREDIT_CODE_PREFIX || 'STORE_CREDIT_';
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || '';
 
 // In-memory map: email (lowercased) -> { balance: number }
@@ -561,8 +561,9 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
       const code = String(discount?.code || '');
       
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        // Extract reservation ID from discount code
-        const reservationId = code.replace(STORE_CREDIT_PREFIX, '').toLowerCase();
+        // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_{reservationId})
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_{reservationId}
+        const reservationId = codeSuffix.split('_').pop()?.toLowerCase(); // Extract last part as reservationId
         const reservation = storeCreditReservations.get(reservationId);
         
         if (reservation && reservation.status === 'reserved') {
@@ -12967,7 +12968,7 @@ app.post('/apply-store-credit', async (req, res) => {
 
     // Create reservation instead of deducting
     const reservationId = generateReservationId();
-    const discountCode = `${STORE_CREDIT_PREFIX}${reservationId.toUpperCase()}`;
+    const discountCode = `${STORE_CREDIT_PREFIX}${Date.now()}_${reservationId.toUpperCase()}`;
     
     const reservation = {
       id: reservationId,
