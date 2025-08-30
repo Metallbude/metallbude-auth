@@ -12990,9 +12990,10 @@ app.post('/apply-store-credit', async (req, res) => {
       success: true,
       message: 'Store credit reserved successfully',
       discountCode: discountCode,
+      appliedStoreCredit: amountToReserve, // Amount reserved (not deducted yet)
+      newStoreCreditBalance: currentBalance, // Balance unchanged - only reserved
       reservationId: reservationId,
       reservedAmount: amountToReserve,
-      newStoreCreditBalance: currentBalance, // Balance unchanged - only reserved
       expiresAt: reservation.expiresAt
     });
     
