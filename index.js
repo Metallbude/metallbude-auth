@@ -1007,6 +1007,10 @@ function generateSessionId() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+function generateReservationId() {
+  return 'RES_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 5).toUpperCase();
+}
+
 // Send verification email
 async function sendVerificationEmail(email, code) {
   if (!config.mailerSendApiKey) {
