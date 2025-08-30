@@ -441,6 +441,43 @@ setInterval(() => {
   persistStoreCreditLedger().catch(() => {});
 }, 60 * 1000);
 
+// 🔧 DEBUG: Ledger management endpoints (secure via X-Admin-Key header)
+app.post('/debug/ledger/set', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'];
+    if (!config.adminToken || !adminKey || adminKey !== config.adminToken) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const { email, amount } = req.body || {};
+    if (!email || typeof amount === 'undefined') return res.status(400).json({ success: false, error: 'email and amount required' });
+
+    setStoreCredit(email, Number(amount || 0));
+    await persistStoreCreditLedger();
+    console.log(`🔧 Ledger debug: set ${email} -> ${Number(amount)}`);
+    return res.json({ success: true, email, amount: Number(amount) });
+  } catch (e) {
+    console.error('❌ Debug ledger set failed:', e?.message || e);
+    return res.status(500).json({ success: false, error: 'internal' });
+  }
+});
+
+app.get('/debug/ledger/get', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'];
+    if (!config.adminToken || !adminKey || adminKey !== config.adminToken) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    const email = req.query.email;
+    if (!email) return res.status(400).json({ success: false, error: 'email query required' });
+    const balance = getStoreCredit(email);
+    return res.json({ success: true, email, balance });
+  } catch (e) {
+    console.error('❌ Debug ledger get failed:', e?.message || e);
+    return res.status(500).json({ success: false, error: 'internal' });
+  }
+});
+
 // Helper to verify Shopify Webhook HMAC. Uses raw body when available, falls back to JSON.stringify of parsed body.
 function verifyShopifyHmac(req, secret) {
   try {
