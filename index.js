@@ -441,6 +441,43 @@ setInterval(() => {
   persistStoreCreditLedger().catch(() => {});
 }, 60 * 1000);
 
+// 🔧 DEBUG: Ledger management endpoints (secure via X-Admin-Key header)
+app.post('/debug/ledger/set', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'];
+    if (!config.adminToken || !adminKey || adminKey !== config.adminToken) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const { email, amount } = req.body || {};
+    if (!email || typeof amount === 'undefined') return res.status(400).json({ success: false, error: 'email and amount required' });
+
+    setStoreCredit(email, Number(amount || 0));
+    await persistStoreCreditLedger();
+    console.log(`🔧 Ledger debug: set ${email} -> ${Number(amount)}`);
+    return res.json({ success: true, email, amount: Number(amount) });
+  } catch (e) {
+    console.error('❌ Debug ledger set failed:', e?.message || e);
+    return res.status(500).json({ success: false, error: 'internal' });
+  }
+});
+
+app.get('/debug/ledger/get', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'];
+    if (!config.adminToken || !adminKey || adminKey !== config.adminToken) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    const email = req.query.email;
+    if (!email) return res.status(400).json({ success: false, error: 'email query required' });
+    const balance = getStoreCredit(email);
+    return res.json({ success: true, email, balance });
+  } catch (e) {
+    console.error('❌ Debug ledger get failed:', e?.message || e);
+    return res.status(500).json({ success: false, error: 'internal' });
+  }
+});
+
 // Helper to verify Shopify Webhook HMAC. Uses raw body when available, falls back to JSON.stringify of parsed body.
 function verifyShopifyHmac(req, secret) {
   try {
@@ -983,6 +1020,25 @@ app.post('/raffle/pick-winner', async (req, res) => {
 // 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
 const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql`;
 
+// Helper: Prefer explicit Shopify customer token header (shcat_) if present.
+// Falls back to Authorization: Bearer <token> if the header is missing.
+function extractCustomerToken(req) {
+  try {
+    const headerToken = req.headers['x-shopify-customer-token'] || req.headers['X-Shopify-Customer-Token'];
+    if (headerToken && typeof headerToken === 'string' && headerToken.length > 0) {
+      // Prefer the explicit shcat_ token provided by the client
+      return headerToken;
+    }
+    const auth = req.headers.authorization || req.headers.Authorization;
+    if (auth && typeof auth === 'string' && auth.startsWith('Bearer ')) {
+      return auth.substring(7);
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Helper functions
 function generateVerificationCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -1328,13 +1384,19 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
         throw new Error(`Item ${item.title} is not returnable`);
       }
 
-      // Build minimal allowed payload for OrderReturnLineItemInput; avoid unsupported fields
-      returnLineItems.push({
+      // Build payload for OrderReturnLineItemInput; include customerNote when available
+      const customerNote = item.reasonNote || item.customerNote || returnRequest.additionalNotes || '';
+      const line = {
         fulfillmentLineItemId: matchingItem.fulfillmentLineItemId,
         quantity: item.quantity,
-        returnReason: mapReasonToShopify(returnRequest.reason),
-        // NOTE: do not include customerNote here - Customer Account API may reject custom fields
-      });
+        returnReason: mapReasonToShopify(returnRequest.reason)
+      };
+      if (customerNote && customerNote.length > 0) line.customerNote = String(customerNote).substring(0, 255);
+      // Add resolution hint in the customerNote if provided (helps for Customer Account API flows)
+      if (returnRequest.preferredResolution) {
+        line.customerNote = (line.customerNote ? line.customerNote + ' | ' : '') + `preferredResolution:${returnRequest.preferredResolution}`;
+      }
+      returnLineItems.push(line);
     }
 
     // Use Customer Account API orderRequestReturn mutation
@@ -1384,7 +1446,9 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       returnLineItems: returnLineItems.map(li => ({
         fulfillmentLineItemId: li.fulfillmentLineItemId,
         quantity: Number(li.quantity || 1),
-        returnReason: li.returnReason
+  returnReason: li.returnReason,
+  // pass through customerNote when supported by the Customer Account API
+  ...(li.customerNote ? { customerNote: li.customerNote } : {})
       }))
     };
 
@@ -3760,6 +3824,34 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     }
 
     res.json({ orders: [] });
+  }
+});
+
+// ===== DEBUG: Store credit ledger inspection & modification =====
+// Protected by app session token (authenticateAppToken) — only call from trusted clients
+app.get('/debug/store-credit-ledger', authenticateAppToken, async (req, res) => {
+  try {
+    const entries = Array.from(storeCreditLedger.entries()).map(([email, data]) => ({ email, balance: data.balance }));
+    res.json({ success: true, entries });
+  } catch (e) {
+    console.error('❌ Failed to read store credit ledger debug:', e?.message || e);
+    res.status(500).json({ success: false, error: 'Failed to read ledger' });
+  }
+});
+
+// Set or update a store credit balance for an email (body: { email, amount })
+app.post('/debug/store-credit', authenticateAppToken, async (req, res) => {
+  try {
+    const { email, amount } = req.body || {};
+    if (!email || typeof amount === 'undefined') return res.status(400).json({ success: false, error: 'email and amount required' });
+    const numeric = Number(amount || 0);
+    setStoreCredit(email, numeric);
+    await persistStoreCreditLedger();
+    console.log(`🔧 Debug: set store credit for ${email} -> ${numeric}`);
+    res.json({ success: true, email, amount: numeric });
+  } catch (e) {
+    console.error('❌ Failed to set debug store credit:', e?.message || e);
+    res.status(500).json({ success: false, error: 'Failed to set ledger entry' });
   }
 });
 
@@ -9162,14 +9254,14 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 // 🔥 UPDATED: Submit return request with Shopify Customer Account API integration
 app.post('/returns', authenticateAppToken, async (req, res) => {
   try {
-    const returnRequest = req.body;
-    const customerToken = req.headers.authorization?.substring(7);
+  const returnRequest = req.body;
+  const customerToken = extractCustomerToken(req);
     const customerEmail = req.session.email;
 
     if (!customerToken) {
       return res.status(401).json({ 
         success: false, 
-        error: 'No authentication token' 
+        error: 'No authentication token (customer token required)'
       });
     }
 
@@ -9207,18 +9299,40 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
           if (qty <= 0) continue;
 
-          // Build minimal allowed Admin ReturnLineItem input - omit unsupported fields like customerNote
-          returnLineItems.push({
+          // Build Admin ReturnLineItem input - include reason note if provided
+          const lineItemInput = {
             fulfillmentLineItemId: match.fulfillmentLineItemId,
             quantity: qty,
             returnReason: mapReturnReason(returnRequest.reason)
-          });
+          };
+
+          // If the customer provided per-item notes or an overall additionalNotes, include as returnReasonNote
+          const perItemNote = requestedItem.reasonNote || requestedItem.customerNote || returnRequest.additionalNotes || '';
+          if (perItemNote && perItemNote.length > 0) {
+            lineItemInput.returnReasonNote = String(perItemNote).substring(0, 255);
+          }
+
+          returnLineItems.push(lineItemInput);
         }
 
         if (returnLineItems.length === 0) {
           throw new Error('No matching fulfillment line items found for return (Admin API)');
         }
 
+        // Build exchangeLineItems when customer requests an exchange
+        const exchangeLineItems = [];
+        if ((returnRequest.preferredResolution || '').toLowerCase() === 'exchange') {
+          for (const requestedItem of returnRequest.items || []) {
+            const qty = Number(requestedItem.quantity || 1);
+            const requestedVariant = requestedItem.requestedExchangeVariantId || requestedItem.exchangeVariantId || null;
+            if (requestedVariant && qty > 0) {
+              exchangeLineItems.push({
+                variantId: requestedVariant,
+                quantity: qty
+              });
+            }
+          }
+        }
         const returnMutation = `
           mutation returnCreate($returnInput: ReturnInput!) {
             returnCreate(returnInput: $returnInput) {
@@ -9239,6 +9353,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           returnLineItems: returnLineItems,
           notifyCustomer: true
         };
+
+        // Attach exchangeLineItems when present (Admin API supports ExchangeLineItemInput)
+        if (exchangeLineItems.length > 0) {
+          returnInput.exchangeLineItems = exchangeLineItems;
+        }
 
         // Sanitize Admin payload: remove unsupported root-level fields like `note` before sending
         const sanitizedReturnInput = Object.assign({}, returnInput);
@@ -9281,8 +9400,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       }
     }
 
-    // Step 1: Submit to Shopify using Customer Account API
-    const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+  // Step 1: Submit to Shopify using Customer Account API (fallback path)
+  const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
     
     if (!shopifyResult.success) {
       return res.status(400).json({
@@ -9299,6 +9418,14 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       customerEmail: customerEmail,
       requestDate: new Date().toISOString(),
       status: mapShopifyStatusToInternal(shopifyResult.status),
+      preferredResolution: returnRequest.preferredResolution || 'refund',
+      // Keep requested exchange variants per item for backend tracking
+      items: (returnRequest.items || []).map(it => ({
+        lineItemId: it.lineItemId,
+        quantity: it.quantity,
+        requestedExchangeVariantId: it.requestedExchangeVariantId || it.exchangeVariantId || null,
+        reason: it.reason || returnRequest.reason || 'other'
+      }))
     };
 
     // Here you would save to your database
@@ -9325,13 +9452,13 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 // 🔥 UPDATED: Get return history from both Customer Account API and Admin API
 app.get('/returns', authenticateAppToken, async (req, res) => {
   try {
-    const customerToken = req.headers.authorization?.substring(7);
+  const customerToken = extractCustomerToken(req);
     const customerEmail = req.session.email;
     
     if (!customerToken) {
       return res.status(401).json({ 
         success: false, 
-        error: 'No authentication token' 
+        error: 'No authentication token (customer token required)'
       });
     }
 
@@ -9381,8 +9508,8 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
 // 🔥 ADDED: Check existing returns for order
 app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, res) => {
   try {
-    const { orderId } = req.params;
-    const customerToken = req.headers.authorization?.substring(7);
+  const { orderId } = req.params;
+  const customerToken = extractCustomerToken(req);
     
     if (!customerToken) {
       return res.status(401).json({ hasExistingReturns: false });
@@ -9399,6 +9526,50 @@ app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, r
   } catch (error) {
     console.error('❌ Error checking existing returns:', error);
     res.json({ hasExistingReturns: false });
+  }
+});
+
+// GET /orders/:orderId/returns - return history for a specific order
+app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const customerToken = extractCustomerToken(req);
+    const customerEmail = req.session.email;
+
+    if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
+
+    let results = [];
+
+    // Try Customer Account API first (requires customer token)
+    if (customerToken) {
+      try {
+        const allReturns = await getShopifyCustomerReturns(customerToken);
+        results = allReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
+        console.log(`🔎 Found ${results.length} returns for order ${orderId} via Customer Account API`);
+      } catch (err) {
+        console.log('⚠️ Customer Account API failed for order returns:', err.message);
+      }
+    }
+
+    // If none or to supplement, try Admin API
+    if ((results.length === 0 || !customerToken) && config.adminToken) {
+      try {
+        const adminReturns = await getAdminApiReturns(customerEmail);
+        const matchingAdmin = adminReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
+        console.log(`🔎 Found ${matchingAdmin.length} returns for order ${orderId} via Admin API`);
+        // Merge unique by id
+        const byId = new Map();
+        for (const r of [...results, ...matchingAdmin]) byId.set(r.id, r);
+        results = Array.from(byId.values());
+      } catch (err) {
+        console.log('⚠️ Admin API order-returns fetch failed:', err.message);
+      }
+    }
+
+    res.json({ success: true, orderId, returns: results });
+  } catch (error) {
+    console.error('❌ Error fetching order returns:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch order returns' });
   }
 });
 
