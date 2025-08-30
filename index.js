@@ -9533,7 +9533,7 @@ app.get('/orders/:orderId/existing-returns', authenticateAppToken, async (req, r
 app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
   try {
     const { orderId } = req.params;
-  const customerToken = extractCustomerToken(req);
+    const customerToken = extractCustomerToken(req);
     const customerEmail = req.session.email;
 
     if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
@@ -9541,9 +9541,9 @@ app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
     let results = [];
 
     // Try Customer Account API first (requires customer token)
-    if (!customerToken) {
-      return res.status(401).json({ hasExistingReturns: false });
-    }
+    if (customerToken) {
+      try {
+        const allReturns = await getShopifyCustomerReturns(customerToken);
         results = allReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
         console.log(`🔎 Found ${results.length} returns for order ${orderId} via Customer Account API`);
       } catch (err) {
@@ -9552,7 +9552,7 @@ app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
     }
 
     // If none or to supplement, try Admin API
-    if (config.adminToken) {
+    if ((results.length === 0 || !customerToken) && config.adminToken) {
       try {
         const adminReturns = await getAdminApiReturns(customerEmail);
         const matchingAdmin = adminReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
