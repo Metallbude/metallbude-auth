@@ -525,6 +525,104 @@ function verifyShopifyHmac(req, secret) {
 }
 
 // Webhook route: orders/create - deduct store credit when special codes are used
+// Test if webhook is being called by creating a simple test endpoint
+app.post('/test/simulate-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    console.log('🧪 SIMULATING WEBHOOK CALL...');
+    
+    // Create a fake order payload similar to what Shopify would send
+    const fakeOrder = {
+      id: 12345678901234,
+      email: "klause.rudolf@gmail.com",
+      created_at: new Date().toISOString(),
+      total_price: "0.00",
+      subtotal_price: "30.00",
+      total_discounts: "30.00",
+      discount_codes: [
+        {
+          code: "TEST2016",
+          amount: "29.10",
+          type: "percentage"
+        },
+        {
+          code: "STORE_CREDIT_TEST_RES_SIMULATED",
+          amount: "0.90",
+          type: "fixed_amount"
+        }
+      ],
+      line_items: [
+        {
+          id: 987654321,
+          name: "Test Product",
+          quantity: 1,
+          price: "30.00"
+        }
+      ]
+    };
+    
+    console.log('🧪 Fake order payload created:', JSON.stringify(fakeOrder, null, 2));
+    
+    // Manually call the webhook processing logic
+    const timestamp = new Date().toISOString();
+    console.log(`🔥 [${timestamp}] WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create (SIMULATED)`);
+    
+    const discountCodes = fakeOrder.discount_codes || [];
+    const storeCreditCodes = discountCodes.filter(dc => 
+      dc.code && dc.code.startsWith('STORE_CREDIT_')
+    );
+    
+    console.log('💳 Found store credit codes in order:', storeCreditCodes);
+    
+    if (storeCreditCodes.length > 0) {
+      const email = fakeOrder.email;
+      console.log(`💰 Processing store credit deduction for ${email}`);
+      
+      for (const storeCreditCode of storeCreditCodes) {
+        console.log(`💳 Processing store credit code: ${storeCreditCode.code} (${storeCreditCode.amount}€)`);
+        
+        // Extract reservation ID from discount code
+        const matches = storeCreditCode.code.match(/RES_([A-Z0-9_]+)/i);
+        if (matches) {
+          const reservationId = `RES_${matches[1].toLowerCase()}`;
+          console.log(`🔍 Looking for reservation: ${reservationId}`);
+          
+          const reservation = storeCreditReservations.get(reservationId);
+          if (reservation && reservation.status === 'reserved') {
+            console.log(`✅ Found reservation: ${JSON.stringify(reservation)}`);
+            
+            // Process the deduction (simulate webhook logic)
+            const currentBalance = getStoreCredit(email) || 0;
+            const newBalance = Math.max(0, currentBalance - reservation.amount);
+            setStoreCredit(email, newBalance);
+            
+            // Mark as finalized
+            reservation.status = 'finalized';
+            reservation.finalizedAt = Date.now();
+            storeCreditReservations.set(reservationId, reservation);
+            
+            console.log(`💰 SIMULATED DEDUCTION: ${currentBalance}€ -> ${newBalance}€`);
+          }
+        }
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Webhook simulation completed',
+      fakeOrder: fakeOrder,
+      storeCreditCodesFound: storeCreditCodes.length,
+      processed: storeCreditCodes.map(sc => sc.code)
+    });
+    
+  } catch (error) {
+    console.error('🧪 WEBHOOK SIMULATION ERROR:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/json' }), async (req, res) => {
   const timestamp = new Date().toISOString();
   console.log(`🔥 [${timestamp}] WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create`);
@@ -1355,6 +1453,84 @@ app.post('/test/force-process-reservations', async (req, res) => {
   } catch (error) {
     console.error('🔥 ❌ Force process error:', error);
     res.status(500).json({ status: 'error', error: error.message });
+  }
+});
+
+// Quick balance check endpoint
+app.get('/test/balance-check/:email', async (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    console.log(`🔍 CHECKING BALANCE FOR: ${email}`);
+    
+    // Get current store credit balance from Shopify
+    const balanceQuery = `
+      query getCustomerStoreCreditAccounts($email: String!) {
+        customers(first: 1, query: $email) {
+          edges {
+            node {
+              id
+              email
+              storeCreditAccounts(first: 10) {
+                edges {
+                  node {
+                    id
+                    balance {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(config.adminApiUrl, {
+      query: balanceQuery,
+      variables: { email: `email:${email}` }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const customer = response.data?.data?.customers?.edges?.[0]?.node;
+    const accounts = customer?.storeCreditAccounts?.edges || [];
+    
+    let totalBalance = 0;
+    accounts.forEach(acc => {
+      totalBalance += parseFloat(acc.node.balance.amount) || 0;
+    });
+
+    // Also check current reservations
+    const reservations = Array.from(storeCreditReservations.entries())
+      .filter(([id, res]) => res.email.toLowerCase() === email.toLowerCase())
+      .map(([id, res]) => ({
+        id,
+        amount: res.amount,
+        status: res.status,
+        createdAt: res.createdAt
+      }));
+
+    res.json({
+      success: true,
+      email: email,
+      currentBalance: totalBalance,
+      currency: 'EUR',
+      storeCreditAccounts: accounts.length,
+      pendingReservations: reservations,
+      message: `Current store credit balance: €${totalBalance.toFixed(2)}`
+    });
+    
+  } catch (error) {
+    console.error('❌ BALANCE CHECK ERROR:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
