@@ -636,6 +636,120 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
   }
 });
 
+// Alias route for Shopify webhook (alternative URL that matches Shopify webhook URL pattern)
+app.post('/webhooks/orders/create', express.raw({ type: 'application/json' }), async (req, res) => {
+  console.log('🔥 WEBHOOK ALIAS HIT! /webhooks/orders/create (processing directly)');
+  console.log('🔥 Request headers:', req.headers);
+  console.log('🔥 Request body length:', req.body ? req.body.length : 'null');
+  
+  if (!SHOPIFY_WEBHOOK_SECRET) {
+    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
+    return res.status(401).send('Webhook secret not configured');
+  }
+
+  // Verify HMAC
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  if (!hmac) {
+    console.warn('⚠️ No HMAC header found in orders/create webhook');
+    return res.status(401).send('Unauthorized');
+  }
+  
+  const body = req.body;
+  const hash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(body, 'utf8').digest('base64');
+  if (hash !== hmac) {
+    console.warn('⚠️ Invalid HMAC for orders/create webhook');
+    return res.status(401).send('Unauthorized');
+  }
+
+  // Parse the order payload  
+  let payload;
+  try {
+    payload = typeof body === 'string' ? JSON.parse(body) : JSON.parse(body.toString());
+  } catch (e) {
+    console.error('❌ Unable to parse orders/create body:', e?.message || e);
+    return res.status(400).send('Bad request');
+  }
+
+  try {
+    console.log(`🎯 WEBHOOK ALIAS: Processing order for ${payload?.email}`);
+
+    const email = payload?.email?.toLowerCase();
+    if (!email) {
+      console.log('⚠️ No email in webhook payload - skipping store credit processing');
+      return res.status(200).send('ok');
+    }
+
+    // Check for store credit discount codes
+    const discountCodes = payload?.discount_codes || [];
+    console.log(`🔍 WEBHOOK ALIAS: Found ${discountCodes.length} discount codes:`, discountCodes.map(dc => dc.code));
+
+    for (const discountCode of discountCodes) {
+      const code = discountCode.code;
+      console.log(`🔍 WEBHOOK ALIAS: Processing discount code: ${code}`);
+      
+      if (code?.toLowerCase().startsWith('storecredit_')) {
+        console.log(`🎯 WEBHOOK ALIAS: Found store credit code: ${code}`);
+        
+        const codeSuffix = code.substring('storecredit_'.length);
+        console.log(`🔍 WEBHOOK ALIAS: Code suffix after removing prefix: "${codeSuffix}"`);
+        
+        const parts = codeSuffix.split('_');
+        console.log(`🔍 WEBHOOK ALIAS: Code parts:`, parts);
+        
+        const reservationId = parts.pop();
+        console.log(`🔍 WEBHOOK ALIAS: Extracted reservation ID: "${reservationId}"`);
+        
+        if (reservationId) {
+          const reservation = storeCreditReservations.get(reservationId);
+          console.log(`🔍 WEBHOOK ALIAS: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
+          
+          if (reservation && reservation.status === 'reserved') {
+            console.log(`💰 WEBHOOK ALIAS: Deducting ${reservation.amount}€ store credit from ${email} for reservation ${reservationId}`);
+            
+            try {
+              const debitResult = debitStoreCredit(email, reservation.amount, `Order finalization: ${payload?.name} (reservation: ${reservationId})`);
+              
+              if (debitResult.success) {
+                console.log(`✅ WEBHOOK ALIAS: Successfully deducted ${reservation.amount}€ from ${email}`);
+                console.log(`📊 WEBHOOK ALIAS: New balance for ${email}: ${getStoreCredit(email)}€`);
+                
+                // Mark reservation as finalized
+                reservation.status = 'finalized';
+                reservation.finalizedAt = Date.now();
+                reservation.debitedAt = Date.now();
+                reservation.orderId = payload?.id;
+                reservation.orderName = payload?.name;
+                storeCreditReservations.set(reservationId, reservation);
+                await persistStoreCreditReservations();
+                
+                console.log(`✅ WEBHOOK ALIAS: Successfully deducted ${reservation.amount}€ and finalized reservation ${reservationId} (order: ${payload?.name})`);
+              } else {
+                console.error(`❌ WEBHOOK ALIAS: Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
+              }
+            } catch (error) {
+              console.error(`❌ WEBHOOK ALIAS: Error processing store credit deduction for reservation ${reservationId}:`, error);
+            }
+            
+          } else if (reservation && reservation.status === 'finalized') {
+            console.log(`✅ WEBHOOK ALIAS: Reservation ${reservationId} already finalized - skipping`);
+          } else if (reservation) {
+            console.log(`⚠️ WEBHOOK ALIAS: Found reservation ${reservationId} but status is ${reservation.status} (expected: reserved)`);
+          } else {
+            console.log(`❌ WEBHOOK ALIAS: No reservation found for ID: ${reservationId}`);
+          }
+        } else {
+          console.log(`❌ WEBHOOK ALIAS: Could not extract reservation ID from discount code: ${code}`);
+        }
+      }
+    }
+
+    return res.status(200).send('ok');
+  } catch (e) {
+    console.error('❌ WEBHOOK ALIAS: Processing error:', e);
+    return res.status(500).send('error');
+  }
+});
+
 // Debug routes
 app.get('/debug/store-credit', async (req, res) => {
   const email = (req.query.email || '').toLowerCase();
