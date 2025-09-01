@@ -587,44 +587,88 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
             console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from store credit`);
             
             try {
-              // 🔥 USE THE SAME LOGIC AS THE SUCCESSFUL MANUAL TEST
-              // Create ledger entry for the deduction (same as test endpoint)
-              const ledgerEntry = {
-                id: `DEDUCT_AUTO_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-                email: reservation.email,
-                type: 'deduction',
-                amount: -reservation.amount,
-                description: `Store Credit Used - Order ${payload?.name || 'N/A'}`,
-                timestamp: Date.now(),
-                reservationId: reservationId,
-                storeCreditAccountId: reservation.storeCreditAccountId,
-                orderId: payload?.id,
-                orderName: payload?.name
-              };
-
-              storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-              await persistStoreCreditLedger();
+              // 🔥 USE THE SAME LOGIC AS THE SUCCESSFUL MANUAL TEST - CALL SHOPIFY API DIRECTLY
+              console.log(`🌐 WEBHOOK DEDUCTION: Calling Shopify API to deduct ${reservation.amount}€ from ${reservation.email}`);
               
-              // Update local balance (same as test endpoint)
-              const currentBalance = getStoreCredit(reservation.email) || 0;
-              const newBalance = Math.max(0, currentBalance - reservation.amount);
-              setStoreCredit(reservation.email, newBalance);
-              await persistStoreCreditLedger();
+              // Use the same Shopify API call as the manual test
+              const debitResult = await shopify.graphql(
+                `#graphql
+                  mutation storeCreditAccountDebit($storeCreditAccountId: ID!, $amount: MoneyInput!) {
+                    storeCreditAccountDebit(storeCreditAccountId: $storeCreditAccountId, amount: $amount) {
+                      storeCreditAccountTransaction {
+                        id
+                        amount {
+                          amount
+                          currencyCode
+                        }
+                      }
+                      userErrors {
+                        field
+                        message
+                      }
+                    }
+                  }`,
+                {
+                  variables: {
+                    storeCreditAccountId: reservation.storeCreditAccountId,
+                    amount: {
+                      amount: reservation.amount.toString(),
+                      currencyCode: 'EUR'
+                    }
+                  }
+                }
+              );
 
-              // Mark reservation as finalized
-              reservation.status = 'finalized';
-              reservation.finalizedAt = Date.now();
-              reservation.orderId = payload?.id;
-              reservation.orderName = payload?.name;
-              reservation.processedBy = 'webhook-auto';
-              storeCreditReservations.set(reservationId, reservation);
-              await persistStoreCreditReservations();
+              const debitResponse = await debitResult.json();
+              console.log(`🔍 WEBHOOK DEDUCTION: Shopify API response:`, JSON.stringify(debitResponse, null, 2));
 
-              console.log(`✅ AUTOMATIC DEDUCTION: Successfully processed store credit deduction: ${reservation.amount}€ for ${reservation.email} (order: ${payload?.name})`);
-              console.log(`💰 AUTOMATIC DEDUCTION: Customer ${reservation.email} balance: ${currentBalance}€ -> ${newBalance}€`);
+              if (debitResponse.data?.storeCreditAccountDebit?.storeCreditAccountTransaction) {
+                console.log(`✅ WEBHOOK DEDUCTION: Successfully deducted ${reservation.amount}€ via Shopify API`);
+                
+                // Create ledger entry for tracking
+                const ledgerEntry = {
+                  id: `DEDUCT_WEBHOOK_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+                  email: reservation.email,
+                  type: 'deduction',
+                  amount: -reservation.amount,
+                  description: `Store Credit Used - Order ${payload?.name || 'N/A'}`,
+                  timestamp: Date.now(),
+                  reservationId: reservationId,
+                  storeCreditAccountId: reservation.storeCreditAccountId,
+                  orderId: payload?.id,
+                  orderName: payload?.name,
+                  shopifyTransactionId: debitResponse.data.storeCreditAccountDebit.storeCreditAccountTransaction.id
+                };
+
+                storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+                await persistStoreCreditLedger();
+                
+                // Update local balance cache
+                const currentBalance = getStoreCredit(reservation.email) || 0;
+                const newBalance = Math.max(0, currentBalance - reservation.amount);
+                setStoreCredit(reservation.email, newBalance);
+                await persistStoreCreditLedger();
+
+                // Mark reservation as finalized
+                reservation.status = 'finalized';
+                reservation.finalizedAt = Date.now();
+                reservation.orderId = payload?.id;
+                reservation.orderName = payload?.name;
+                reservation.processedBy = 'webhook-shopify-api';
+                reservation.shopifyTransactionId = debitResponse.data.storeCreditAccountDebit.storeCreditAccountTransaction.id;
+                storeCreditReservations.set(reservationId, reservation);
+                await persistStoreCreditReservations();
+
+                console.log(`🎉 WEBHOOK SUCCESS: Store credit deducted ${reservation.amount}€ for ${reservation.email}`);
+                console.log(`💰 WEBHOOK SUCCESS: Balance updated ${currentBalance}€ -> ${newBalance}€`);
+                
+              } else {
+                console.error(`❌ WEBHOOK FAILED: Shopify debit failed for ${reservationId}:`, debitResponse.data?.storeCreditAccountDebit?.userErrors || 'Unknown error');
+                console.error(`❌ WEBHOOK FAILED: Full response:`, JSON.stringify(debitResponse, null, 2));
+              }
               
             } catch (error) {
-              console.error(`❌ Error processing store credit deduction for reservation ${reservationId}:`, error);
+              console.error(`❌ WEBHOOK ERROR: Failed to process store credit deduction for reservation ${reservationId}:`, error);
             }
             
           } else if (reservation && reservation.status === 'finalized') {
