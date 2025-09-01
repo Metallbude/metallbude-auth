@@ -1358,6 +1358,58 @@ app.post('/test/force-process-reservations', async (req, res) => {
   }
 });
 
+// Test webhook endpoint to check recent webhook calls
+app.get('/test/webhook-activity', async (req, res) => {
+  try {
+    console.log('🔍 CHECKING RECENT WEBHOOK ACTIVITY...');
+    
+    // Get recent webhook activity logs
+    const recentActivity = [];
+    const webhookActivityEntries = Array.from(webhookActivity.entries());
+    
+    // Sort by timestamp (most recent first)
+    const sortedActivity = webhookActivityEntries
+      .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp))
+      .slice(0, 10); // Get last 10 entries
+    
+    for (const [key, activity] of sortedActivity) {
+      recentActivity.push({
+        key,
+        timestamp: activity.timestamp,
+        type: activity.type,
+        url: activity.data?.url || 'unknown',
+        headers: activity.data?.headers ? Object.keys(activity.data.headers) : [],
+        shopifyHmac: activity.data?.headers?.['x-shopify-hmac-sha256'] ? 'present' : 'missing'
+      });
+    }
+    
+    // Also check current reservations
+    const currentReservations = Array.from(storeCreditReservations.entries()).map(([id, res]) => ({
+      id,
+      email: res.email,
+      amount: res.amount,
+      status: res.status,
+      createdAt: res.createdAt
+    }));
+    
+    res.json({
+      success: true,
+      message: 'Recent webhook activity',
+      recentActivity,
+      currentReservations,
+      webhookConfigured: 'gid://shopify/WebhookSubscription/1787529363724',
+      instructions: 'Check if Shopify is calling your webhook endpoint when orders are placed'
+    });
+    
+  } catch (error) {
+    console.error('❌ WEBHOOK ACTIVITY CHECK ERROR:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Auto-configure the Shopify webhook for orders/create
 app.post('/test/setup-webhook', async (req, res) => {
   try {
