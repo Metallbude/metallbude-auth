@@ -525,6 +525,159 @@ function verifyShopifyHmac(req, secret) {
 }
 
 // Webhook route: orders/create - deduct store credit when special codes are used
+// Direct order completion endpoint for Flutter app to call
+app.post('/orders/complete', async (req, res) => {
+  try {
+    const { orderToken, discountCodes, email, totalAmount } = req.body;
+    
+    console.log(`🎯 DIRECT ORDER COMPLETION: ${orderToken} for ${email}`);
+    console.log(`🎯 Total amount: ${totalAmount}, Discount codes: ${JSON.stringify(discountCodes)}`);
+    
+    if (!email || !discountCodes || !Array.isArray(discountCodes)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: email, discountCodes'
+      });
+    }
+    
+    // Find store credit codes
+    const storeCreditCodes = discountCodes.filter(code => 
+      code && typeof code === 'string' && code.startsWith('STORE_CREDIT_')
+    );
+    
+    console.log(`💳 Found ${storeCreditCodes.length} store credit codes:`, storeCreditCodes);
+    
+    const processed = [];
+    
+    for (const storeCreditCode of storeCreditCodes) {
+      try {
+        console.log(`💳 Processing store credit code: ${storeCreditCode}`);
+        
+        // Extract reservation ID from discount code
+        const matches = storeCreditCode.match(/RES_([A-Z0-9_]+)/i);
+        if (matches) {
+          const reservationId = `RES_${matches[1].toLowerCase()}`;
+          console.log(`🔍 Looking for reservation: ${reservationId}`);
+          
+          const reservation = storeCreditReservations.get(reservationId);
+          if (reservation && reservation.status === 'reserved') {
+            console.log(`✅ Found reservation: amount=${reservation.amount}, email=${reservation.email}`);
+            
+            // Create ledger entry for the deduction
+            const ledgerEntry = {
+              id: `DEDUCT_ORDER_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+              email: reservation.email,
+              type: 'deduction',
+              amount: -reservation.amount,
+              description: `Store Credit Used - Order ${orderToken}`,
+              timestamp: Date.now(),
+              reservationId: reservationId,
+              orderToken: orderToken,
+              storeCreditAccountId: reservation.storeCreditAccountId
+            };
+
+            storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+            await persistStoreCreditLedger();
+            
+            // Update balance
+            const currentBalance = getStoreCredit(reservation.email) || 0;
+            const newBalance = Math.max(0, currentBalance - reservation.amount);
+            setStoreCredit(reservation.email, newBalance);
+            await persistStoreCreditLedger();
+
+            // Mark reservation as finalized
+            reservation.status = 'finalized';
+            reservation.finalizedAt = Date.now();
+            reservation.orderToken = orderToken;
+            reservation.processedBy = 'direct-completion';
+            storeCreditReservations.set(reservationId, reservation);
+            await persistStoreCreditReservations();
+
+            // Also call Shopify API to deduct from the actual store credit account
+            try {
+              if (reservation.storeCreditAccountId) {
+                const debitMutation = `
+                  mutation storeCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+                    storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+                      storeCreditAccountTransaction {
+                        id
+                        account {
+                          balance {
+                            amount
+                          }
+                        }
+                      }
+                      userErrors {
+                        field
+                        message
+                      }
+                    }
+                  }
+                `;
+
+                const debitResponse = await axios.post(config.adminApiUrl, {
+                  query: debitMutation,
+                  variables: {
+                    id: reservation.storeCreditAccountId,
+                    debitInput: {
+                      amount: {
+                        amount: reservation.amount.toFixed(2),
+                        currencyCode: 'EUR'
+                      },
+                      note: `Store Credit Used - Order ${orderToken}`
+                    }
+                  }
+                }, {
+                  headers: {
+                    'X-Shopify-Access-Token': config.adminToken,
+                    'Content-Type': 'application/json'
+                  }
+                });
+
+                console.log(`💰 Shopify debit result:`, JSON.stringify(debitResponse.data, null, 2));
+              }
+            } catch (shopifyError) {
+              console.error(`❌ Shopify debit failed for ${reservationId}:`, shopifyError.message);
+            }
+
+            processed.push({
+              reservationId,
+              email: reservation.email,
+              amount: reservation.amount,
+              balanceChange: `${currentBalance}€ -> ${newBalance}€`,
+              storeCreditCode
+            });
+
+            console.log(`✅ PROCESSED: ${reservation.amount}€ deducted for ${reservation.email} (${currentBalance}€ -> ${newBalance}€)`);
+            
+          } else {
+            console.log(`⚠️ Reservation ${reservationId} not found or already processed`);
+          }
+        } else {
+          console.log(`⚠️ Could not extract reservation ID from code: ${storeCreditCode}`);
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing store credit code ${storeCreditCode}:`, error);
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: `Processed ${processed.length} store credit deductions`,
+      processed,
+      orderToken
+    });
+    
+  } catch (error) {
+    console.error('❌ DIRECT ORDER COMPLETION ERROR:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Test if webhook is being called by creating a simple test endpoint
 app.post('/test/simulate-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
