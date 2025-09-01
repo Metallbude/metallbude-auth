@@ -554,9 +554,12 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
     const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
     
     console.log(`🎯 WEBHOOK: Processing order for ${email}`);
+    console.log(`🎯 WEBHOOK: Order ID: ${payload?.id}, Order Name: ${payload?.name}`);
     console.log(`🎯 WEBHOOK: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
+    console.log(`🎯 WEBHOOK: Full discount objects:`, JSON.stringify(discounts, null, 2));
     console.log(`🎯 WEBHOOK: STORE_CREDIT_PREFIX = "${STORE_CREDIT_PREFIX}"`);
     console.log(`🎯 WEBHOOK: Current reservations:`, Array.from(storeCreditReservations.keys()));
+    console.log(`🎯 WEBHOOK: Current reservation details:`, JSON.stringify(Array.from(storeCreditReservations.entries()).map(([k,v]) => ({id: k, email: v.email, status: v.status, amount: v.amount})), null, 2));
     
     // 🔥 NEW: Handle store credit reservations - deduct money when order confirmed
     for (const d of discounts) {
@@ -579,9 +582,11 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
         if (parts.length >= 4 && parts[1] === 'RES') {
           const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
           console.log(`🔍 WEBHOOK: Constructed full reservation ID: "${reservationId}"`);
+          console.log(`🔍 WEBHOOK: Looking for reservation in map with keys:`, Array.from(storeCreditReservations.keys()));
           
           const reservation = storeCreditReservations.get(reservationId);
-          console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
+          console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status}) - ${reservation.email}` : 'null');
+          console.log(`🔍 WEBHOOK: Reservation details:`, reservation ? JSON.stringify(reservation, null, 2) : 'No reservation found');
           
           if (reservation && reservation.status === 'reserved') {
             console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from store credit`);
@@ -1350,6 +1355,95 @@ app.post('/test/force-process-reservations', async (req, res) => {
   } catch (error) {
     console.error('🔥 ❌ Force process error:', error);
     res.status(500).json({ status: 'error', error: error.message });
+  }
+});
+
+// TEST: Debug webhook processing with the exact data from your last order
+app.post('/test/debug-webhook', async (req, res) => {
+  try {
+    console.log('🧪 TEST: Simulating webhook with your last order data...');
+    
+    // Simulate the exact payload from your last order
+    const simulatedPayload = {
+      id: 1234567890,
+      name: '#TEST001',
+      email: 'klause.rudolf@gmail.com',
+      customer: {
+        email: 'klause.rudolf@gmail.com'
+      },
+      discount_codes: [
+        { code: 'TEST2016', amount: '29.10' },
+        { code: 'TEST2017', amount: '0.00' },
+        { code: 'STORE_CREDIT_1756760160636_RES_MF1LN3B0_2IU9V', amount: '0.90' }
+      ]
+    };
+    
+    console.log('🧪 TEST: Simulated payload:', JSON.stringify(simulatedPayload, null, 2));
+    
+    // Run the same logic as the webhook
+    const email = (simulatedPayload?.email || simulatedPayload?.customer?.email || '').toLowerCase();
+    const discounts = Array.isArray(simulatedPayload?.discount_codes) ? simulatedPayload.discount_codes : [];
+    
+    console.log(`🎯 TEST: Processing order for ${email}`);
+    console.log(`🎯 TEST: Order ID: ${simulatedPayload?.id}, Order Name: ${simulatedPayload?.name}`);
+    console.log(`🎯 TEST: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
+    console.log(`🎯 TEST: Full discount objects:`, JSON.stringify(discounts, null, 2));
+    console.log(`🎯 TEST: STORE_CREDIT_PREFIX = "${STORE_CREDIT_PREFIX}"`);
+    console.log(`🎯 TEST: Current reservations:`, Array.from(storeCreditReservations.keys()));
+    console.log(`🎯 TEST: Current reservation details:`, JSON.stringify(Array.from(storeCreditReservations.entries()).map(([k,v]) => ({id: k, email: v.email, status: v.status, amount: v.amount})), null, 2));
+    
+    // Process each discount code
+    for (const d of discounts) {
+      const code = String(d?.code || '');
+      
+      console.log(`🔍 TEST: Checking discount code: "${code}"`);
+      
+      if (code.startsWith(STORE_CREDIT_PREFIX)) {
+        console.log(`💳 TEST: Found store credit discount: ${code}`);
+        
+        // Extract reservation ID from discount code
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
+        console.log(`🔍 TEST: Code suffix after removing prefix: "${codeSuffix}"`);
+        
+        const parts = codeSuffix.split('_');
+        console.log(`🔍 TEST: Code parts:`, parts);
+        
+        if (parts.length >= 4 && parts[1] === 'RES') {
+          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
+          console.log(`🔍 TEST: Constructed full reservation ID: "${reservationId}"`);
+          console.log(`🔍 TEST: Looking for reservation in map with keys:`, Array.from(storeCreditReservations.keys()));
+          
+          const reservation = storeCreditReservations.get(reservationId);
+          console.log(`🔍 TEST: Found reservation:`, reservation ? `${reservation.id} (${reservation.status}) - ${reservation.email}` : 'null');
+          console.log(`🔍 TEST: Reservation details:`, reservation ? JSON.stringify(reservation, null, 2) : 'No reservation found');
+          
+          if (reservation && reservation.status === 'reserved') {
+            console.log(`✅ TEST: Would process reservation ${reservationId} - deduct ${reservation.amount}€`);
+          } else if (reservation && reservation.status === 'finalized') {
+            console.log(`✅ TEST: Reservation ${reservationId} already finalized - would skip`);
+          } else if (reservation) {
+            console.log(`⚠️ TEST: Found reservation ${reservationId} but status is ${reservation.status} (expected: reserved)`);
+          } else {
+            console.log(`❌ TEST: No reservation found for ID: ${reservationId}`);
+          }
+        } else {
+          console.log(`❌ TEST: Could not extract reservation ID from discount code: ${code} (invalid format)`);
+          console.log(`❌ TEST: Parts length: ${parts.length}, parts[1]: "${parts[1]}"`);
+        }
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Debug webhook test completed - check console logs',
+      email: email,
+      discountCodes: discounts.map(d => d?.code),
+      reservationCount: storeCreditReservations.size
+    });
+    
+  } catch (error) {
+    console.error('❌ TEST: Error in debug webhook:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
