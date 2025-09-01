@@ -546,19 +546,34 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
   try {
     const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
     const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
+    
+    console.log(`🎯 WEBHOOK: Processing order for ${email}`);
+    console.log(`🎯 WEBHOOK: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
+    console.log(`🎯 WEBHOOK: STORE_CREDIT_PREFIX = "${STORE_CREDIT_PREFIX}"`);
+    console.log(`🎯 WEBHOOK: Current reservations:`, Array.from(storeCreditReservations.keys()));
+    
     // 🔥 NEW: Handle store credit reservations - deduct money when order confirmed
     for (const d of discounts) {
       const code = String(d?.code || '');
       
+      console.log(`🔍 WEBHOOK: Checking discount code: "${code}"`);
+      
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        console.log(`💳 Found store credit discount: ${code}`);
+        console.log(`💳 WEBHOOK: Found store credit discount: ${code}`);
         
         // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_{reservationId})
         const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_{reservationId}
-        const reservationId = codeSuffix.split('_').pop()?.toLowerCase(); // Extract last part as reservationId
+        console.log(`🔍 WEBHOOK: Code suffix after removing prefix: "${codeSuffix}"`);
+        
+        const parts = codeSuffix.split('_');
+        console.log(`🔍 WEBHOOK: Code parts:`, parts);
+        
+        const reservationId = parts.pop(); // Keep original case - don't use .toLowerCase()
+        console.log(`🔍 WEBHOOK: Extracted reservation ID: "${reservationId}"`);
         
         if (reservationId) {
           const reservation = storeCreditReservations.get(reservationId);
+          console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
           
           if (reservation && reservation.status === 'reserved') {
             console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from customer's store credit`);
@@ -13079,7 +13094,7 @@ app.post('/apply-store-credit', async (req, res) => {
     // Step 2: Check if customer already has a pending reservation
     const existingReservations = Array.from(storeCreditReservations.values())
       .filter(r => r.email === customerEmail.toLowerCase() && 
-                   r.status === 'pending_debit' && 
+                   r.status === 'reserved' && // Changed from 'pending_debit' to match new status
                    r.expiresAt > Date.now());
                    
     if (existingReservations.length > 0) {
