@@ -384,11 +384,15 @@ process.on('SIGINT', async () => {
 // ===== STORE-CREDIT LEDGER (persistent on disk) =====
 // Uses the same pattern as session persistence. Stored under project data.
 const STORE_CREDIT_FILE = path.join(__dirname, 'data', 'store_credit.json');
-const STORE_CREDIT_PREFIX = process.env.STORE_CREDIT_CODE_PREFIX || 'STORECREDIT-';
+const STORE_CREDIT_RESERVATIONS_FILE = path.join(__dirname, 'data', 'store_credit_reservations.json');
+const STORE_CREDIT_PREFIX = process.env.STORE_CREDIT_CODE_PREFIX || 'STORE_CREDIT_';
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || '';
 
 // In-memory map: email (lowercased) -> { balance: number }
 const storeCreditLedger = new Map();
+
+// In-memory map for store credit reservations: reservationId -> reservation object
+const storeCreditReservations = new Map();
 
 async function loadStoreCreditLedger() {
   try {
@@ -404,6 +408,25 @@ async function loadStoreCreditLedger() {
   }
 }
 
+async function loadStoreCreditReservations() {
+  try {
+    const raw = await fs.readFile(STORE_CREDIT_RESERVATIONS_FILE, 'utf8');
+    const entries = JSON.parse(raw);
+    storeCreditReservations.clear();
+    for (const [reservationId, data] of entries) {
+      // Clean up expired reservations during load
+      if (data.expiresAt && Date.now() > data.expiresAt) {
+        console.log(`🗑️ Removing expired reservation: ${reservationId}`);
+        continue;
+      }
+      storeCreditReservations.set(reservationId, data);
+    }
+    console.log(`🔒 Loaded ${storeCreditReservations.size} store-credit reservations`);
+  } catch (e) {
+    console.log('🔒 No existing store credit reservations file found - starting fresh');
+  }
+}
+
 async function persistStoreCreditLedger() {
   try {
     const entries = Array.from(storeCreditLedger.entries());
@@ -412,6 +435,17 @@ async function persistStoreCreditLedger() {
     console.log(`💳 Persisted ${entries.length} store-credit accounts`);
   } catch (e) {
     console.error('❌ Failed to persist store credit ledger:', e?.message || e);
+  }
+}
+
+async function persistStoreCreditReservations() {
+  try {
+    const entries = Array.from(storeCreditReservations.entries());
+    await fs.mkdir(path.dirname(STORE_CREDIT_RESERVATIONS_FILE), { recursive: true });
+    await fs.writeFile(STORE_CREDIT_RESERVATIONS_FILE, JSON.stringify(entries), 'utf8');
+    console.log(`🔒 Persisted ${entries.length} store-credit reservations`);
+  } catch (e) {
+    console.error('❌ Failed to persist store credit reservations:', e?.message || e);
   }
 }
 
@@ -435,6 +469,7 @@ function adjustStoreCredit(email, delta) {
 
 // Load at startup
 loadStoreCreditLedger().catch((e) => console.warn('Could not load store credit ledger at startup', e));
+loadStoreCreditReservations().catch((e) => console.warn('Could not load store credit reservations at startup', e));
 
 // Periodic flush (every 60s)
 setInterval(() => {
@@ -487,24 +522,39 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
   try {
     const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
     const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
-    let totalStoreCreditUsed = 0;
-
+    // 🔥 NEW: Handle store credit reservations
     for (const d of discounts) {
       const code = String(d?.code || '');
-      const amountStr = String(d?.amount || '0');
+      
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        const used = Number(parseFloat(amountStr));
-        if (!isNaN(used) && used > 0) totalStoreCreditUsed += used;
+        console.log(`💳 Found store credit discount: ${code}`);
+        
+        // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_{reservationId})
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_{reservationId}
+        const reservationId = codeSuffix.split('_').pop()?.toLowerCase(); // Extract last part as reservationId
+        
+        if (reservationId) {
+          const reservation = storeCreditReservations.get(reservationId);
+          
+          if (reservation && reservation.status === 'debited') {
+            // Mark reservation as finalized (order completed successfully)
+            reservation.status = 'finalized';
+            reservation.finalizedAt = Date.now();
+            reservation.orderId = payload?.id;
+            reservation.orderName = payload?.name;
+            storeCreditReservations.set(reservationId, reservation);
+            await persistStoreCreditReservations();
+            
+            console.log(`✅ Finalized store credit reservation ${reservationId} for ${reservation.amount}€ (order: ${payload?.name})`);
+          } else if (reservation) {
+            console.log(`⚠️ Found reservation ${reservationId} but status is ${reservation.status} (expected: debited)`);
+          } else {
+            console.log(`❌ No reservation found for ID: ${reservationId}`);
+          }
+        } else {
+          console.log(`❌ Could not extract reservation ID from discount code: ${code}`);
+        }
       }
-    }
-
-    if (totalStoreCreditUsed > 0 && email) {
-      const before = getStoreCredit(email);
-      const after = adjustStoreCredit(email, -totalStoreCreditUsed);
-      await persistStoreCreditLedger();
-      console.log(`💳 Deducted ${totalStoreCreditUsed.toFixed(2)} from ${email} (before: ${before.toFixed(2)} -> after: ${after.toFixed(2)})  [order ${payload?.name || payload?.order_number || payload?.id}]`);
-    } else {
-      console.log('ℹ️ No store-credit code used on this order, or missing email');
     }
 
     return res.status(200).send('ok');
@@ -990,6 +1040,10 @@ function generateVerificationCode() {
 
 function generateSessionId() {
   return crypto.randomBytes(32).toString('hex');
+}
+
+function generateReservationId() {
+  return 'RES_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 5).toUpperCase();
 }
 
 // Send verification email
@@ -12969,7 +13023,28 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Step 2: Deduct store credit from customer account using resilient helper
+    // Step 2: Create reservation first, then deduct
+    const reservationId = generateReservationId();
+    const reservationDiscountCode = `STORE_CREDIT_${Date.now()}_${reservationId.toUpperCase()}`;
+    
+    console.log(`💳 Creating reservation ${reservationId} and discount code: ${reservationDiscountCode} for ${amountToDeduct}€`);
+    
+    // Create reservation to track this transaction
+    const reservation = {
+      id: reservationId,
+      email: customerEmail.toLowerCase(),
+      amount: amountToDeduct,
+      discountCode: reservationDiscountCode,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + (30 * 60 * 1000), // 30 minutes
+      status: 'pending_debit',
+      storeCreditAccountId: storeCreditAccountId
+    };
+    
+    storeCreditReservations.set(reservationId, reservation);
+    await persistStoreCreditReservations();
+
+    // Step 3: Deduct store credit from customer account using resilient helper
     const amountStrDebit = Number(amountToDeduct).toFixed(2);
   const debitResult = await tryDebitWithFallbacks({ customerGid: customer.id, storeCreditAccountId, amountStr: amountStrDebit });
 
@@ -13014,8 +13089,8 @@ app.post('/apply-store-credit', async (req, res) => {
     }
 
     // Step 3: Create a discount code equivalent to the deducted amount
-    const discountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-    console.log(`💳 Creating discount code: ${discountCodeName} for ${amountToDeduct}€`);
+    const finalDiscountCodeName = `STORE_CREDIT_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    console.log(`💳 Creating discount code: ${finalDiscountCodeName} for ${amountToDeduct}€`);
 
     // GraphQL mutation to create a basic code discount. Keep selection minimal:
     // return the created node id and any userErrors. We already generate the
@@ -13039,7 +13114,7 @@ app.post('/apply-store-credit', async (req, res) => {
     const discountInput = {
       basicCodeDiscount: {
         title: `Store Credit Used - ${customerEmail}`,
-        code: discountCodeName,
+        code: finalDiscountCodeName,
         startsAt: new Date().toISOString(),
         endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
         combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
@@ -13091,7 +13166,14 @@ app.post('/apply-store-credit', async (req, res) => {
 
       // Success
       console.log('✅ Admin API reported success for discount creation (no userErrors)');
-      createdDiscountCode = discountCodeName;
+      createdDiscountCode = finalDiscountCodeName;
+      
+      // Mark reservation as debited (money has been deducted)
+      reservation.status = 'debited';
+      reservation.debitedAt = Date.now();
+      storeCreditReservations.set(reservationId, reservation);
+      await persistStoreCreditReservations();
+      
     } catch (err) {
       console.error('❌ Error calling Admin API:', err?.response?.data || err.message || err);
       lastErrorResponse = err?.response?.data || { message: err.message };
@@ -13109,13 +13191,21 @@ app.post('/apply-store-credit', async (req, res) => {
 
     // Success: return created code and new balance
     console.log(`💰 Store credit of ${amountToDeduct}€ successfully deducted and discount created`);
+    
+    // Mark reservation as completed
+    reservation.status = 'completed';
+    reservation.completedAt = Date.now();
+    storeCreditReservations.set(reservationId, reservation);
+    await persistStoreCreditReservations();
+    
     res.json({
       success: true,
       message: 'Store credit deducted and discount code created',
       discountCode: createdDiscountCode,
       appliedStoreCredit: amountToDeduct,
       newStoreCreditBalance: Number(authoritativeBalance),
-      customerId: customer.id
+      customerId: customer.id,
+      reservationId: reservationId
     });
 
   } catch (error) {
