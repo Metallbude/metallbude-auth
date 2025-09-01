@@ -533,6 +533,12 @@ app.post('/orders/complete', async (req, res) => {
     console.log(`🎯 DIRECT ORDER COMPLETION: ${orderToken} for ${email}`);
     console.log(`🎯 Total amount: ${totalAmount}, Discount codes: ${JSON.stringify(discountCodes)}`);
     
+    // Debug: Log all current reservations
+    console.log(`🔍 DEBUG: Current reservations count: ${storeCreditReservations.size}`);
+    for (const [key, reservation] of storeCreditReservations.entries()) {
+      console.log(`🔍 DEBUG: Reservation ${key}: status=${reservation.status}, email=${reservation.email}`);
+    }
+    
     if (!email || !discountCodes || !Array.isArray(discountCodes)) {
       return res.status(400).json({
         success: false,
@@ -559,9 +565,12 @@ app.post('/orders/complete', async (req, res) => {
           const reservationId = `RES_${matches[1]}`;  // Keep original case
           console.log(`🔍 Looking for reservation: ${reservationId}`);
           
+          console.log(`🔍 Looking up reservation with ID: ${reservationId}`);
           const reservation = storeCreditReservations.get(reservationId);
+          console.log(`🔍 Found reservation:`, reservation);
+          
           if (reservation && reservation.status === 'reserved') {
-            console.log(`✅ Found reservation: amount=${reservation.amount}, email=${reservation.email}`);
+            console.log(`✅ Found valid reservation: amount=${reservation.amount}, email=${reservation.email}, status=${reservation.status}`);
             
             // Create ledger entry for the deduction
             const ledgerEntry = {
@@ -676,6 +685,25 @@ app.post('/orders/complete', async (req, res) => {
       error: error.message
     });
   }
+});
+
+// Debug endpoint to check reservations
+app.get('/debug/reservations', (req, res) => {
+  const reservations = [];
+  for (const [key, reservation] of storeCreditReservations.entries()) {
+    reservations.push({
+      id: key,
+      email: reservation.email,
+      amount: reservation.amount,
+      status: reservation.status,
+      discountCode: reservation.discountCode,
+      createdAt: new Date(reservation.createdAt).toISOString()
+    });
+  }
+  res.json({
+    count: storeCreditReservations.size,
+    reservations
+  });
 });
 
 // Test if webhook is being called by creating a simple test endpoint
