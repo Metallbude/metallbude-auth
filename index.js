@@ -526,9 +526,11 @@ function verifyShopifyHmac(req, secret) {
 
 // Webhook route: orders/create - deduct store credit when special codes are used
 app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('🔥 WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create');
-  console.log('🔥 Request headers:', req.headers);
-  console.log('🔥 Request body length:', req.body ? req.body.length : 'null');
+  const timestamp = new Date().toISOString();
+  console.log(`🔥 [${timestamp}] WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create`);
+  logWebhookActivity('orders-create-main', { url: '/webhooks/shopify/orders-create', headers: req.headers });
+  console.log(`🔥 [${timestamp}] Request headers:`, req.headers);
+  console.log(`🔥 [${timestamp}] Request body length:`, req.body ? req.body.length : 'null');
   
   if (!SHOPIFY_WEBHOOK_SECRET) {
     console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
@@ -638,12 +640,21 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
 
 // Alias route for Shopify webhook (alternative URL that matches Shopify webhook URL pattern)
 app.post('/webhooks/orders/create', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('🔥 WEBHOOK ALIAS HIT! /webhooks/orders/create (processing directly)');
-  console.log('🔥 Request headers:', req.headers);
-  console.log('🔥 Request body length:', req.body ? req.body.length : 'null');
+  const timestamp = new Date().toISOString();
+  console.log(`🔥 [${timestamp}] WEBHOOK ALIAS HIT! /webhooks/orders/create (processing directly)`);
+  logWebhookActivity('orders-create-alias', { url: '/webhooks/orders/create', headers: req.headers });
+  console.log(`🔥 [${timestamp}] Request headers:`, JSON.stringify(req.headers, null, 2));
+  console.log(`🔥 [${timestamp}] Request body length:`, req.body ? req.body.length : 'null');
+  console.log(`🔥 [${timestamp}] User-Agent:`, req.headers['user-agent']);
+  console.log(`🔥 [${timestamp}] X-Shopify headers:`, {
+    'x-shopify-topic': req.headers['x-shopify-topic'],
+    'x-shopify-shop-domain': req.headers['x-shopify-shop-domain'],
+    'x-shopify-order-id': req.headers['x-shopify-order-id'],
+    'x-shopify-hmac-sha256': req.headers['x-shopify-hmac-sha256'] ? 'present' : 'missing'
+  });
   
   if (!SHOPIFY_WEBHOOK_SECRET) {
-    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
+    console.warn(`⚠️ [${timestamp}] No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety`);
     return res.status(401).send('Webhook secret not configured');
   }
 
@@ -748,6 +759,49 @@ app.post('/webhooks/orders/create', express.raw({ type: 'application/json' }), a
     console.error('❌ WEBHOOK ALIAS: Processing error:', e);
     return res.status(500).send('error');
   }
+});
+
+// Test endpoint to verify webhook connectivity
+app.get('/webhooks/test', (req, res) => {
+  console.log('🧪 Webhook test endpoint hit');
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    server: 'metallbude-auth.onrender.com',
+    webhookSecret: !!SHOPIFY_WEBHOOK_SECRET,
+    lastWebhookReceived: global.lastWebhookReceived || null
+  });
+});
+
+// Add webhook tracking
+global.webhookLog = global.webhookLog || [];
+
+// Enhanced webhook logging function
+function logWebhookActivity(event, data) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    event,
+    data
+  };
+  
+  global.webhookLog = global.webhookLog || [];
+  global.webhookLog.unshift(entry);
+  
+  // Keep only last 10 entries
+  if (global.webhookLog.length > 10) {
+    global.webhookLog = global.webhookLog.slice(0, 10);
+  }
+  
+  global.lastWebhookReceived = entry.timestamp;
+}
+
+// Debug endpoint to check webhook activity
+app.get('/debug/webhooks', (req, res) => {
+  res.json({
+    lastWebhookReceived: global.lastWebhookReceived || null,
+    recentActivity: global.webhookLog || [],
+    serverTime: new Date().toISOString()
+  });
 });
 
 // Debug routes
