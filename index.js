@@ -574,11 +574,17 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
         const parts = codeSuffix.split('_');
         console.log(`🔍 WEBHOOK: Code parts:`, parts);
         
-        // Format: timestamp_RES_reservationId_uniqueId, so reservation ID is at index 2
-        const reservationId = parts.length >= 3 ? parts[2] : null;
-        console.log(`🔍 WEBHOOK: Extracted reservation ID: "${reservationId}"`);
-        
-        if (reservationId) {
+        // Format: timestamp_RES_reservationId_uniqueId, so we need to construct the full reservation ID
+        // The reservation is stored as: RES_{reservationId_in_lowercase}_{uniqueId}
+        if (parts.length >= 4 && parts[1] === 'RES') {
+          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
+          console.log(`🔍 WEBHOOK: Constructed full reservation ID: "${reservationId}"`);
+        // Format: timestamp_RES_reservationId_uniqueId, so we need to construct the full reservation ID
+        // The reservation is stored as: RES_{reservationId_in_lowercase}_{uniqueId}
+        if (parts.length >= 4 && parts[1] === 'RES') {
+          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
+          console.log(`🔍 WEBHOOK: Constructed full reservation ID: "${reservationId}"`);
+          
           const reservation = storeCreditReservations.get(reservationId);
           console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
           
@@ -627,11 +633,12 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
             console.log(`❌ No reservation found for ID: ${reservationId}`);
           }
         } else {
-          console.log(`❌ Could not extract reservation ID from discount code: ${code}`);
+          console.log(`❌ Could not extract reservation ID from discount code: ${code} (invalid format)`);
         }
-      }
-    }
+      } // Close the if (code.startsWith(STORE_CREDIT_PREFIX)) block
+    } // Close the for (const d of discounts) loop
 
+  } // End try block
     return res.status(200).send('ok');
   } catch (e) {
     console.error('❌ Webhook processing error:', e);
