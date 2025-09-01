@@ -13576,6 +13576,46 @@ app.post('/apply-store-credit', async (req, res) => {
     // Success: return created code in the format Flutter app expects
     console.log(`💰 Store credit reservation of ${amountToDeduct}€ created and discount code ready`);
     
+    // Set up automatic processing fallback for zero-total orders
+    setTimeout(async () => {
+      try {
+        console.log(`🔄 Checking reservation ${reservationId} for automatic processing...`);
+        const currentReservation = storeCreditReservations.get(reservationId);
+        
+        if (currentReservation && currentReservation.status === 'reserved') {
+          console.log(`⏰ Auto-processing reservation ${reservationId} (fallback for zero-total order)`);
+          
+          // Process the store credit deduction automatically
+          const ledgerEntry = {
+            id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+            email: currentReservation.email,
+            type: 'deduction',
+            amount: -currentReservation.amount,
+            description: `Store Credit Used - Order Completed (Auto-processed)`,
+            timestamp: Date.now(),
+            reservationId: reservationId,
+            storeCreditAccountId: currentReservation.storeCreditAccountId
+          };
+
+          storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+          await persistStoreCreditLedger();
+
+          // Update reservation status to finalized
+          currentReservation.status = 'finalized';
+          currentReservation.finalizedAt = Date.now();
+          currentReservation.processedBy = 'auto-fallback';
+          storeCreditReservations.set(reservationId, currentReservation);
+          await persistStoreCreditReservations();
+
+          console.log(`✅ Auto-processed store credit deduction: ${currentReservation.amount}€ for ${currentReservation.email}`);
+        } else {
+          console.log(`ℹ️ Reservation ${reservationId} already processed or not found`);
+        }
+      } catch (error) {
+        console.error(`❌ Auto-processing failed for reservation ${reservationId}:`, error);
+      }
+    }, 10000); // Wait 10 seconds for webhook to process naturally, then auto-process if needed
+    
     res.json({
       success: true,
       message: 'Store credit reserved and discount code created',
@@ -13595,6 +13635,51 @@ app.post('/apply-store-credit', async (req, res) => {
     });
   }
 });
+
+// Periodic cleanup: Auto-process expired reservations that webhooks missed
+setInterval(async () => {
+  try {
+    const now = Date.now();
+    let processedCount = 0;
+    
+    for (const [reservationId, reservation] of storeCreditReservations.entries()) {
+      // Process reservations that are older than 2 minutes and still reserved
+      if (reservation.status === 'reserved' && (now - reservation.createdAt) > 120000) {
+        console.log(`🔄 Auto-processing expired reservation: ${reservationId}`);
+        
+        const ledgerEntry = {
+          id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+          email: reservation.email,
+          type: 'deduction',
+          amount: -reservation.amount,
+          description: `Store Credit Used - Order Completed (Auto-processed - Cleanup)`,
+          timestamp: Date.now(),
+          reservationId: reservationId,
+          storeCreditAccountId: reservation.storeCreditAccountId
+        };
+
+        storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+        await persistStoreCreditLedger();
+
+        // Update reservation status
+        reservation.status = 'finalized';
+        reservation.finalizedAt = Date.now();
+        reservation.processedBy = 'auto-cleanup';
+        storeCreditReservations.set(reservationId, reservation);
+        await persistStoreCreditReservations();
+        
+        processedCount++;
+        console.log(`✅ Auto-processed reservation ${reservationId}: ${reservation.amount}€ deducted for ${reservation.email}`);
+      }
+    }
+    
+    if (processedCount > 0) {
+      console.log(`🧹 Cleanup completed: ${processedCount} reservations auto-processed`);
+    }
+  } catch (error) {
+    console.error('❌ Error in cleanup process:', error);
+  }
+}, 60000); // Run every minute
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
