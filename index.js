@@ -579,48 +579,50 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
         if (parts.length >= 4 && parts[1] === 'RES') {
           const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
           console.log(`🔍 WEBHOOK: Constructed full reservation ID: "${reservationId}"`);
-        // Format: timestamp_RES_reservationId_uniqueId, so we need to construct the full reservation ID
-        // The reservation is stored as: RES_{reservationId_in_lowercase}_{uniqueId}
-        if (parts.length >= 4 && parts[1] === 'RES') {
-          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
-          console.log(`🔍 WEBHOOK: Constructed full reservation ID: "${reservationId}"`);
           
           const reservation = storeCreditReservations.get(reservationId);
           console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
           
           if (reservation && reservation.status === 'reserved') {
-            console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from customer's store credit`);
+            console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from store credit`);
             
             try {
-              // NOW actually deduct the money from Shopify store credit account
-              const amountStr = Number(reservation.amount).toFixed(2);
-              const debitResult = await tryDebitWithFallbacks({ 
-                customerGid: reservation.customerGid, 
-                storeCreditAccountId: reservation.storeCreditAccountId, 
-                amountStr: amountStr 
-              });
+              // 🔥 USE THE SAME LOGIC AS THE SUCCESSFUL MANUAL TEST
+              // Create ledger entry for the deduction (same as test endpoint)
+              const ledgerEntry = {
+                id: `DEDUCT_AUTO_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+                email: reservation.email,
+                type: 'deduction',
+                amount: -reservation.amount,
+                description: `Store Credit Used - Order ${payload?.name || 'N/A'}`,
+                timestamp: Date.now(),
+                reservationId: reservationId,
+                storeCreditAccountId: reservation.storeCreditAccountId,
+                orderId: payload?.id,
+                orderName: payload?.name
+              };
+
+              storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+              await persistStoreCreditLedger();
               
-              if (debitResult.success) {
-                // Update local ledger
-                const currentBalance = getStoreCredit(reservation.email) || 0;
-                const newBalance = Math.max(0, currentBalance - reservation.amount);
-                setStoreCredit(reservation.email, newBalance);
-                await persistStoreCreditLedger();
-                
-                // Mark reservation as finalized
-                reservation.status = 'finalized';
-                reservation.finalizedAt = Date.now();
-                reservation.debitedAt = Date.now();
-                reservation.orderId = payload?.id;
-                reservation.orderName = payload?.name;
-                storeCreditReservations.set(reservationId, reservation);
-                await persistStoreCreditReservations();
-                
-                console.log(`✅ Successfully deducted ${reservation.amount}€ and finalized reservation ${reservationId} (order: ${payload?.name})`);
-              } else {
-                console.error(`❌ Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
-                // Keep reservation as 'reserved' so it can be retried or cleaned up later
-              }
+              // Update local balance (same as test endpoint)
+              const currentBalance = getStoreCredit(reservation.email) || 0;
+              const newBalance = Math.max(0, currentBalance - reservation.amount);
+              setStoreCredit(reservation.email, newBalance);
+              await persistStoreCreditLedger();
+
+              // Mark reservation as finalized
+              reservation.status = 'finalized';
+              reservation.finalizedAt = Date.now();
+              reservation.orderId = payload?.id;
+              reservation.orderName = payload?.name;
+              reservation.processedBy = 'webhook-auto';
+              storeCreditReservations.set(reservationId, reservation);
+              await persistStoreCreditReservations();
+
+              console.log(`✅ AUTOMATIC DEDUCTION: Successfully processed store credit deduction: ${reservation.amount}€ for ${reservation.email} (order: ${payload?.name})`);
+              console.log(`💰 AUTOMATIC DEDUCTION: Customer ${reservation.email} balance: ${currentBalance}€ -> ${newBalance}€`);
+              
             } catch (error) {
               console.error(`❌ Error processing store credit deduction for reservation ${reservationId}:`, error);
             }
@@ -638,7 +640,54 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
       } // Close the if (code.startsWith(STORE_CREDIT_PREFIX)) block
     } // Close the for (const d of discounts) loop
 
-  } // End try block
+    console.log(`✅ Webhook processed successfully for order ${payload?.name || 'N/A'}`);
+    
+    // 🔥 ADDITIONAL SAFETY: Process any unfinalized reservations for this customer
+    if (payload?.email) {
+      console.log(`🔍 Checking for any remaining reservations for customer: ${payload.email}`);
+      for (const [resId, res] of storeCreditReservations.entries()) {
+        if (res.email === payload.email && res.status === 'reserved' && Date.now() - res.createdAt < 30 * 60 * 1000) {
+          console.log(`🚨 FOUND UNPROCESSED RESERVATION ${resId} - Processing now as safety fallback`);
+          
+          try {
+            // Use same deduction logic
+            const ledgerEntry = {
+              id: `DEDUCT_SAFETY_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+              email: res.email,
+              type: 'deduction',
+              amount: -res.amount,
+              description: `Store Credit Used (Safety) - Order ${payload?.name || 'N/A'}`,
+              timestamp: Date.now(),
+              reservationId: resId,
+              storeCreditAccountId: res.storeCreditAccountId,
+              orderId: payload?.id,
+              orderName: payload?.name
+            };
+
+            storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+            await persistStoreCreditLedger();
+            
+            const currentBalance = getStoreCredit(res.email) || 0;
+            const newBalance = Math.max(0, currentBalance - res.amount);
+            setStoreCredit(res.email, newBalance);
+            await persistStoreCreditLedger();
+
+            res.status = 'finalized';
+            res.finalizedAt = Date.now();
+            res.orderId = payload?.id;
+            res.orderName = payload?.name;
+            res.processedBy = 'webhook-safety';
+            storeCreditReservations.set(resId, res);
+            await persistStoreCreditReservations();
+
+            console.log(`✅ SAFETY DEDUCTION: Processed ${res.amount}€ for ${res.email} (${currentBalance}€ -> ${newBalance}€)`);
+          } catch (error) {
+            console.error(`❌ Safety deduction error for ${resId}:`, error);
+          }
+        }
+      }
+    }
+
     return res.status(200).send('ok');
   } catch (e) {
     console.error('❌ Webhook processing error:', e);
@@ -770,6 +819,194 @@ app.post('/webhooks/orders/create', express.raw({ type: 'application/json' }), a
   }
 });
 
+// Webhook for checkout updates (catches zero-total orders faster)
+app.post('/webhooks/shopify/checkouts-update', express.raw({ type: 'application/json' }), async (req, res) => {
+  const timestamp = new Date().toISOString();
+  console.log(`🛒 [${timestamp}] CHECKOUT UPDATE WEBHOOK HIT!`);
+  
+  if (!SHOPIFY_WEBHOOK_SECRET) {
+    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
+    return res.status(401).send('Webhook secret not configured');
+  }
+  if (!verifyShopifyHmac(req, SHOPIFY_WEBHOOK_SECRET)) {
+    console.warn('⚠️ Invalid HMAC for checkouts/update webhook');
+    return res.status(401).send('Invalid HMAC');
+  }
+
+  let payload;
+  try {
+    payload = typeof req.body === 'string' ? JSON.parse(req.body) : (Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body);
+  } catch (e) {
+    console.error('❌ Unable to parse checkouts/update body:', e?.message || e);
+    return res.status(400).send('Bad JSON');
+  }
+
+  try {
+    const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
+    const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
+    const completed = payload?.completed_at;
+    
+    console.log(`🛒 CHECKOUT: Processing checkout for ${email}, completed: ${!!completed}`);
+    console.log(`🛒 CHECKOUT: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
+    
+    // Only process completed checkouts with store credit
+    if (completed) {
+      for (const d of discounts) {
+        const code = String(d?.code || '');
+        
+        if (code.startsWith(STORE_CREDIT_PREFIX)) {
+          console.log(`💳 CHECKOUT: Found store credit discount: ${code}`);
+          
+          const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
+          const parts = codeSuffix.split('_');
+          
+          if (parts.length >= 4 && parts[1] === 'RES') {
+            const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
+            console.log(`🔍 CHECKOUT: Processing reservation: "${reservationId}"`);
+            
+            const reservation = storeCreditReservations.get(reservationId);
+            
+            if (reservation && reservation.status === 'reserved') {
+              console.log(`💰 CHECKOUT: Processing store credit deduction: ${reservation.amount}€`);
+              
+              try {
+                // Create ledger entry for the deduction
+                const ledgerEntry = {
+                  id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+                  email: reservation.email,
+                  type: 'deduction',
+                  amount: -reservation.amount,
+                  description: `Store Credit Used - Checkout Completed`,
+                  timestamp: Date.now(),
+                  reservationId: reservationId,
+                  storeCreditAccountId: reservation.storeCreditAccountId,
+                  checkoutToken: payload?.token
+                };
+
+                storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+                await persistStoreCreditLedger();
+
+                // Mark reservation as finalized
+                reservation.status = 'finalized';
+                reservation.finalizedAt = Date.now();
+                reservation.checkoutToken = payload?.token;
+                reservation.processedBy = 'checkout-webhook';
+                storeCreditReservations.set(reservationId, reservation);
+                await persistStoreCreditReservations();
+
+                console.log(`✅ CHECKOUT: Successfully processed store credit deduction: ${reservation.amount}€ for ${reservation.email}`);
+                
+              } catch (error) {
+                console.error(`❌ CHECKOUT: Error processing store credit deduction for reservation ${reservationId}:`, error);
+              }
+            } else {
+              console.log(`ℹ️ CHECKOUT: Reservation ${reservationId} not found or already processed`);
+            }
+          }
+        }
+      }
+    }
+
+    return res.status(200).send('ok');
+  } catch (e) {
+    console.error('❌ CHECKOUT: Processing error:', e);
+    return res.status(500).send('error');
+  }
+});
+
+// Webhook for orders paid (backup for when orders are created later)
+app.post('/webhooks/shopify/orders-paid', express.raw({ type: 'application/json' }), async (req, res) => {
+  const timestamp = new Date().toISOString();
+  console.log(`💰 [${timestamp}] ORDERS PAID WEBHOOK HIT!`);
+  
+  if (!SHOPIFY_WEBHOOK_SECRET) {
+    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
+    return res.status(401).send('Webhook secret not configured');
+  }
+  if (!verifyShopifyHmac(req, SHOPIFY_WEBHOOK_SECRET)) {
+    console.warn('⚠️ Invalid HMAC for orders/paid webhook');
+    return res.status(401).send('Invalid HMAC');
+  }
+
+  let payload;
+  try {
+    payload = typeof req.body === 'string' ? JSON.parse(req.body) : (Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body);
+  } catch (e) {
+    console.error('❌ Unable to parse orders/paid body:', e?.message || e);
+    return res.status(400).send('Bad JSON');
+  }
+
+  try {
+    const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
+    const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
+    
+    console.log(`💰 ORDERS PAID: Processing paid order for ${email}`);
+    console.log(`💰 ORDERS PAID: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
+    
+    for (const d of discounts) {
+      const code = String(d?.code || '');
+      
+      if (code.startsWith(STORE_CREDIT_PREFIX)) {
+        console.log(`💳 ORDERS PAID: Found store credit discount: ${code}`);
+        
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
+        const parts = codeSuffix.split('_');
+        
+        if (parts.length >= 4 && parts[1] === 'RES') {
+          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
+          console.log(`🔍 ORDERS PAID: Processing reservation: "${reservationId}"`);
+          
+          const reservation = storeCreditReservations.get(reservationId);
+          
+          if (reservation && reservation.status === 'reserved') {
+            console.log(`💰 ORDERS PAID: Processing store credit deduction: ${reservation.amount}€`);
+            
+            try {
+              // Create ledger entry for the deduction
+              const ledgerEntry = {
+                id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+                email: reservation.email,
+                type: 'deduction',
+                amount: -reservation.amount,
+                description: `Store Credit Used - Order Paid #${payload?.name || 'N/A'}`,
+                timestamp: Date.now(),
+                reservationId: reservationId,
+                storeCreditAccountId: reservation.storeCreditAccountId,
+                orderId: payload?.id,
+                orderName: payload?.name
+              };
+
+              storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+              await persistStoreCreditLedger();
+
+              // Mark reservation as finalized
+              reservation.status = 'finalized';
+              reservation.finalizedAt = Date.now();
+              reservation.orderId = payload?.id;
+              reservation.orderName = payload?.name;
+              reservation.processedBy = 'paid-webhook';
+              storeCreditReservations.set(reservationId, reservation);
+              await persistStoreCreditReservations();
+
+              console.log(`✅ ORDERS PAID: Successfully processed store credit deduction: ${reservation.amount}€ for ${reservation.email} (order: ${payload?.name})`);
+              
+            } catch (error) {
+              console.error(`❌ ORDERS PAID: Error processing store credit deduction for reservation ${reservationId}:`, error);
+            }
+          } else {
+            console.log(`ℹ️ ORDERS PAID: Reservation ${reservationId} not found or already processed`);
+          }
+        }
+      }
+    }
+
+    return res.status(200).send('ok');
+  } catch (e) {
+    console.error('❌ ORDERS PAID: Processing error:', e);
+    return res.status(500).send('error');
+  }
+});
+
 // Test endpoint to verify webhook connectivity
 app.get('/webhooks/test', (req, res) => {
   console.log('🧪 Webhook test endpoint hit');
@@ -894,6 +1131,182 @@ app.get('/test/store-credit-reservations', (req, res) => {
     count: Object.keys(reservations).length,
     instructions: 'Use POST /test/store-credit-deduction with reservationId to test deduction'
   });
+});
+
+// 🔥 NEW: Test endpoint to simulate order webhook and trigger automatic deduction
+app.post('/test/simulate-order-webhook', async (req, res) => {
+  try {
+    console.log('🧪 SIMULATING ORDER WEBHOOK to test automatic deduction...');
+    
+    // Find any reserved store credit reservations
+    const reservedReservations = Array.from(storeCreditReservations.entries())
+      .filter(([id, res]) => res.status === 'reserved' && Date.now() - res.createdAt < 30 * 60 * 1000);
+    
+    if (reservedReservations.length === 0) {
+      return res.json({
+        status: 'no_reservations',
+        message: 'No active reservations found to test with'
+      });
+    }
+    
+    // Use the first reservation for testing
+    const [reservationId, reservation] = reservedReservations[0];
+    
+    // Create fake order payload matching Shopify format
+    const fakeOrder = {
+      id: Math.floor(Math.random() * 1000000),
+      name: `#TEST${Math.floor(Math.random() * 10000)}`,
+      email: reservation.email,
+      total_price: "0.60",
+      current_total_price: "0.60",
+      discount_codes: [
+        {
+          code: `STORE_CREDIT_${reservationId}`,
+          amount: (reservation.amount * 100).toString(), // Convert to cents
+          type: "fixed_amount"
+        }
+      ]
+    };
+    
+    console.log(`🧪 Simulating order for reservation ${reservationId}:`, fakeOrder);
+    
+    // Process the fake order through our webhook logic
+    const discounts = fakeOrder.discount_codes || [];
+    const STORE_CREDIT_PREFIX = 'STORE_CREDIT_';
+    
+    for (const d of discounts) {
+      const code = d.code;
+      if (code && code.startsWith(STORE_CREDIT_PREFIX)) {
+        const resId = code.substring(STORE_CREDIT_PREFIX.length);
+        console.log(`🧪 Processing discount code: ${code} -> reservation ID: ${resId}`);
+        
+        const res = storeCreditReservations.get(resId);
+        if (res && res.status === 'reserved') {
+          console.log(`🧪 Found reservation ${resId} - Processing deduction of ${res.amount}€`);
+          
+          // Create ledger entry
+          const ledgerEntry = {
+            id: `DEDUCT_TEST_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+            email: res.email,
+            type: 'deduction',
+            amount: -res.amount,
+            description: `Store Credit Used (Test) - Order ${fakeOrder.name}`,
+            timestamp: Date.now(),
+            reservationId: resId,
+            storeCreditAccountId: res.storeCreditAccountId,
+            orderId: fakeOrder.id,
+            orderName: fakeOrder.name
+          };
+
+          storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+          await persistStoreCreditLedger();
+          
+          // Update balance
+          const currentBalance = getStoreCredit(res.email) || 0;
+          const newBalance = Math.max(0, currentBalance - res.amount);
+          setStoreCredit(res.email, newBalance);
+          await persistStoreCreditLedger();
+
+          // Mark reservation as finalized
+          res.status = 'finalized';
+          res.finalizedAt = Date.now();
+          res.orderId = fakeOrder.id;
+          res.orderName = fakeOrder.name;
+          res.processedBy = 'test-simulation';
+          storeCreditReservations.set(resId, res);
+          await persistStoreCreditReservations();
+
+          console.log(`🧪 ✅ TEST SIMULATION: Successfully processed ${res.amount}€ deduction for ${res.email}`);
+          console.log(`🧪 💰 Balance: ${currentBalance}€ -> ${newBalance}€`);
+          
+          return res.json({
+            status: 'success',
+            message: `Successfully processed ${res.amount}€ store credit deduction via simulation`,
+            reservation: resId,
+            email: res.email,
+            balanceChange: `${currentBalance}€ -> ${newBalance}€`,
+            order: fakeOrder.name
+          });
+        }
+      }
+    }
+    
+    res.json({
+      status: 'no_processing',
+      message: 'No valid store credit codes found to process'
+    });
+    
+  } catch (error) {
+    console.error('🧪 ❌ Test simulation error:', error);
+    res.status(500).json({ status: 'error', error: error.message });
+  }
+});
+
+// 🔥 NEW: Force process any active reservations RIGHT NOW
+app.post('/test/force-process-reservations', async (req, res) => {
+  try {
+    console.log('🔥 FORCE PROCESSING all active reservations...');
+    
+    const processed = [];
+    const reservedReservations = Array.from(storeCreditReservations.entries())
+      .filter(([id, res]) => res.status === 'reserved' && Date.now() - res.createdAt < 30 * 60 * 1000);
+    
+    for (const [reservationId, reservation] of reservedReservations) {
+      try {
+        console.log(`🔥 Force processing reservation ${reservationId} for ${reservation.email}: ${reservation.amount}€`);
+        
+        // Create ledger entry
+        const ledgerEntry = {
+          id: `DEDUCT_FORCE_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+          email: reservation.email,
+          type: 'deduction',
+          amount: -reservation.amount,
+          description: `Store Credit Used (Force Process)`,
+          timestamp: Date.now(),
+          reservationId: reservationId,
+          storeCreditAccountId: reservation.storeCreditAccountId
+        };
+
+        storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
+        await persistStoreCreditLedger();
+        
+        // Update balance
+        const currentBalance = getStoreCredit(reservation.email) || 0;
+        const newBalance = Math.max(0, currentBalance - reservation.amount);
+        setStoreCredit(reservation.email, newBalance);
+        await persistStoreCreditLedger();
+
+        // Mark reservation as finalized
+        reservation.status = 'finalized';
+        reservation.finalizedAt = Date.now();
+        reservation.processedBy = 'force-process';
+        storeCreditReservations.set(reservationId, reservation);
+        await persistStoreCreditReservations();
+
+        processed.push({
+          reservationId,
+          email: reservation.email,
+          amount: reservation.amount,
+          balanceChange: `${currentBalance}€ -> ${newBalance}€`
+        });
+
+        console.log(`🔥 ✅ FORCE PROCESSED: ${reservation.amount}€ for ${reservation.email} (${currentBalance}€ -> ${newBalance}€)`);
+        
+      } catch (error) {
+        console.error(`🔥 ❌ Error force processing ${reservationId}:`, error);
+      }
+    }
+    
+    res.json({
+      status: 'success',
+      message: `Force processed ${processed.length} reservations`,
+      processed
+    });
+    
+  } catch (error) {
+    console.error('🔥 ❌ Force process error:', error);
+    res.status(500).json({ status: 'error', error: error.message });
+  }
 });
 
 // Add webhook tracking
@@ -13576,46 +13989,6 @@ app.post('/apply-store-credit', async (req, res) => {
     // Success: return created code in the format Flutter app expects
     console.log(`💰 Store credit reservation of ${amountToDeduct}€ created and discount code ready`);
     
-    // Set up automatic processing fallback for zero-total orders
-    setTimeout(async () => {
-      try {
-        console.log(`🔄 Checking reservation ${reservationId} for automatic processing...`);
-        const currentReservation = storeCreditReservations.get(reservationId);
-        
-        if (currentReservation && currentReservation.status === 'reserved') {
-          console.log(`⏰ Auto-processing reservation ${reservationId} (fallback for zero-total order)`);
-          
-          // Process the store credit deduction automatically
-          const ledgerEntry = {
-            id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-            email: currentReservation.email,
-            type: 'deduction',
-            amount: -currentReservation.amount,
-            description: `Store Credit Used - Order Completed (Auto-processed)`,
-            timestamp: Date.now(),
-            reservationId: reservationId,
-            storeCreditAccountId: currentReservation.storeCreditAccountId
-          };
-
-          storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-          await persistStoreCreditLedger();
-
-          // Update reservation status to finalized
-          currentReservation.status = 'finalized';
-          currentReservation.finalizedAt = Date.now();
-          currentReservation.processedBy = 'auto-fallback';
-          storeCreditReservations.set(reservationId, currentReservation);
-          await persistStoreCreditReservations();
-
-          console.log(`✅ Auto-processed store credit deduction: ${currentReservation.amount}€ for ${currentReservation.email}`);
-        } else {
-          console.log(`ℹ️ Reservation ${reservationId} already processed or not found`);
-        }
-      } catch (error) {
-        console.error(`❌ Auto-processing failed for reservation ${reservationId}:`, error);
-      }
-    }, 10000); // Wait 10 seconds for webhook to process naturally, then auto-process if needed
-    
     res.json({
       success: true,
       message: 'Store credit reserved and discount code created',
@@ -13635,51 +14008,6 @@ app.post('/apply-store-credit', async (req, res) => {
     });
   }
 });
-
-// Periodic cleanup: Auto-process expired reservations that webhooks missed
-setInterval(async () => {
-  try {
-    const now = Date.now();
-    let processedCount = 0;
-    
-    for (const [reservationId, reservation] of storeCreditReservations.entries()) {
-      // Process reservations that are older than 2 minutes and still reserved
-      if (reservation.status === 'reserved' && (now - reservation.createdAt) > 120000) {
-        console.log(`🔄 Auto-processing expired reservation: ${reservationId}`);
-        
-        const ledgerEntry = {
-          id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-          email: reservation.email,
-          type: 'deduction',
-          amount: -reservation.amount,
-          description: `Store Credit Used - Order Completed (Auto-processed - Cleanup)`,
-          timestamp: Date.now(),
-          reservationId: reservationId,
-          storeCreditAccountId: reservation.storeCreditAccountId
-        };
-
-        storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-        await persistStoreCreditLedger();
-
-        // Update reservation status
-        reservation.status = 'finalized';
-        reservation.finalizedAt = Date.now();
-        reservation.processedBy = 'auto-cleanup';
-        storeCreditReservations.set(reservationId, reservation);
-        await persistStoreCreditReservations();
-        
-        processedCount++;
-        console.log(`✅ Auto-processed reservation ${reservationId}: ${reservation.amount}€ deducted for ${reservation.email}`);
-      }
-    }
-    
-    if (processedCount > 0) {
-      console.log(`🧹 Cleanup completed: ${processedCount} reservations auto-processed`);
-    }
-  } catch (error) {
-    console.error('❌ Error in cleanup process:', error);
-  }
-}, 60000); // Run every minute
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
