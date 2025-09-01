@@ -13104,8 +13104,8 @@ app.post('/apply-store-credit', async (req, res) => {
       return res.status(200).json({
         success: true,
         discountCode: existingRes.discountCode,
-        amountDeducted: existingRes.amount,
-        newBalance: totalStoreCredit, // Don't change balance until order completes
+        appliedStoreCredit: existingRes.amount, // Flutter expects this field name
+        newStoreCreditBalance: totalStoreCredit, // Flutter expects this field name
         reservationId: existingRes.id,
         isReused: true
       });
@@ -13222,18 +13222,17 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
-    // Success: return created code (money NOT deducted yet)
+    // Success: return created code in the format Flutter app expects
     console.log(`💰 Store credit reservation of ${amountToDeduct}€ created and discount code ready`);
     
     res.json({
       success: true,
       message: 'Store credit reserved and discount code created',
       discountCode: createdDiscountCode,
-      reservedAmount: amountToDeduct,
-      currentBalance: totalStoreCredit, // Balance unchanged until order completes
+      appliedStoreCredit: amountToDeduct, // Flutter expects this field name
+      newStoreCreditBalance: totalStoreCredit, // Flutter expects this field name  
       customerId: customer.id,
-      reservationId: reservationId,
-      reserved: true // Flag to indicate this is a reservation, not a deduction
+      reservationId: reservationId
     });
 
   } catch (error) {
