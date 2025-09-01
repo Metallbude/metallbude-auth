@@ -561,13 +561,26 @@ app.post('/orders/complete', async (req, res) => {
         
         // Extract reservation ID from discount code
         const matches = storeCreditCode.match(/RES_([A-Z0-9_]+)/i);
+        console.log(`🔍 Regex matches:`, matches);
         if (matches) {
-          const reservationId = `RES_${matches[1]}`;  // Keep original case
-          console.log(`🔍 Looking for reservation: ${reservationId}`);
+          const extractedId = matches[1];
+          console.log(`🔍 Extracted ID part: ${extractedId}`);
           
-          console.log(`🔍 Looking up reservation with ID: ${reservationId}`);
-          const reservation = storeCreditReservations.get(reservationId);
-          console.log(`🔍 Found reservation:`, reservation);
+          // Try to find the reservation with case-insensitive lookup
+          let reservation = null;
+          let foundReservationId = null;
+          
+          for (const [key, res] of storeCreditReservations.entries()) {
+            if (key.toUpperCase() === `RES_${extractedId}`.toUpperCase()) {
+              reservation = res;
+              foundReservationId = key;
+              break;
+            }
+          }
+          
+          console.log(`🔍 Looking for reservation matching: RES_${extractedId}`);
+          console.log(`🔍 Found reservation with ID: ${foundReservationId}`);
+          console.log(`🔍 Reservation details:`, reservation);
           
           if (reservation && reservation.status === 'reserved') {
             console.log(`✅ Found valid reservation: amount=${reservation.amount}, email=${reservation.email}, status=${reservation.status}`);
@@ -580,7 +593,7 @@ app.post('/orders/complete', async (req, res) => {
               amount: -reservation.amount,
               description: `Store Credit Used - Order ${orderToken}`,
               timestamp: Date.now(),
-              reservationId: reservationId,
+              reservationId: foundReservationId,
               orderToken: orderToken,
               storeCreditAccountId: reservation.storeCreditAccountId
             };
@@ -599,7 +612,7 @@ app.post('/orders/complete', async (req, res) => {
             reservation.finalizedAt = Date.now();
             reservation.orderToken = orderToken;
             reservation.processedBy = 'direct-completion';
-            storeCreditReservations.set(reservationId, reservation);
+            storeCreditReservations.set(foundReservationId, reservation);
             await persistStoreCreditReservations();
 
             // Also call Shopify API to deduct from the actual store credit account
@@ -650,7 +663,7 @@ app.post('/orders/complete', async (req, res) => {
             }
 
             processed.push({
-              reservationId,
+              reservationId: foundReservationId,
               email: reservation.email,
               amount: reservation.amount,
               balanceChange: `${currentBalance}€ -> ${newBalance}€`,
@@ -660,7 +673,7 @@ app.post('/orders/complete', async (req, res) => {
             console.log(`✅ PROCESSED: ${reservation.amount}€ deducted for ${reservation.email} (${currentBalance}€ -> ${newBalance}€)`);
             
           } else {
-            console.log(`⚠️ Reservation ${reservationId} not found or already processed`);
+            console.log(`⚠️ Reservation not found or already processed. Found: ${reservation ? 'YES' : 'NO'}, Status: ${reservation?.status || 'N/A'}`);
           }
         } else {
           console.log(`⚠️ Could not extract reservation ID from code: ${storeCreditCode}`);
