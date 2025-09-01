@@ -1363,10 +1363,10 @@ app.post('/test/setup-webhook', async (req, res) => {
   try {
     console.log('🔧 SETTING UP SHOPIFY WEBHOOK FOR ORDERS/CREATE...');
     
-    if (!shopify) {
+    if (!config.adminToken) {
       return res.status(500).json({
         success: false,
-        error: 'Shopify client not initialized - check SHOPIFY_ACCESS_TOKEN'
+        error: 'Shopify Admin token not configured - check SHOPIFY_ADMIN_TOKEN'
       });
     }
     
@@ -1374,7 +1374,7 @@ app.post('/test/setup-webhook', async (req, res) => {
     
     // First, check if webhook already exists
     console.log('🔍 Checking existing webhooks...');
-    const existingWebhooks = await shopify.graphql(`
+    const existingWebhooksQuery = `
       query {
         webhookSubscriptions(first: 50) {
           edges {
@@ -1386,9 +1386,18 @@ app.post('/test/setup-webhook', async (req, res) => {
           }
         }
       }
-    `);
+    `;
     
-    const webhooksResult = await existingWebhooks.json();
+    const existingWebhooksResponse = await axios.post(config.adminApiUrl, {
+      query: existingWebhooksQuery
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const webhooksResult = existingWebhooksResponse.data;
     console.log('📋 Existing webhooks:', JSON.stringify(webhooksResult, null, 2));
     
     const orderCreateWebhooks = webhooksResult.data?.webhookSubscriptions?.edges?.filter(
@@ -1406,7 +1415,7 @@ app.post('/test/setup-webhook', async (req, res) => {
     
     // Create the webhook
     console.log('🚀 Creating orders/create webhook...');
-    const createWebhook = await shopify.graphql(`
+    const createWebhookMutation = `
       mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
         webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
           webhookSubscription {
@@ -1420,7 +1429,10 @@ app.post('/test/setup-webhook', async (req, res) => {
           }
         }
       }
-    `, {
+    `;
+    
+    const createWebhookResponse = await axios.post(config.adminApiUrl, {
+      query: createWebhookMutation,
       variables: {
         topic: 'ORDERS_CREATE',
         webhookSubscription: {
@@ -1428,9 +1440,14 @@ app.post('/test/setup-webhook', async (req, res) => {
           format: 'JSON'
         }
       }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json'
+      }
     });
     
-    const createResult = await createWebhook.json();
+    const createResult = createWebhookResponse.data;
     console.log('📋 Webhook creation result:', JSON.stringify(createResult, null, 2));
     
     if (createResult.data?.webhookSubscriptionCreate?.userErrors?.length > 0) {
