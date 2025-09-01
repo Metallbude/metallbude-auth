@@ -556,7 +556,7 @@ app.post('/orders/complete', async (req, res) => {
         // Extract reservation ID from discount code
         const matches = storeCreditCode.match(/RES_([A-Z0-9_]+)/i);
         if (matches) {
-          const reservationId = `RES_${matches[1].toLowerCase()}`;
+          const reservationId = `RES_${matches[1]}`;  // Keep original case
           console.log(`🔍 Looking for reservation: ${reservationId}`);
           
           const reservation = storeCreditReservations.get(reservationId);
