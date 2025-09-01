@@ -567,14 +567,15 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
         console.log(`💳 WEBHOOK: Found store credit discount: ${code}`);
         
-        // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_{reservationId})
-        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_{reservationId}
+        // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_RES_{reservationId}_{uniqueId})
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_RES_{reservationId}_{uniqueId}
         console.log(`🔍 WEBHOOK: Code suffix after removing prefix: "${codeSuffix}"`);
         
         const parts = codeSuffix.split('_');
         console.log(`🔍 WEBHOOK: Code parts:`, parts);
         
-        const reservationId = parts.pop(); // Keep original case - don't use .toLowerCase()
+        // Format: timestamp_RES_reservationId_uniqueId, so reservation ID is at index 2
+        const reservationId = parts.length >= 3 ? parts[2] : null;
         console.log(`🔍 WEBHOOK: Extracted reservation ID: "${reservationId}"`);
         
         if (reservationId) {
@@ -698,16 +699,17 @@ app.post('/webhooks/orders/create', express.raw({ type: 'application/json' }), a
       const code = discountCode.code;
       console.log(`🔍 WEBHOOK ALIAS: Processing discount code: ${code}`);
       
-      if (code?.toLowerCase().startsWith('storecredit_')) {
+      if (code?.startsWith(STORE_CREDIT_PREFIX)) {
         console.log(`🎯 WEBHOOK ALIAS: Found store credit code: ${code}`);
         
-        const codeSuffix = code.substring('storecredit_'.length);
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
         console.log(`🔍 WEBHOOK ALIAS: Code suffix after removing prefix: "${codeSuffix}"`);
         
         const parts = codeSuffix.split('_');
         console.log(`🔍 WEBHOOK ALIAS: Code parts:`, parts);
         
-        const reservationId = parts.pop();
+        // Format: timestamp_RES_reservationId_uniqueId, so reservation ID is at index 2
+        const reservationId = parts.length >= 3 ? parts[2] : null;
         console.log(`🔍 WEBHOOK ALIAS: Extracted reservation ID: "${reservationId}"`);
         
         if (reservationId) {
