@@ -775,6 +775,120 @@ app.get('/webhooks/test', (req, res) => {
   });
 });
 
+// Test endpoint to simulate store credit deduction
+app.post('/test/store-credit-deduction', async (req, res) => {
+  console.log('🧪 TEST: Store credit deduction simulation started');
+  
+  try {
+    const { reservationId, customerEmail } = req.body;
+    
+    if (!reservationId) {
+      return res.status(400).json({
+        success: false,
+        error: 'reservationId is required. Available reservations: ' + Array.from(storeCreditReservations.keys()).join(', ')
+      });
+    }
+    
+    console.log(`🧪 TEST: Looking for reservation ${reservationId}`);
+    console.log(`🧪 TEST: Current reservations:`, Array.from(storeCreditReservations.keys()));
+    
+    const reservation = storeCreditReservations.get(reservationId);
+    if (!reservation) {
+      return res.status(404).json({
+        success: false,
+        error: `Reservation ${reservationId} not found`,
+        availableReservations: Array.from(storeCreditReservations.keys())
+      });
+    }
+    
+    console.log(`🧪 TEST: Found reservation:`, reservation);
+    
+    if (reservation.status !== 'reserved') {
+      return res.status(400).json({
+        success: false,
+        error: `Reservation ${reservationId} has status ${reservation.status} (expected: reserved)`
+      });
+    }
+    
+    console.log(`🧪 TEST: Simulating deduction of ${reservation.amount}€ from customer's store credit`);
+    
+    // Simulate the deduction process
+    const amountStr = Number(reservation.amount).toFixed(2);
+    const debitResult = await tryDebitWithFallbacks({ 
+      customerGid: reservation.customerGid, 
+      storeCreditAccountId: reservation.storeCreditAccountId, 
+      amountStr: amountStr 
+    });
+    
+    if (debitResult.success) {
+      // Update local ledger
+      const currentBalance = getStoreCredit(reservation.email) || 0;
+      const newBalance = Math.max(0, currentBalance - reservation.amount);
+      setStoreCredit(reservation.email, newBalance);
+      await persistStoreCreditLedger();
+      
+      // Mark reservation as finalized
+      reservation.status = 'finalized';
+      reservation.finalizedAt = Date.now();
+      reservation.debitedAt = Date.now();
+      reservation.orderId = 'TEST_ORDER_' + Date.now();
+      reservation.orderName = 'TEST#' + Date.now();
+      storeCreditReservations.set(reservationId, reservation);
+      await persistStoreCreditReservations();
+      
+      console.log(`🧪 TEST: ✅ Successfully deducted ${reservation.amount}€ and finalized reservation ${reservationId}`);
+      
+      res.json({
+        success: true,
+        message: 'Store credit deduction simulated successfully',
+        reservation: reservation,
+        debitResult: debitResult,
+        oldBalance: currentBalance,
+        newBalance: newBalance,
+        deductedAmount: reservation.amount
+      });
+    } else {
+      console.error(`🧪 TEST: ❌ Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
+      res.status(500).json({
+        success: false,
+        error: 'Deduction failed',
+        debitResult: debitResult
+      });
+    }
+    
+  } catch (error) {
+    console.error('🧪 TEST: Error in store credit deduction simulation:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Test endpoint to list current store credit reservations
+app.get('/test/store-credit-reservations', (req, res) => {
+  console.log('🧪 TEST: Listing current store credit reservations');
+  
+  const reservations = {};
+  for (const [id, reservation] of storeCreditReservations.entries()) {
+    reservations[id] = {
+      id: reservation.id,
+      email: reservation.email,
+      amount: reservation.amount,
+      status: reservation.status,
+      createdAt: new Date(reservation.createdAt).toISOString(),
+      discountCode: reservation.discountCode
+    };
+  }
+  
+  res.json({
+    success: true,
+    reservations: reservations,
+    count: Object.keys(reservations).length,
+    instructions: 'Use POST /test/store-credit-deduction with reservationId to test deduction'
+  });
+});
+
 // Add webhook tracking
 global.webhookLog = global.webhookLog || [];
 
