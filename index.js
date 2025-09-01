@@ -1358,6 +1358,217 @@ app.post('/test/force-process-reservations', async (req, res) => {
   }
 });
 
+// Auto-configure the Shopify webhook for orders/create
+app.post('/test/setup-webhook', async (req, res) => {
+  try {
+    console.log('🔧 SETTING UP SHOPIFY WEBHOOK FOR ORDERS/CREATE...');
+    
+    if (!shopify) {
+      return res.status(500).json({
+        success: false,
+        error: 'Shopify client not initialized - check SHOPIFY_ACCESS_TOKEN'
+      });
+    }
+    
+    const webhookUrl = 'https://metallbude-auth.onrender.com/webhooks/shopify/orders-create';
+    
+    // First, check if webhook already exists
+    console.log('🔍 Checking existing webhooks...');
+    const existingWebhooks = await shopify.graphql(`
+      query {
+        webhookSubscriptions(first: 50) {
+          edges {
+            node {
+              id
+              callbackUrl
+              topic
+            }
+          }
+        }
+      }
+    `);
+    
+    const webhooksResult = await existingWebhooks.json();
+    console.log('📋 Existing webhooks:', JSON.stringify(webhooksResult, null, 2));
+    
+    const orderCreateWebhooks = webhooksResult.data?.webhookSubscriptions?.edges?.filter(
+      edge => edge.node.topic === 'ORDERS_CREATE' && edge.node.callbackUrl === webhookUrl
+    ) || [];
+    
+    if (orderCreateWebhooks.length > 0) {
+      console.log('✅ Webhook already exists:', orderCreateWebhooks[0].node.id);
+      return res.json({
+        success: true,
+        message: 'Webhook already configured',
+        existingWebhook: orderCreateWebhooks[0].node
+      });
+    }
+    
+    // Create the webhook
+    console.log('🚀 Creating orders/create webhook...');
+    const createWebhook = await shopify.graphql(`
+      mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+        webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+          webhookSubscription {
+            id
+            callbackUrl
+            topic
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `, {
+      variables: {
+        topic: 'ORDERS_CREATE',
+        webhookSubscription: {
+          callbackUrl: webhookUrl,
+          format: 'JSON'
+        }
+      }
+    });
+    
+    const createResult = await createWebhook.json();
+    console.log('📋 Webhook creation result:', JSON.stringify(createResult, null, 2));
+    
+    if (createResult.data?.webhookSubscriptionCreate?.userErrors?.length > 0) {
+      const errors = createResult.data.webhookSubscriptionCreate.userErrors;
+      console.error('❌ Webhook creation errors:', errors);
+      return res.status(400).json({
+        success: false,
+        errors: errors,
+        message: 'Failed to create webhook - see errors'
+      });
+    }
+    
+    const newWebhook = createResult.data?.webhookSubscriptionCreate?.webhookSubscription;
+    if (newWebhook) {
+      console.log('✅ Webhook created successfully:', newWebhook.id);
+      return res.json({
+        success: true,
+        message: 'Webhook configured successfully!',
+        webhook: newWebhook,
+        instructions: 'The webhook is now active. Place a test order to verify automatic store credit deduction.'
+      });
+    } else {
+      console.error('❌ Unexpected webhook creation result:', createResult);
+      return res.status(500).json({
+        success: false,
+        error: 'Unexpected response from Shopify',
+        response: createResult
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ WEBHOOK SETUP ERROR:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.stack
+    });
+  }
+});
+
+// Test the webhook processing logic with your exact store credit code
+app.post('/test/webhook-debug', async (req, res) => {
+  try {
+    console.log('🔍 WEBHOOK DEBUG: Testing with current reservations');
+    
+    // Get the most recent reservation ID from server logs
+    const reservations = Array.from(storeCreditReservations.entries())
+      .filter(([id, res]) => res.status === 'reserved');
+    
+    console.log(`🔍 Found ${reservations.length} reserved reservations:`, reservations.map(([id]) => id));
+    
+    if (reservations.length === 0) {
+      return res.json({
+        success: false,
+        message: 'No active reservations to test with',
+        allReservations: Array.from(storeCreditReservations.keys())
+      });
+    }
+    
+    // Test with the most recent reservation
+    const [testReservationId, testReservation] = reservations[reservations.length - 1];
+    const testDiscountCode = `STORE_CREDIT_1756761266788_RES_${testReservationId.replace('RES_', '').toUpperCase()}`;
+    
+    console.log(`🧪 Testing webhook logic with:`);
+    console.log(`   Discount code: ${testDiscountCode}`);
+    console.log(`   Reservation ID: ${testReservationId}`);
+    console.log(`   Amount: ${testReservation.amount}€`);
+    
+    // Simulate webhook payload
+    const mockPayload = {
+      id: 12345,
+      name: '#TEST-DEBUG',
+      email: testReservation.email,
+      discount_codes: [
+        { code: 'TEST2016', amount: '29.10' },
+        { code: 'TEST2017', amount: '0.00' },
+        { code: testDiscountCode, amount: testReservation.amount.toString() }
+      ]
+    };
+    
+    console.log(`🔍 Mock payload:`, JSON.stringify(mockPayload, null, 2));
+    
+    // Test the exact webhook parsing logic
+    const email = (mockPayload?.email || '').toLowerCase();
+    const discounts = Array.isArray(mockPayload?.discount_codes) ? mockPayload.discount_codes : [];
+    
+    console.log(`🎯 WEBHOOK TEST: Processing order for ${email}`);
+    console.log(`🎯 WEBHOOK TEST: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
+    
+    for (const d of discounts) {
+      const code = String(d?.code || '');
+      console.log(`🔍 WEBHOOK TEST: Checking discount code: "${code}"`);
+      
+      if (code.startsWith(STORE_CREDIT_PREFIX)) {
+        console.log(`💳 WEBHOOK TEST: Found store credit discount: ${code}`);
+        
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
+        console.log(`🔍 WEBHOOK TEST: Code suffix: "${codeSuffix}"`);
+        
+        const parts = codeSuffix.split('_');
+        console.log(`🔍 WEBHOOK TEST: Code parts:`, parts);
+        
+        if (parts.length >= 4 && parts[1] === 'RES') {
+          const constructedReservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
+          console.log(`🔍 WEBHOOK TEST: Constructed reservation ID: "${constructedReservationId}"`);
+          
+          const foundReservation = storeCreditReservations.get(constructedReservationId);
+          console.log(`🔍 WEBHOOK TEST: Found reservation:`, foundReservation ? `${foundReservation.id} (${foundReservation.status})` : 'null');
+          
+          return res.json({
+            success: true,
+            message: 'Webhook parsing test completed',
+            testData: {
+              inputDiscountCode: code,
+              extractedSuffix: codeSuffix,
+              parsedParts: parts,
+              constructedReservationId: constructedReservationId,
+              reservationFound: !!foundReservation,
+              reservationStatus: foundReservation?.status || 'not found',
+              expectedReservationId: testReservationId
+            }
+          });
+        }
+      }
+    }
+    
+    res.json({
+      success: false,
+      message: 'No store credit codes processed in test',
+      discountCodes: discounts.map(d => d.code)
+    });
+    
+  } catch (error) {
+    console.error('❌ WEBHOOK DEBUG ERROR:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // TEST: Debug webhook processing with the exact data from your last order
 app.post('/test/debug-webhook', async (req, res) => {
   try {
