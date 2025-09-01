@@ -13091,6 +13091,16 @@ app.post('/apply-store-credit', async (req, res) => {
       });
     }
 
+    // GraphQL mutation to create a basic code discount (define once, use for both new and reused reservations)
+    const createDiscountMutation = `
+      mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+        discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+          codeDiscountNode { id }
+          userErrors { field message }
+        }
+      }
+    `;
+
     // Step 2: Check if customer already has a pending reservation
     const existingReservations = Array.from(storeCreditReservations.values())
       .filter(r => r.email === customerEmail.toLowerCase() && 
@@ -13098,17 +13108,73 @@ app.post('/apply-store-credit', async (req, res) => {
                    r.expiresAt > Date.now());
                    
     if (existingReservations.length > 0) {
-      // Return existing reservation's discount code
+      // Found existing reservation - CREATE A NEW DISCOUNT CODE for it
       const existingRes = existingReservations[0];
-      console.log(`♻️ Found existing reservation ${existingRes.id} - reusing discount code: ${existingRes.discountCode}`);
-      return res.status(200).json({
-        success: true,
-        discountCode: existingRes.discountCode,
-        appliedStoreCredit: existingRes.amount, // Flutter expects this field name
-        newStoreCreditBalance: totalStoreCredit, // Flutter expects this field name
-        reservationId: existingRes.id,
-        isReused: true
-      });
+      console.log(`♻️ Found existing reservation ${existingRes.id} - creating NEW discount code (old one may be used/expired)`);
+      
+      // Create a NEW discount code for the existing reservation
+      const newDiscountCode = `STORE_CREDIT_${Date.now()}_${existingRes.id.toUpperCase()}`;
+      console.log(`💳 Creating NEW discount code: ${newDiscountCode} for existing reservation`);
+      
+      // Update the reservation with the new discount code
+      existingRes.discountCode = newDiscountCode;
+      storeCreditReservations.set(existingRes.id, existingRes);
+      await persistStoreCreditReservations();
+      
+      // Create the Shopify discount code for the existing reservation
+      const amountStr = Number(existingRes.amount).toFixed(2);
+      const discountInput = {
+        basicCodeDiscount: {
+          title: `Store Credit Reserved - ${customerEmail} - ${existingRes.id}`,
+          code: newDiscountCode,
+          startsAt: new Date().toISOString(),
+          endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
+          combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
+          customerGets: {
+            value: {
+              discountAmount: {
+                amount: amountStr,
+                appliesOnEachItem: false
+              }
+            },
+            items: { all: true }
+          },
+          customerSelection: { all: true },
+          usageLimit: 1
+        }
+      };
+      
+      try {
+        const discountResponse = await axios.post(
+          config.adminApiUrl,
+          { query: createDiscountMutation, variables: discountInput },
+          { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+        );
+        
+        const discountData = discountResponse.data?.data?.discountCodeBasicCreate;
+        const discountErrors = discountData?.userErrors || [];
+        
+        if (discountErrors.length > 0) {
+          console.error('❌ Failed to create new discount for existing reservation:', discountErrors);
+          return res.status(500).json({ success: false, error: 'Failed to create new discount code', debugInfo: discountErrors });
+        }
+        
+        console.log(`✅ Created NEW discount code for existing reservation: ${newDiscountCode}`);
+        
+        return res.status(200).json({
+          success: true,
+          discountCode: newDiscountCode,
+          appliedStoreCredit: existingRes.amount, // Flutter expects this field name
+          newStoreCreditBalance: totalStoreCredit, // Flutter expects this field name
+          reservationId: existingRes.id,
+          isReused: true,
+          newDiscountCreated: true
+        });
+        
+      } catch (error) {
+        console.error('❌ Error creating new discount for existing reservation:', error);
+        return res.status(500).json({ success: false, error: 'Failed to create discount code' });
+      }
     }
 
     // Step 3: Create new reservation (NO MONEY DEDUCTED YET)
@@ -13132,16 +13198,6 @@ app.post('/apply-store-credit', async (req, res) => {
     
     storeCreditReservations.set(reservationId, reservation);
     await persistStoreCreditReservations();
-
-    // GraphQL mutation to create a basic code discount using the reservation code
-    const createDiscountMutation = `
-      mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
-        discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-          codeDiscountNode { id }
-          userErrors { field message }
-        }
-      }
-    `;
 
     // Format the amount as a string with two decimals
     const amountStr = Number(amountToDeduct).toFixed(2);
