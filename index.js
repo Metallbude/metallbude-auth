@@ -526,6 +526,10 @@ function verifyShopifyHmac(req, secret) {
 
 // Webhook route: orders/create - deduct store credit when special codes are used
 app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/json' }), async (req, res) => {
+  console.log('🔥 WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create');
+  console.log('🔥 Request headers:', req.headers);
+  console.log('🔥 Request body length:', req.body ? req.body.length : 'null');
+  
   if (!SHOPIFY_WEBHOOK_SECRET) {
     console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
     return res.status(401).send('Webhook secret not configured');
