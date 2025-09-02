@@ -525,313 +525,10 @@ function verifyShopifyHmac(req, secret) {
 }
 
 // Webhook route: orders/create - deduct store credit when special codes are used
-// Direct order completion endpoint for Flutter app to call
-app.post('/orders/complete', async (req, res) => {
-  try {
-    const { orderToken, discountCodes, email, totalAmount } = req.body;
-    
-    console.log(`🎯 DIRECT ORDER COMPLETION: ${orderToken} for ${email}`);
-    console.log(`🎯 Total amount: ${totalAmount}, Discount codes: ${JSON.stringify(discountCodes)}`);
-    
-    // Debug: Log all current reservations
-    console.log(`🔍 DEBUG: Current reservations count: ${storeCreditReservations.size}`);
-    for (const [key, reservation] of storeCreditReservations.entries()) {
-      console.log(`🔍 DEBUG: Reservation ${key}: status=${reservation.status}, email=${reservation.email}`);
-    }
-    
-    if (!email || !discountCodes || !Array.isArray(discountCodes)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: email, discountCodes'
-      });
-    }
-    
-    // Find store credit codes
-    const storeCreditCodes = discountCodes.filter(code => 
-      code && typeof code === 'string' && code.startsWith('STORE_CREDIT_')
-    );
-    
-    console.log(`💳 Found ${storeCreditCodes.length} store credit codes:`, storeCreditCodes);
-    
-    const processed = [];
-    
-    for (const storeCreditCode of storeCreditCodes) {
-      try {
-        console.log(`💳 Processing store credit code: ${storeCreditCode}`);
-        
-        // Extract reservation ID from discount code
-        const matches = storeCreditCode.match(/RES_([A-Z0-9_]+)/i);
-        console.log(`🔍 Regex matches:`, matches);
-        if (matches) {
-          const extractedId = matches[1];
-          console.log(`🔍 Extracted ID part: ${extractedId}`);
-          
-          // Try to find the reservation with case-insensitive lookup
-          let reservation = null;
-          let foundReservationId = null;
-          
-          for (const [key, res] of storeCreditReservations.entries()) {
-            if (key.toUpperCase() === `RES_${extractedId}`.toUpperCase()) {
-              reservation = res;
-              foundReservationId = key;
-              break;
-            }
-          }
-          
-          console.log(`🔍 Looking for reservation matching: RES_${extractedId}`);
-          console.log(`🔍 Found reservation with ID: ${foundReservationId}`);
-          console.log(`🔍 Reservation details:`, reservation);
-          
-          if (reservation && reservation.status === 'reserved') {
-            console.log(`✅ Found valid reservation: amount=${reservation.amount}, email=${reservation.email}, status=${reservation.status}`);
-            
-            // Create ledger entry for the deduction
-            const ledgerEntry = {
-              id: `DEDUCT_ORDER_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-              email: reservation.email,
-              type: 'deduction',
-              amount: -reservation.amount,
-              description: `Store Credit Used - Order ${orderToken}`,
-              timestamp: Date.now(),
-              reservationId: foundReservationId,
-              orderToken: orderToken,
-              storeCreditAccountId: reservation.storeCreditAccountId
-            };
-
-            storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-            await persistStoreCreditLedger();
-            
-            // Update balance
-            const currentBalance = getStoreCredit(reservation.email) || 0;
-            const newBalance = Math.max(0, currentBalance - reservation.amount);
-            setStoreCredit(reservation.email, newBalance);
-            await persistStoreCreditLedger();
-
-            // Mark reservation as finalized
-            reservation.status = 'finalized';
-            reservation.finalizedAt = Date.now();
-            reservation.orderToken = orderToken;
-            reservation.processedBy = 'direct-completion';
-            storeCreditReservations.set(foundReservationId, reservation);
-            await persistStoreCreditReservations();
-
-            // Also call Shopify API to deduct from the actual store credit account
-            try {
-              if (reservation.storeCreditAccountId) {
-                const debitMutation = `
-                  mutation storeCreditAccountDebit($storeCreditAccountId: ID!, $amount: MoneyInput!) {
-                    storeCreditAccountDebit(storeCreditAccountId: $storeCreditAccountId, amount: $amount) {
-                      storeCreditAccountTransaction {
-                        id
-                        amount {
-                          amount
-                          currencyCode
-                        }
-                      }
-                      userErrors {
-                        field
-                        message
-                      }
-                    }
-                  }
-                `;
-
-                const debitResponse = await axios.post(config.adminApiUrl, {
-                  query: debitMutation,
-                  variables: {
-                    storeCreditAccountId: reservation.storeCreditAccountId,
-                    amount: {
-                      amount: reservation.amount.toFixed(2),
-                      currencyCode: 'EUR'
-                    }
-                  }
-                }, {
-                  headers: {
-                    'X-Shopify-Access-Token': config.adminToken,
-                    'Content-Type': 'application/json'
-                  }
-                });
-
-                console.log(`💰 Shopify debit result:`, JSON.stringify(debitResponse.data, null, 2));
-
-                // Check if successful and update local balance
-                if (debitResponse.data?.data?.storeCreditAccountDebit?.storeCreditAccountTransaction) {
-                  console.log(`✅ Successfully deducted ${reservation.amount}€ from Shopify store credit account`);
-                  
-                  // Update local balance to match Shopify
-                  const currentBalance = getStoreCredit(reservation.email) || 0;
-                  const newBalance = Math.max(0, currentBalance - reservation.amount);
-                  setStoreCredit(reservation.email, newBalance);
-                  await persistStoreCreditLedger();
-                } else {
-                  console.error(`❌ Shopify debit failed:`, debitResponse.data?.errors || debitResponse.data?.data?.storeCreditAccountDebit?.userErrors);
-                }
-              }
-            } catch (shopifyError) {
-              console.error(`❌ Shopify debit failed for ${reservationId}:`, shopifyError.message);
-            }
-
-            processed.push({
-              reservationId: foundReservationId,
-              email: reservation.email,
-              amount: reservation.amount,
-              balanceChange: `${currentBalance}€ -> ${newBalance}€`,
-              storeCreditCode
-            });
-
-            console.log(`✅ PROCESSED: ${reservation.amount}€ deducted for ${reservation.email} (${currentBalance}€ -> ${newBalance}€)`);
-            
-          } else {
-            console.log(`⚠️ Reservation not found or already processed. Found: ${reservation ? 'YES' : 'NO'}, Status: ${reservation?.status || 'N/A'}`);
-          }
-        } else {
-          console.log(`⚠️ Could not extract reservation ID from code: ${storeCreditCode}`);
-        }
-        
-      } catch (error) {
-        console.error(`❌ Error processing store credit code ${storeCreditCode}:`, error);
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: `Processed ${processed.length} store credit deductions`,
-      processed,
-      orderToken
-    });
-    
-  } catch (error) {
-    console.error('❌ DIRECT ORDER COMPLETION ERROR:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Debug endpoint to check reservations
-app.get('/debug/reservations', (req, res) => {
-  const reservations = [];
-  for (const [key, reservation] of storeCreditReservations.entries()) {
-    reservations.push({
-      id: key,
-      email: reservation.email,
-      amount: reservation.amount,
-      status: reservation.status,
-      discountCode: reservation.discountCode,
-      createdAt: new Date(reservation.createdAt).toISOString()
-    });
-  }
-  res.json({
-    count: storeCreditReservations.size,
-    reservations
-  });
-});
-
-// Test if webhook is being called by creating a simple test endpoint
-app.post('/test/simulate-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    console.log('🧪 SIMULATING WEBHOOK CALL...');
-    
-    // Create a fake order payload similar to what Shopify would send
-    const fakeOrder = {
-      id: 12345678901234,
-      email: "klause.rudolf@gmail.com",
-      created_at: new Date().toISOString(),
-      total_price: "0.00",
-      subtotal_price: "30.00",
-      total_discounts: "30.00",
-      discount_codes: [
-        {
-          code: "TEST2016",
-          amount: "29.10",
-          type: "percentage"
-        },
-        {
-          code: "STORE_CREDIT_TEST_RES_SIMULATED",
-          amount: "0.90",
-          type: "fixed_amount"
-        }
-      ],
-      line_items: [
-        {
-          id: 987654321,
-          name: "Test Product",
-          quantity: 1,
-          price: "30.00"
-        }
-      ]
-    };
-    
-    console.log('🧪 Fake order payload created:', JSON.stringify(fakeOrder, null, 2));
-    
-    // Manually call the webhook processing logic
-    const timestamp = new Date().toISOString();
-    console.log(`🔥 [${timestamp}] WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create (SIMULATED)`);
-    
-    const discountCodes = fakeOrder.discount_codes || [];
-    const storeCreditCodes = discountCodes.filter(dc => 
-      dc.code && dc.code.startsWith('STORE_CREDIT_')
-    );
-    
-    console.log('💳 Found store credit codes in order:', storeCreditCodes);
-    
-    if (storeCreditCodes.length > 0) {
-      const email = fakeOrder.email;
-      console.log(`💰 Processing store credit deduction for ${email}`);
-      
-      for (const storeCreditCode of storeCreditCodes) {
-        console.log(`💳 Processing store credit code: ${storeCreditCode.code} (${storeCreditCode.amount}€)`);
-        
-        // Extract reservation ID from discount code
-        const matches = storeCreditCode.code.match(/RES_([A-Z0-9_]+)/i);
-        if (matches) {
-          const reservationId = `RES_${matches[1].toLowerCase()}`;
-          console.log(`🔍 Looking for reservation: ${reservationId}`);
-          
-          const reservation = storeCreditReservations.get(reservationId);
-          if (reservation && reservation.status === 'reserved') {
-            console.log(`✅ Found reservation: ${JSON.stringify(reservation)}`);
-            
-            // Process the deduction (simulate webhook logic)
-            const currentBalance = getStoreCredit(email) || 0;
-            const newBalance = Math.max(0, currentBalance - reservation.amount);
-            setStoreCredit(email, newBalance);
-            
-            // Mark as finalized
-            reservation.status = 'finalized';
-            reservation.finalizedAt = Date.now();
-            storeCreditReservations.set(reservationId, reservation);
-            
-            console.log(`💰 SIMULATED DEDUCTION: ${currentBalance}€ -> ${newBalance}€`);
-          }
-        }
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: 'Webhook simulation completed',
-      fakeOrder: fakeOrder,
-      storeCreditCodesFound: storeCreditCodes.length,
-      processed: storeCreditCodes.map(sc => sc.code)
-    });
-    
-  } catch (error) {
-    console.error('🧪 WEBHOOK SIMULATION ERROR:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
 app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/json' }), async (req, res) => {
-  const timestamp = new Date().toISOString();
-  console.log(`🔥 [${timestamp}] WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create`);
-  logWebhookActivity('orders-create-main', { url: '/webhooks/shopify/orders-create', headers: req.headers });
-  console.log(`🔥 [${timestamp}] Request headers:`, req.headers);
-  console.log(`🔥 [${timestamp}] Request body length:`, req.body ? req.body.length : 'null');
+  console.log('🔥 WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create');
+  console.log('🔥 Request headers:', req.headers);
+  console.log('🔥 Request body length:', req.body ? req.body.length : 'null');
   
   if (!SHOPIFY_WEBHOOK_SECRET) {
     console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
@@ -855,12 +552,9 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
     const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
     
     console.log(`🎯 WEBHOOK: Processing order for ${email}`);
-    console.log(`🎯 WEBHOOK: Order ID: ${payload?.id}, Order Name: ${payload?.name}`);
     console.log(`🎯 WEBHOOK: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
-    console.log(`🎯 WEBHOOK: Full discount objects:`, JSON.stringify(discounts, null, 2));
     console.log(`🎯 WEBHOOK: STORE_CREDIT_PREFIX = "${STORE_CREDIT_PREFIX}"`);
     console.log(`🎯 WEBHOOK: Current reservations:`, Array.from(storeCreditReservations.keys()));
-    console.log(`🎯 WEBHOOK: Current reservation details:`, JSON.stringify(Array.from(storeCreditReservations.entries()).map(([k,v]) => ({id: k, email: v.email, status: v.status, amount: v.amount})), null, 2));
     
     // 🔥 NEW: Handle store credit reservations - deduct money when order confirmed
     for (const d of discounts) {
@@ -871,110 +565,55 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
         console.log(`💳 WEBHOOK: Found store credit discount: ${code}`);
         
-        // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_RES_{reservationId}_{uniqueId})
-        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_RES_{reservationId}_{uniqueId}
+        // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_{reservationId})
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_{reservationId}
         console.log(`🔍 WEBHOOK: Code suffix after removing prefix: "${codeSuffix}"`);
         
         const parts = codeSuffix.split('_');
         console.log(`🔍 WEBHOOK: Code parts:`, parts);
         
-        // Format: timestamp_RES_reservationId_uniqueId, so we need to construct the full reservation ID
-        // The reservation is stored as: RES_{reservationId_in_lowercase}_{uniqueId}
-        if (parts.length >= 4 && parts[1] === 'RES') {
-          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
-          console.log(`🔍 WEBHOOK: Constructed full reservation ID: "${reservationId}"`);
-          console.log(`🔍 WEBHOOK: Looking for reservation in map with keys:`, Array.from(storeCreditReservations.keys()));
-          
+        const reservationId = parts.pop(); // Keep original case - don't use .toLowerCase()
+        console.log(`🔍 WEBHOOK: Extracted reservation ID: "${reservationId}"`);
+        
+        if (reservationId) {
           const reservation = storeCreditReservations.get(reservationId);
-          console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status}) - ${reservation.email}` : 'null');
-          console.log(`🔍 WEBHOOK: Reservation details:`, reservation ? JSON.stringify(reservation, null, 2) : 'No reservation found');
+          console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
           
           if (reservation && reservation.status === 'reserved') {
-            console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from store credit`);
+            console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from customer's store credit`);
             
             try {
-              // 🔥 USE THE SAME LOGIC AS THE SUCCESSFUL MANUAL TEST - CALL SHOPIFY API DIRECTLY
-              console.log(`🌐 WEBHOOK DEDUCTION: Calling Shopify API to deduct ${reservation.amount}€ from ${reservation.email}`);
+              // NOW actually deduct the money from Shopify store credit account
+              const amountStr = Number(reservation.amount).toFixed(2);
+              const debitResult = await tryDebitWithFallbacks({ 
+                customerGid: reservation.customerGid, 
+                storeCreditAccountId: reservation.storeCreditAccountId, 
+                amountStr: amountStr 
+              });
               
-              // Use the same Shopify API call as the manual test
-              const debitResult = await shopify.graphql(
-                `#graphql
-                  mutation storeCreditAccountDebit($storeCreditAccountId: ID!, $amount: MoneyInput!) {
-                    storeCreditAccountDebit(storeCreditAccountId: $storeCreditAccountId, amount: $amount) {
-                      storeCreditAccountTransaction {
-                        id
-                        amount {
-                          amount
-                          currencyCode
-                        }
-                      }
-                      userErrors {
-                        field
-                        message
-                      }
-                    }
-                  }`,
-                {
-                  variables: {
-                    storeCreditAccountId: reservation.storeCreditAccountId,
-                    amount: {
-                      amount: reservation.amount.toString(),
-                      currencyCode: 'EUR'
-                    }
-                  }
-                }
-              );
-
-              const debitResponse = await debitResult.json();
-              console.log(`🔍 WEBHOOK DEDUCTION: Shopify API response:`, JSON.stringify(debitResponse, null, 2));
-
-              if (debitResponse.data?.storeCreditAccountDebit?.storeCreditAccountTransaction) {
-                console.log(`✅ WEBHOOK DEDUCTION: Successfully deducted ${reservation.amount}€ via Shopify API`);
-                
-                // Create ledger entry for tracking
-                const ledgerEntry = {
-                  id: `DEDUCT_WEBHOOK_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-                  email: reservation.email,
-                  type: 'deduction',
-                  amount: -reservation.amount,
-                  description: `Store Credit Used - Order ${payload?.name || 'N/A'}`,
-                  timestamp: Date.now(),
-                  reservationId: reservationId,
-                  storeCreditAccountId: reservation.storeCreditAccountId,
-                  orderId: payload?.id,
-                  orderName: payload?.name,
-                  shopifyTransactionId: debitResponse.data.storeCreditAccountDebit.storeCreditAccountTransaction.id
-                };
-
-                storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-                await persistStoreCreditLedger();
-                
-                // Update local balance cache
+              if (debitResult.success) {
+                // Update local ledger
                 const currentBalance = getStoreCredit(reservation.email) || 0;
                 const newBalance = Math.max(0, currentBalance - reservation.amount);
                 setStoreCredit(reservation.email, newBalance);
                 await persistStoreCreditLedger();
-
+                
                 // Mark reservation as finalized
                 reservation.status = 'finalized';
                 reservation.finalizedAt = Date.now();
+                reservation.debitedAt = Date.now();
                 reservation.orderId = payload?.id;
                 reservation.orderName = payload?.name;
-                reservation.processedBy = 'webhook-shopify-api';
-                reservation.shopifyTransactionId = debitResponse.data.storeCreditAccountDebit.storeCreditAccountTransaction.id;
                 storeCreditReservations.set(reservationId, reservation);
                 await persistStoreCreditReservations();
-
-                console.log(`🎉 WEBHOOK SUCCESS: Store credit deducted ${reservation.amount}€ for ${reservation.email}`);
-                console.log(`💰 WEBHOOK SUCCESS: Balance updated ${currentBalance}€ -> ${newBalance}€`);
                 
+                console.log(`✅ Successfully deducted ${reservation.amount}€ and finalized reservation ${reservationId} (order: ${payload?.name})`);
               } else {
-                console.error(`❌ WEBHOOK FAILED: Shopify debit failed for ${reservationId}:`, debitResponse.data?.storeCreditAccountDebit?.userErrors || 'Unknown error');
-                console.error(`❌ WEBHOOK FAILED: Full response:`, JSON.stringify(debitResponse, null, 2));
+                console.error(`❌ Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
+                // Keep reservation as 'reserved' so it can be retried or cleaned up later
               }
-              
             } catch (error) {
-              console.error(`❌ WEBHOOK ERROR: Failed to process store credit deduction for reservation ${reservationId}:`, error);
+              console.error(`❌ Error processing store credit deduction for reservation ${reservationId}:`, error);
             }
             
           } else if (reservation && reservation.status === 'finalized') {
@@ -985,55 +624,7 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
             console.log(`❌ No reservation found for ID: ${reservationId}`);
           }
         } else {
-          console.log(`❌ Could not extract reservation ID from discount code: ${code} (invalid format)`);
-        }
-      } // Close the if (code.startsWith(STORE_CREDIT_PREFIX)) block
-    } // Close the for (const d of discounts) loop
-
-    console.log(`✅ Webhook processed successfully for order ${payload?.name || 'N/A'}`);
-    
-    // 🔥 ADDITIONAL SAFETY: Process any unfinalized reservations for this customer
-    if (payload?.email) {
-      console.log(`🔍 Checking for any remaining reservations for customer: ${payload.email}`);
-      for (const [resId, res] of storeCreditReservations.entries()) {
-        if (res.email === payload.email && res.status === 'reserved' && Date.now() - res.createdAt < 30 * 60 * 1000) {
-          console.log(`🚨 FOUND UNPROCESSED RESERVATION ${resId} - Processing now as safety fallback`);
-          
-          try {
-            // Use same deduction logic
-            const ledgerEntry = {
-              id: `DEDUCT_SAFETY_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-              email: res.email,
-              type: 'deduction',
-              amount: -res.amount,
-              description: `Store Credit Used (Safety) - Order ${payload?.name || 'N/A'}`,
-              timestamp: Date.now(),
-              reservationId: resId,
-              storeCreditAccountId: res.storeCreditAccountId,
-              orderId: payload?.id,
-              orderName: payload?.name
-            };
-
-            storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-            await persistStoreCreditLedger();
-            
-            const currentBalance = getStoreCredit(res.email) || 0;
-            const newBalance = Math.max(0, currentBalance - res.amount);
-            setStoreCredit(res.email, newBalance);
-            await persistStoreCreditLedger();
-
-            res.status = 'finalized';
-            res.finalizedAt = Date.now();
-            res.orderId = payload?.id;
-            res.orderName = payload?.name;
-            res.processedBy = 'webhook-safety';
-            storeCreditReservations.set(resId, res);
-            await persistStoreCreditReservations();
-
-            console.log(`✅ SAFETY DEDUCTION: Processed ${res.amount}€ for ${res.email} (${currentBalance}€ -> ${newBalance}€)`);
-          } catch (error) {
-            console.error(`❌ Safety deduction error for ${resId}:`, error);
-          }
+          console.log(`❌ Could not extract reservation ID from discount code: ${code}`);
         }
       }
     }
@@ -1045,1170 +636,11 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
   }
 });
 
-// Alias route for Shopify webhook (alternative URL that matches Shopify webhook URL pattern)
-app.post('/webhooks/orders/create', express.raw({ type: 'application/json' }), async (req, res) => {
-  const timestamp = new Date().toISOString();
-  console.log(`🔥 [${timestamp}] WEBHOOK ALIAS HIT! /webhooks/orders/create (processing directly)`);
-  logWebhookActivity('orders-create-alias', { url: '/webhooks/orders/create', headers: req.headers });
-  console.log(`🔥 [${timestamp}] Request headers:`, JSON.stringify(req.headers, null, 2));
-  console.log(`🔥 [${timestamp}] Request body length:`, req.body ? req.body.length : 'null');
-  console.log(`🔥 [${timestamp}] User-Agent:`, req.headers['user-agent']);
-  console.log(`🔥 [${timestamp}] X-Shopify headers:`, {
-    'x-shopify-topic': req.headers['x-shopify-topic'],
-    'x-shopify-shop-domain': req.headers['x-shopify-shop-domain'],
-    'x-shopify-order-id': req.headers['x-shopify-order-id'],
-    'x-shopify-hmac-sha256': req.headers['x-shopify-hmac-sha256'] ? 'present' : 'missing'
-  });
-  
-  if (!SHOPIFY_WEBHOOK_SECRET) {
-    console.warn(`⚠️ [${timestamp}] No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety`);
-    return res.status(401).send('Webhook secret not configured');
-  }
-
-  // Verify HMAC
-  const hmac = req.headers['x-shopify-hmac-sha256'];
-  if (!hmac) {
-    console.warn('⚠️ No HMAC header found in orders/create webhook');
-    return res.status(401).send('Unauthorized');
-  }
-  
-  const body = req.body;
-  const hash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(body, 'utf8').digest('base64');
-  if (hash !== hmac) {
-    console.warn('⚠️ Invalid HMAC for orders/create webhook');
-    return res.status(401).send('Unauthorized');
-  }
-
-  // Parse the order payload  
-  let payload;
-  try {
-    payload = typeof body === 'string' ? JSON.parse(body) : JSON.parse(body.toString());
-  } catch (e) {
-    console.error('❌ Unable to parse orders/create body:', e?.message || e);
-    return res.status(400).send('Bad request');
-  }
-
-  try {
-    console.log(`🎯 WEBHOOK ALIAS: Processing order for ${payload?.email}`);
-
-    const email = payload?.email?.toLowerCase();
-    if (!email) {
-      console.log('⚠️ No email in webhook payload - skipping store credit processing');
-      return res.status(200).send('ok');
-    }
-
-    // Check for store credit discount codes
-    const discountCodes = payload?.discount_codes || [];
-    console.log(`🔍 WEBHOOK ALIAS: Found ${discountCodes.length} discount codes:`, discountCodes.map(dc => dc.code));
-
-    for (const discountCode of discountCodes) {
-      const code = discountCode.code;
-      console.log(`🔍 WEBHOOK ALIAS: Processing discount code: ${code}`);
-      
-      if (code?.startsWith(STORE_CREDIT_PREFIX)) {
-        console.log(`🎯 WEBHOOK ALIAS: Found store credit code: ${code}`);
-        
-        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
-        console.log(`🔍 WEBHOOK ALIAS: Code suffix after removing prefix: "${codeSuffix}"`);
-        
-        const parts = codeSuffix.split('_');
-        console.log(`🔍 WEBHOOK ALIAS: Code parts:`, parts);
-        
-        // Format: timestamp_RES_reservationId_uniqueId, so reservation ID is at index 2
-        const reservationId = parts.length >= 3 ? parts[2] : null;
-        console.log(`🔍 WEBHOOK ALIAS: Extracted reservation ID: "${reservationId}"`);
-        
-        if (reservationId) {
-          const reservation = storeCreditReservations.get(reservationId);
-          console.log(`🔍 WEBHOOK ALIAS: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
-          
-          if (reservation && reservation.status === 'reserved') {
-            console.log(`💰 WEBHOOK ALIAS: Deducting ${reservation.amount}€ store credit from ${email} for reservation ${reservationId}`);
-            
-            try {
-              const debitResult = debitStoreCredit(email, reservation.amount, `Order finalization: ${payload?.name} (reservation: ${reservationId})`);
-              
-              if (debitResult.success) {
-                console.log(`✅ WEBHOOK ALIAS: Successfully deducted ${reservation.amount}€ from ${email}`);
-                console.log(`📊 WEBHOOK ALIAS: New balance for ${email}: ${getStoreCredit(email)}€`);
-                
-                // Mark reservation as finalized
-                reservation.status = 'finalized';
-                reservation.finalizedAt = Date.now();
-                reservation.debitedAt = Date.now();
-                reservation.orderId = payload?.id;
-                reservation.orderName = payload?.name;
-                storeCreditReservations.set(reservationId, reservation);
-                await persistStoreCreditReservations();
-                
-                console.log(`✅ WEBHOOK ALIAS: Successfully deducted ${reservation.amount}€ and finalized reservation ${reservationId} (order: ${payload?.name})`);
-              } else {
-                console.error(`❌ WEBHOOK ALIAS: Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
-              }
-            } catch (error) {
-              console.error(`❌ WEBHOOK ALIAS: Error processing store credit deduction for reservation ${reservationId}:`, error);
-            }
-            
-          } else if (reservation && reservation.status === 'finalized') {
-            console.log(`✅ WEBHOOK ALIAS: Reservation ${reservationId} already finalized - skipping`);
-          } else if (reservation) {
-            console.log(`⚠️ WEBHOOK ALIAS: Found reservation ${reservationId} but status is ${reservation.status} (expected: reserved)`);
-          } else {
-            console.log(`❌ WEBHOOK ALIAS: No reservation found for ID: ${reservationId}`);
-          }
-        } else {
-          console.log(`❌ WEBHOOK ALIAS: Could not extract reservation ID from discount code: ${code}`);
-        }
-      }
-    }
-
-    return res.status(200).send('ok');
-  } catch (e) {
-    console.error('❌ WEBHOOK ALIAS: Processing error:', e);
-    return res.status(500).send('error');
-  }
-});
-
-// Webhook for checkout updates (catches zero-total orders faster)
-app.post('/webhooks/shopify/checkouts-update', express.raw({ type: 'application/json' }), async (req, res) => {
-  const timestamp = new Date().toISOString();
-  console.log(`🛒 [${timestamp}] CHECKOUT UPDATE WEBHOOK HIT!`);
-  
-  if (!SHOPIFY_WEBHOOK_SECRET) {
-    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
-    return res.status(401).send('Webhook secret not configured');
-  }
-  if (!verifyShopifyHmac(req, SHOPIFY_WEBHOOK_SECRET)) {
-    console.warn('⚠️ Invalid HMAC for checkouts/update webhook');
-    return res.status(401).send('Invalid HMAC');
-  }
-
-  let payload;
-  try {
-    payload = typeof req.body === 'string' ? JSON.parse(req.body) : (Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body);
-  } catch (e) {
-    console.error('❌ Unable to parse checkouts/update body:', e?.message || e);
-    return res.status(400).send('Bad JSON');
-  }
-
-  try {
-    const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
-    const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
-    const completed = payload?.completed_at;
-    
-    console.log(`🛒 CHECKOUT: Processing checkout for ${email}, completed: ${!!completed}`);
-    console.log(`🛒 CHECKOUT: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
-    
-    // Only process completed checkouts with store credit
-    if (completed) {
-      for (const d of discounts) {
-        const code = String(d?.code || '');
-        
-        if (code.startsWith(STORE_CREDIT_PREFIX)) {
-          console.log(`💳 CHECKOUT: Found store credit discount: ${code}`);
-          
-          const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
-          const parts = codeSuffix.split('_');
-          
-          if (parts.length >= 4 && parts[1] === 'RES') {
-            const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
-            console.log(`🔍 CHECKOUT: Processing reservation: "${reservationId}"`);
-            
-            const reservation = storeCreditReservations.get(reservationId);
-            
-            if (reservation && reservation.status === 'reserved') {
-              console.log(`💰 CHECKOUT: Processing store credit deduction: ${reservation.amount}€`);
-              
-              try {
-                // Create ledger entry for the deduction
-                const ledgerEntry = {
-                  id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-                  email: reservation.email,
-                  type: 'deduction',
-                  amount: -reservation.amount,
-                  description: `Store Credit Used - Checkout Completed`,
-                  timestamp: Date.now(),
-                  reservationId: reservationId,
-                  storeCreditAccountId: reservation.storeCreditAccountId,
-                  checkoutToken: payload?.token
-                };
-
-                storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-                await persistStoreCreditLedger();
-
-                // Mark reservation as finalized
-                reservation.status = 'finalized';
-                reservation.finalizedAt = Date.now();
-                reservation.checkoutToken = payload?.token;
-                reservation.processedBy = 'checkout-webhook';
-                storeCreditReservations.set(reservationId, reservation);
-                await persistStoreCreditReservations();
-
-                console.log(`✅ CHECKOUT: Successfully processed store credit deduction: ${reservation.amount}€ for ${reservation.email}`);
-                
-              } catch (error) {
-                console.error(`❌ CHECKOUT: Error processing store credit deduction for reservation ${reservationId}:`, error);
-              }
-            } else {
-              console.log(`ℹ️ CHECKOUT: Reservation ${reservationId} not found or already processed`);
-            }
-          }
-        }
-      }
-    }
-
-    return res.status(200).send('ok');
-  } catch (e) {
-    console.error('❌ CHECKOUT: Processing error:', e);
-    return res.status(500).send('error');
-  }
-});
-
-// Webhook for orders paid (backup for when orders are created later)
-app.post('/webhooks/shopify/orders-paid', express.raw({ type: 'application/json' }), async (req, res) => {
-  const timestamp = new Date().toISOString();
-  console.log(`💰 [${timestamp}] ORDERS PAID WEBHOOK HIT!`);
-  
-  if (!SHOPIFY_WEBHOOK_SECRET) {
-    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
-    return res.status(401).send('Webhook secret not configured');
-  }
-  if (!verifyShopifyHmac(req, SHOPIFY_WEBHOOK_SECRET)) {
-    console.warn('⚠️ Invalid HMAC for orders/paid webhook');
-    return res.status(401).send('Invalid HMAC');
-  }
-
-  let payload;
-  try {
-    payload = typeof req.body === 'string' ? JSON.parse(req.body) : (Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body);
-  } catch (e) {
-    console.error('❌ Unable to parse orders/paid body:', e?.message || e);
-    return res.status(400).send('Bad JSON');
-  }
-
-  try {
-    const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
-    const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
-    
-    console.log(`💰 ORDERS PAID: Processing paid order for ${email}`);
-    console.log(`💰 ORDERS PAID: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
-    
-    for (const d of discounts) {
-      const code = String(d?.code || '');
-      
-      if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        console.log(`💳 ORDERS PAID: Found store credit discount: ${code}`);
-        
-        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
-        const parts = codeSuffix.split('_');
-        
-        if (parts.length >= 4 && parts[1] === 'RES') {
-          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
-          console.log(`🔍 ORDERS PAID: Processing reservation: "${reservationId}"`);
-          
-          const reservation = storeCreditReservations.get(reservationId);
-          
-          if (reservation && reservation.status === 'reserved') {
-            console.log(`💰 ORDERS PAID: Processing store credit deduction: ${reservation.amount}€`);
-            
-            try {
-              // Create ledger entry for the deduction
-              const ledgerEntry = {
-                id: `DEDUCT_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-                email: reservation.email,
-                type: 'deduction',
-                amount: -reservation.amount,
-                description: `Store Credit Used - Order Paid #${payload?.name || 'N/A'}`,
-                timestamp: Date.now(),
-                reservationId: reservationId,
-                storeCreditAccountId: reservation.storeCreditAccountId,
-                orderId: payload?.id,
-                orderName: payload?.name
-              };
-
-              storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-              await persistStoreCreditLedger();
-
-              // Mark reservation as finalized
-              reservation.status = 'finalized';
-              reservation.finalizedAt = Date.now();
-              reservation.orderId = payload?.id;
-              reservation.orderName = payload?.name;
-              reservation.processedBy = 'paid-webhook';
-              storeCreditReservations.set(reservationId, reservation);
-              await persistStoreCreditReservations();
-
-              console.log(`✅ ORDERS PAID: Successfully processed store credit deduction: ${reservation.amount}€ for ${reservation.email} (order: ${payload?.name})`);
-              
-            } catch (error) {
-              console.error(`❌ ORDERS PAID: Error processing store credit deduction for reservation ${reservationId}:`, error);
-            }
-          } else {
-            console.log(`ℹ️ ORDERS PAID: Reservation ${reservationId} not found or already processed`);
-          }
-        }
-      }
-    }
-
-    return res.status(200).send('ok');
-  } catch (e) {
-    console.error('❌ ORDERS PAID: Processing error:', e);
-    return res.status(500).send('error');
-  }
-});
-
-// Test endpoint to verify webhook connectivity
-app.get('/webhooks/test', (req, res) => {
-  console.log('🧪 Webhook test endpoint hit');
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    server: 'metallbude-auth.onrender.com',
-    webhookSecret: !!SHOPIFY_WEBHOOK_SECRET,
-    lastWebhookReceived: global.lastWebhookReceived || null
-  });
-});
-
-// Test endpoint to simulate store credit deduction
-app.post('/test/store-credit-deduction', async (req, res) => {
-  console.log('🧪 TEST: Store credit deduction simulation started');
-  
-  try {
-    const { reservationId, customerEmail } = req.body;
-    
-    if (!reservationId) {
-      return res.status(400).json({
-        success: false,
-        error: 'reservationId is required. Available reservations: ' + Array.from(storeCreditReservations.keys()).join(', ')
-      });
-    }
-    
-    console.log(`🧪 TEST: Looking for reservation ${reservationId}`);
-    console.log(`🧪 TEST: Current reservations:`, Array.from(storeCreditReservations.keys()));
-    
-    const reservation = storeCreditReservations.get(reservationId);
-    if (!reservation) {
-      return res.status(404).json({
-        success: false,
-        error: `Reservation ${reservationId} not found`,
-        availableReservations: Array.from(storeCreditReservations.keys())
-      });
-    }
-    
-    console.log(`🧪 TEST: Found reservation:`, reservation);
-    
-    if (reservation.status !== 'reserved') {
-      return res.status(400).json({
-        success: false,
-        error: `Reservation ${reservationId} has status ${reservation.status} (expected: reserved)`
-      });
-    }
-    
-    console.log(`🧪 TEST: Simulating deduction of ${reservation.amount}€ from customer's store credit`);
-    
-    // Simulate the deduction process
-    const amountStr = Number(reservation.amount).toFixed(2);
-    const debitResult = await tryDebitWithFallbacks({ 
-      customerGid: reservation.customerGid, 
-      storeCreditAccountId: reservation.storeCreditAccountId, 
-      amountStr: amountStr 
-    });
-    
-    if (debitResult.success) {
-      // Update local ledger
-      const currentBalance = getStoreCredit(reservation.email) || 0;
-      const newBalance = Math.max(0, currentBalance - reservation.amount);
-      setStoreCredit(reservation.email, newBalance);
-      await persistStoreCreditLedger();
-      
-      // Mark reservation as finalized
-      reservation.status = 'finalized';
-      reservation.finalizedAt = Date.now();
-      reservation.debitedAt = Date.now();
-      reservation.orderId = 'TEST_ORDER_' + Date.now();
-      reservation.orderName = 'TEST#' + Date.now();
-      storeCreditReservations.set(reservationId, reservation);
-      await persistStoreCreditReservations();
-      
-      console.log(`🧪 TEST: ✅ Successfully deducted ${reservation.amount}€ and finalized reservation ${reservationId}`);
-      
-      res.json({
-        success: true,
-        message: 'Store credit deduction simulated successfully',
-        reservation: reservation,
-        debitResult: debitResult,
-        oldBalance: currentBalance,
-        newBalance: newBalance,
-        deductedAmount: reservation.amount
-      });
-    } else {
-      console.error(`🧪 TEST: ❌ Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
-      res.status(500).json({
-        success: false,
-        error: 'Deduction failed',
-        debitResult: debitResult
-      });
-    }
-    
-  } catch (error) {
-    console.error('🧪 TEST: Error in store credit deduction simulation:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Test endpoint to list current store credit reservations
-app.get('/test/store-credit-reservations', (req, res) => {
-  console.log('🧪 TEST: Listing current store credit reservations');
-  
-  const reservations = {};
-  for (const [id, reservation] of storeCreditReservations.entries()) {
-    reservations[id] = {
-      id: reservation.id,
-      email: reservation.email,
-      amount: reservation.amount,
-      status: reservation.status,
-      createdAt: new Date(reservation.createdAt).toISOString(),
-      discountCode: reservation.discountCode
-    };
-  }
-  
-  res.json({
-    success: true,
-    reservations: reservations,
-    count: Object.keys(reservations).length,
-    instructions: 'Use POST /test/store-credit-deduction with reservationId to test deduction'
-  });
-});
-
-// 🔥 NEW: Test endpoint to simulate order webhook and trigger automatic deduction
-app.post('/test/simulate-order-webhook', async (req, res) => {
-  try {
-    console.log('🧪 SIMULATING ORDER WEBHOOK to test automatic deduction...');
-    
-    // Find any reserved store credit reservations
-    const reservedReservations = Array.from(storeCreditReservations.entries())
-      .filter(([id, res]) => res.status === 'reserved' && Date.now() - res.createdAt < 30 * 60 * 1000);
-    
-    if (reservedReservations.length === 0) {
-      return res.json({
-        status: 'no_reservations',
-        message: 'No active reservations found to test with'
-      });
-    }
-    
-    // Use the first reservation for testing
-    const [reservationId, reservation] = reservedReservations[0];
-    
-    // Create fake order payload matching Shopify format
-    const fakeOrder = {
-      id: Math.floor(Math.random() * 1000000),
-      name: `#TEST${Math.floor(Math.random() * 10000)}`,
-      email: reservation.email,
-      total_price: "0.60",
-      current_total_price: "0.60",
-      discount_codes: [
-        {
-          code: `STORE_CREDIT_${reservationId}`,
-          amount: (reservation.amount * 100).toString(), // Convert to cents
-          type: "fixed_amount"
-        }
-      ]
-    };
-    
-    console.log(`🧪 Simulating order for reservation ${reservationId}:`, fakeOrder);
-    
-    // Process the fake order through our webhook logic
-    const discounts = fakeOrder.discount_codes || [];
-    const STORE_CREDIT_PREFIX = 'STORE_CREDIT_';
-    
-    for (const d of discounts) {
-      const code = d.code;
-      if (code && code.startsWith(STORE_CREDIT_PREFIX)) {
-        const resId = code.substring(STORE_CREDIT_PREFIX.length);
-        console.log(`🧪 Processing discount code: ${code} -> reservation ID: ${resId}`);
-        
-        const res = storeCreditReservations.get(resId);
-        if (res && res.status === 'reserved') {
-          console.log(`🧪 Found reservation ${resId} - Processing deduction of ${res.amount}€`);
-          
-          // Create ledger entry
-          const ledgerEntry = {
-            id: `DEDUCT_TEST_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-            email: res.email,
-            type: 'deduction',
-            amount: -res.amount,
-            description: `Store Credit Used (Test) - Order ${fakeOrder.name}`,
-            timestamp: Date.now(),
-            reservationId: resId,
-            storeCreditAccountId: res.storeCreditAccountId,
-            orderId: fakeOrder.id,
-            orderName: fakeOrder.name
-          };
-
-          storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-          await persistStoreCreditLedger();
-          
-          // Update balance
-          const currentBalance = getStoreCredit(res.email) || 0;
-          const newBalance = Math.max(0, currentBalance - res.amount);
-          setStoreCredit(res.email, newBalance);
-          await persistStoreCreditLedger();
-
-          // Mark reservation as finalized
-          res.status = 'finalized';
-          res.finalizedAt = Date.now();
-          res.orderId = fakeOrder.id;
-          res.orderName = fakeOrder.name;
-          res.processedBy = 'test-simulation';
-          storeCreditReservations.set(resId, res);
-          await persistStoreCreditReservations();
-
-          console.log(`🧪 ✅ TEST SIMULATION: Successfully processed ${res.amount}€ deduction for ${res.email}`);
-          console.log(`🧪 💰 Balance: ${currentBalance}€ -> ${newBalance}€`);
-          
-          return res.json({
-            status: 'success',
-            message: `Successfully processed ${res.amount}€ store credit deduction via simulation`,
-            reservation: resId,
-            email: res.email,
-            balanceChange: `${currentBalance}€ -> ${newBalance}€`,
-            order: fakeOrder.name
-          });
-        }
-      }
-    }
-    
-    res.json({
-      status: 'no_processing',
-      message: 'No valid store credit codes found to process'
-    });
-    
-  } catch (error) {
-    console.error('🧪 ❌ Test simulation error:', error);
-    res.status(500).json({ status: 'error', error: error.message });
-  }
-});
-
-// 🔥 NEW: Force process any active reservations RIGHT NOW
-app.post('/test/force-process-reservations', async (req, res) => {
-  try {
-    console.log('🔥 FORCE PROCESSING all active reservations...');
-    
-    const processed = [];
-    const reservedReservations = Array.from(storeCreditReservations.entries())
-      .filter(([id, res]) => res.status === 'reserved' && Date.now() - res.createdAt < 30 * 60 * 1000);
-    
-    for (const [reservationId, reservation] of reservedReservations) {
-      try {
-        console.log(`🔥 Force processing reservation ${reservationId} for ${reservation.email}: ${reservation.amount}€`);
-        
-        // Create ledger entry
-        const ledgerEntry = {
-          id: `DEDUCT_FORCE_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
-          email: reservation.email,
-          type: 'deduction',
-          amount: -reservation.amount,
-          description: `Store Credit Used (Force Process)`,
-          timestamp: Date.now(),
-          reservationId: reservationId,
-          storeCreditAccountId: reservation.storeCreditAccountId
-        };
-
-        storeCreditLedger.set(ledgerEntry.id, ledgerEntry);
-        await persistStoreCreditLedger();
-        
-        // Update balance
-        const currentBalance = getStoreCredit(reservation.email) || 0;
-        const newBalance = Math.max(0, currentBalance - reservation.amount);
-        setStoreCredit(reservation.email, newBalance);
-        await persistStoreCreditLedger();
-
-        // Mark reservation as finalized
-        reservation.status = 'finalized';
-        reservation.finalizedAt = Date.now();
-        reservation.processedBy = 'force-process';
-        storeCreditReservations.set(reservationId, reservation);
-        await persistStoreCreditReservations();
-
-        processed.push({
-          reservationId,
-          email: reservation.email,
-          amount: reservation.amount,
-          balanceChange: `${currentBalance}€ -> ${newBalance}€`
-        });
-
-        console.log(`🔥 ✅ FORCE PROCESSED: ${reservation.amount}€ for ${reservation.email} (${currentBalance}€ -> ${newBalance}€)`);
-        
-      } catch (error) {
-        console.error(`🔥 ❌ Error force processing ${reservationId}:`, error);
-      }
-    }
-    
-    res.json({
-      status: 'success',
-      message: `Force processed ${processed.length} reservations`,
-      processed
-    });
-    
-  } catch (error) {
-    console.error('🔥 ❌ Force process error:', error);
-    res.status(500).json({ status: 'error', error: error.message });
-  }
-});
-
-// Quick balance check endpoint
-app.get('/test/balance-check/:email', async (req, res) => {
-  try {
-    const email = decodeURIComponent(req.params.email);
-    console.log(`🔍 CHECKING BALANCE FOR: ${email}`);
-    
-    // Get current store credit balance from Shopify
-    const balanceQuery = `
-      query getCustomerStoreCreditAccounts($email: String!) {
-        customers(first: 1, query: $email) {
-          edges {
-            node {
-              id
-              email
-              storeCreditAccounts(first: 10) {
-                edges {
-                  node {
-                    id
-                    balance {
-                      amount
-                      currencyCode
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const response = await axios.post(config.adminApiUrl, {
-      query: balanceQuery,
-      variables: { email: `email:${email}` }
-    }, {
-      headers: {
-        'X-Shopify-Access-Token': config.adminToken,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    const customer = response.data?.data?.customers?.edges?.[0]?.node;
-    const accounts = customer?.storeCreditAccounts?.edges || [];
-    
-    let totalBalance = 0;
-    accounts.forEach(acc => {
-      totalBalance += parseFloat(acc.node.balance.amount) || 0;
-    });
-
-    // Also check current reservations
-    const reservations = Array.from(storeCreditReservations.entries())
-      .filter(([id, res]) => res.email.toLowerCase() === email.toLowerCase())
-      .map(([id, res]) => ({
-        id,
-        amount: res.amount,
-        status: res.status,
-        createdAt: res.createdAt
-      }));
-
-    res.json({
-      success: true,
-      email: email,
-      currentBalance: totalBalance,
-      currency: 'EUR',
-      storeCreditAccounts: accounts.length,
-      pendingReservations: reservations,
-      message: `Current store credit balance: €${totalBalance.toFixed(2)}`
-    });
-    
-  } catch (error) {
-    console.error('❌ BALANCE CHECK ERROR:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Test webhook endpoint to check recent webhook calls
-app.get('/test/webhook-activity', async (req, res) => {
-  try {
-    console.log('🔍 CHECKING RECENT WEBHOOK ACTIVITY...');
-    
-    // Get recent webhook activity logs
-    const recentActivity = [];
-    const webhookActivityEntries = Array.from(webhookActivity.entries());
-    
-    // Sort by timestamp (most recent first)
-    const sortedActivity = webhookActivityEntries
-      .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp))
-      .slice(0, 10); // Get last 10 entries
-    
-    for (const [key, activity] of sortedActivity) {
-      recentActivity.push({
-        key,
-        timestamp: activity.timestamp,
-        type: activity.type,
-        url: activity.data?.url || 'unknown',
-        headers: activity.data?.headers ? Object.keys(activity.data.headers) : [],
-        shopifyHmac: activity.data?.headers?.['x-shopify-hmac-sha256'] ? 'present' : 'missing'
-      });
-    }
-    
-    // Also check current reservations
-    const currentReservations = Array.from(storeCreditReservations.entries()).map(([id, res]) => ({
-      id,
-      email: res.email,
-      amount: res.amount,
-      status: res.status,
-      createdAt: res.createdAt
-    }));
-    
-    res.json({
-      success: true,
-      message: 'Recent webhook activity',
-      recentActivity,
-      currentReservations,
-      webhookConfigured: 'gid://shopify/WebhookSubscription/1787529363724',
-      instructions: 'Check if Shopify is calling your webhook endpoint when orders are placed'
-    });
-    
-  } catch (error) {
-    console.error('❌ WEBHOOK ACTIVITY CHECK ERROR:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Auto-configure the Shopify webhook for orders/create
-app.post('/test/setup-webhook', async (req, res) => {
-  try {
-    console.log('🔧 SETTING UP SHOPIFY WEBHOOK FOR ORDERS/CREATE...');
-    
-    if (!config.adminToken) {
-      return res.status(500).json({
-        success: false,
-        error: 'Shopify Admin token not configured - check SHOPIFY_ADMIN_TOKEN'
-      });
-    }
-    
-    const webhookUrl = 'https://metallbude-auth.onrender.com/webhooks/shopify/orders-create';
-    
-    // First, check if webhook already exists
-    console.log('🔍 Checking existing webhooks...');
-    const existingWebhooksQuery = `
-      query {
-        webhookSubscriptions(first: 50) {
-          edges {
-            node {
-              id
-              callbackUrl
-              topic
-            }
-          }
-        }
-      }
-    `;
-    
-    const existingWebhooksResponse = await axios.post(config.adminApiUrl, {
-      query: existingWebhooksQuery
-    }, {
-      headers: {
-        'X-Shopify-Access-Token': config.adminToken,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const webhooksResult = existingWebhooksResponse.data;
-    console.log('📋 Existing webhooks:', JSON.stringify(webhooksResult, null, 2));
-    
-    const orderCreateWebhooks = webhooksResult.data?.webhookSubscriptions?.edges?.filter(
-      edge => edge.node.topic === 'ORDERS_CREATE' && edge.node.callbackUrl === webhookUrl
-    ) || [];
-    
-    if (orderCreateWebhooks.length > 0) {
-      console.log('✅ Webhook already exists:', orderCreateWebhooks[0].node.id);
-      return res.json({
-        success: true,
-        message: 'Webhook already configured',
-        existingWebhook: orderCreateWebhooks[0].node
-      });
-    }
-    
-    // Create the webhook
-    console.log('🚀 Creating orders/create webhook...');
-    const createWebhookMutation = `
-      mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
-        webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
-          webhookSubscription {
-            id
-            callbackUrl
-            topic
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    const createWebhookResponse = await axios.post(config.adminApiUrl, {
-      query: createWebhookMutation,
-      variables: {
-        topic: 'ORDERS_CREATE',
-        webhookSubscription: {
-          callbackUrl: webhookUrl,
-          format: 'JSON'
-        }
-      }
-    }, {
-      headers: {
-        'X-Shopify-Access-Token': config.adminToken,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const createResult = createWebhookResponse.data;
-    console.log('📋 Webhook creation result:', JSON.stringify(createResult, null, 2));
-    
-    if (createResult.data?.webhookSubscriptionCreate?.userErrors?.length > 0) {
-      const errors = createResult.data.webhookSubscriptionCreate.userErrors;
-      console.error('❌ Webhook creation errors:', errors);
-      return res.status(400).json({
-        success: false,
-        errors: errors,
-        message: 'Failed to create webhook - see errors'
-      });
-    }
-    
-    const newWebhook = createResult.data?.webhookSubscriptionCreate?.webhookSubscription;
-    if (newWebhook) {
-      console.log('✅ Webhook created successfully:', newWebhook.id);
-      return res.json({
-        success: true,
-        message: 'Webhook configured successfully!',
-        webhook: newWebhook,
-        instructions: 'The webhook is now active. Place a test order to verify automatic store credit deduction.'
-      });
-    } else {
-      console.error('❌ Unexpected webhook creation result:', createResult);
-      return res.status(500).json({
-        success: false,
-        error: 'Unexpected response from Shopify',
-        response: createResult
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ WEBHOOK SETUP ERROR:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      details: error.stack
-    });
-  }
-});
-
-// Test the webhook processing logic with your exact store credit code
-app.post('/test/webhook-debug', async (req, res) => {
-  try {
-    console.log('🔍 WEBHOOK DEBUG: Testing with current reservations');
-    
-    // Get the most recent reservation ID from server logs
-    const reservations = Array.from(storeCreditReservations.entries())
-      .filter(([id, res]) => res.status === 'reserved');
-    
-    console.log(`🔍 Found ${reservations.length} reserved reservations:`, reservations.map(([id]) => id));
-    
-    if (reservations.length === 0) {
-      return res.json({
-        success: false,
-        message: 'No active reservations to test with',
-        allReservations: Array.from(storeCreditReservations.keys())
-      });
-    }
-    
-    // Test with the most recent reservation
-    const [testReservationId, testReservation] = reservations[reservations.length - 1];
-    const testDiscountCode = `STORE_CREDIT_1756761266788_RES_${testReservationId.replace('RES_', '').toUpperCase()}`;
-    
-    console.log(`🧪 Testing webhook logic with:`);
-    console.log(`   Discount code: ${testDiscountCode}`);
-    console.log(`   Reservation ID: ${testReservationId}`);
-    console.log(`   Amount: ${testReservation.amount}€`);
-    
-    // Simulate webhook payload
-    const mockPayload = {
-      id: 12345,
-      name: '#TEST-DEBUG',
-      email: testReservation.email,
-      discount_codes: [
-        { code: 'TEST2016', amount: '29.10' },
-        { code: 'TEST2017', amount: '0.00' },
-        { code: testDiscountCode, amount: testReservation.amount.toString() }
-      ]
-    };
-    
-    console.log(`🔍 Mock payload:`, JSON.stringify(mockPayload, null, 2));
-    
-    // Test the exact webhook parsing logic
-    const email = (mockPayload?.email || '').toLowerCase();
-    const discounts = Array.isArray(mockPayload?.discount_codes) ? mockPayload.discount_codes : [];
-    
-    console.log(`🎯 WEBHOOK TEST: Processing order for ${email}`);
-    console.log(`🎯 WEBHOOK TEST: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
-    
-    for (const d of discounts) {
-      const code = String(d?.code || '');
-      console.log(`🔍 WEBHOOK TEST: Checking discount code: "${code}"`);
-      
-      if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        console.log(`💳 WEBHOOK TEST: Found store credit discount: ${code}`);
-        
-        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
-        console.log(`🔍 WEBHOOK TEST: Code suffix: "${codeSuffix}"`);
-        
-        const parts = codeSuffix.split('_');
-        console.log(`🔍 WEBHOOK TEST: Code parts:`, parts);
-        
-        if (parts.length >= 4 && parts[1] === 'RES') {
-          const constructedReservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
-          console.log(`🔍 WEBHOOK TEST: Constructed reservation ID: "${constructedReservationId}"`);
-          
-          const foundReservation = storeCreditReservations.get(constructedReservationId);
-          console.log(`🔍 WEBHOOK TEST: Found reservation:`, foundReservation ? `${foundReservation.id} (${foundReservation.status})` : 'null');
-          
-          return res.json({
-            success: true,
-            message: 'Webhook parsing test completed',
-            testData: {
-              inputDiscountCode: code,
-              extractedSuffix: codeSuffix,
-              parsedParts: parts,
-              constructedReservationId: constructedReservationId,
-              reservationFound: !!foundReservation,
-              reservationStatus: foundReservation?.status || 'not found',
-              expectedReservationId: testReservationId
-            }
-          });
-        }
-      }
-    }
-    
-    res.json({
-      success: false,
-      message: 'No store credit codes processed in test',
-      discountCodes: discounts.map(d => d.code)
-    });
-    
-  } catch (error) {
-    console.error('❌ WEBHOOK DEBUG ERROR:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// TEST: Debug webhook processing with the exact data from your last order
-app.post('/test/debug-webhook', async (req, res) => {
-  try {
-    console.log('🧪 TEST: Simulating webhook with your last order data...');
-    
-    // Simulate the exact payload from your last order
-    const simulatedPayload = {
-      id: 1234567890,
-      name: '#TEST001',
-      email: 'klause.rudolf@gmail.com',
-      customer: {
-        email: 'klause.rudolf@gmail.com'
-      },
-      discount_codes: [
-        { code: 'TEST2016', amount: '29.10' },
-        { code: 'TEST2017', amount: '0.00' },
-        { code: 'STORE_CREDIT_1756760160636_RES_MF1LN3B0_2IU9V', amount: '0.90' }
-      ]
-    };
-    
-    console.log('🧪 TEST: Simulated payload:', JSON.stringify(simulatedPayload, null, 2));
-    
-    // Run the same logic as the webhook
-    const email = (simulatedPayload?.email || simulatedPayload?.customer?.email || '').toLowerCase();
-    const discounts = Array.isArray(simulatedPayload?.discount_codes) ? simulatedPayload.discount_codes : [];
-    
-    console.log(`🎯 TEST: Processing order for ${email}`);
-    console.log(`🎯 TEST: Order ID: ${simulatedPayload?.id}, Order Name: ${simulatedPayload?.name}`);
-    console.log(`🎯 TEST: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
-    console.log(`🎯 TEST: Full discount objects:`, JSON.stringify(discounts, null, 2));
-    console.log(`🎯 TEST: STORE_CREDIT_PREFIX = "${STORE_CREDIT_PREFIX}"`);
-    console.log(`🎯 TEST: Current reservations:`, Array.from(storeCreditReservations.keys()));
-    console.log(`🎯 TEST: Current reservation details:`, JSON.stringify(Array.from(storeCreditReservations.entries()).map(([k,v]) => ({id: k, email: v.email, status: v.status, amount: v.amount})), null, 2));
-    
-    // Process each discount code
-    for (const d of discounts) {
-      const code = String(d?.code || '');
-      
-      console.log(`🔍 TEST: Checking discount code: "${code}"`);
-      
-      if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        console.log(`💳 TEST: Found store credit discount: ${code}`);
-        
-        // Extract reservation ID from discount code
-        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
-        console.log(`🔍 TEST: Code suffix after removing prefix: "${codeSuffix}"`);
-        
-        const parts = codeSuffix.split('_');
-        console.log(`🔍 TEST: Code parts:`, parts);
-        
-        if (parts.length >= 4 && parts[1] === 'RES') {
-          const reservationId = `RES_${parts[2].toLowerCase()}_${parts[3]}`;
-          console.log(`🔍 TEST: Constructed full reservation ID: "${reservationId}"`);
-          console.log(`🔍 TEST: Looking for reservation in map with keys:`, Array.from(storeCreditReservations.keys()));
-          
-          const reservation = storeCreditReservations.get(reservationId);
-          console.log(`🔍 TEST: Found reservation:`, reservation ? `${reservation.id} (${reservation.status}) - ${reservation.email}` : 'null');
-          console.log(`🔍 TEST: Reservation details:`, reservation ? JSON.stringify(reservation, null, 2) : 'No reservation found');
-          
-          if (reservation && reservation.status === 'reserved') {
-            console.log(`✅ TEST: Would process reservation ${reservationId} - deduct ${reservation.amount}€`);
-          } else if (reservation && reservation.status === 'finalized') {
-            console.log(`✅ TEST: Reservation ${reservationId} already finalized - would skip`);
-          } else if (reservation) {
-            console.log(`⚠️ TEST: Found reservation ${reservationId} but status is ${reservation.status} (expected: reserved)`);
-          } else {
-            console.log(`❌ TEST: No reservation found for ID: ${reservationId}`);
-          }
-        } else {
-          console.log(`❌ TEST: Could not extract reservation ID from discount code: ${code} (invalid format)`);
-          console.log(`❌ TEST: Parts length: ${parts.length}, parts[1]: "${parts[1]}"`);
-        }
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: 'Debug webhook test completed - check console logs',
-      email: email,
-      discountCodes: discounts.map(d => d?.code),
-      reservationCount: storeCreditReservations.size
-    });
-    
-  } catch (error) {
-    console.error('❌ TEST: Error in debug webhook:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Add webhook tracking
-global.webhookLog = global.webhookLog || [];
-
-// Enhanced webhook logging function
-function logWebhookActivity(event, data) {
-  const entry = {
-    timestamp: new Date().toISOString(),
-    event,
-    data
-  };
-  
-  global.webhookLog = global.webhookLog || [];
-  global.webhookLog.unshift(entry);
-  
-  // Keep only last 10 entries
-  if (global.webhookLog.length > 10) {
-    global.webhookLog = global.webhookLog.slice(0, 10);
-  }
-  
-  global.lastWebhookReceived = entry.timestamp;
-}
-
-// Debug endpoint to check webhook activity
-app.get('/debug/webhooks', (req, res) => {
-  res.json({
-    lastWebhookReceived: global.lastWebhookReceived || null,
-    recentActivity: global.webhookLog || [],
-    serverTime: new Date().toISOString()
-  });
-});
-
 // Debug routes
 app.get('/debug/store-credit', async (req, res) => {
   const email = (req.query.email || '').toLowerCase();
   if (!email) return res.status(400).json({ error: 'email query param required' });
   return res.json({ email, balance: getStoreCredit(email) });
-});
-
-// New endpoint to check real Shopify store credit balance
-app.get('/debug/shopify-store-credit', async (req, res) => {
-  try {
-    const email = (req.query.email || '').toLowerCase();
-    if (!email) return res.status(400).json({ error: 'email query param required' });
-
-    // Find customer by email using Shopify Admin API
-    const customerQuery = `
-      query($query: String!) {
-        customers(first: 1, query: $query) {
-          edges {
-            node {
-              id
-              email
-              storeCreditAccounts(first: 10) {
-                edges {
-                  node {
-                    id
-                    balance {
-                      amount
-                      currencyCode
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const customerResponse = await axios.post(config.adminApiUrl, {
-      query: customerQuery,
-      variables: { query: `email:${email}` }
-    }, {
-      headers: {
-        'X-Shopify-Access-Token': config.adminToken,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    const customer = customerResponse.data?.data?.customers?.edges?.[0]?.node;
-    if (!customer) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
-
-    const storeCreditAccounts = customer.storeCreditAccounts?.edges || [];
-    const totalBalance = storeCreditAccounts.reduce((sum, edge) => {
-      return sum + parseFloat(edge.node.balance?.amount || 0);
-    }, 0);
-
-    return res.json({ 
-      email, 
-      customerId: customer.id,
-      localBalance: getStoreCredit(email),
-      shopifyBalance: totalBalance,
-      storeCreditAccounts: storeCreditAccounts.map(edge => ({
-        id: edge.node.id,
-        balance: edge.node.balance
-      }))
-    });
-  } catch (error) {
-    console.error('Error fetching Shopify store credit:', error);
-    return res.status(500).json({ error: 'Failed to fetch Shopify store credit balance' });
-  }
 });
 
 app.post('/debug/store-credit/adjust', express.json(), async (req, res) => {
@@ -2356,6 +788,13 @@ function toMoneyString(n) {
   return (Math.round(Number(n) * 100) / 100).toFixed(2);
 }
 
+async function getCustomerIdByEmail(email) {
+  const customer = await getShopifyCustomerByEmail(email);
+  if (!customer?.id) throw new Error(`Customer not found for email: ${email}`);
+  // Extract numeric ID from GID format
+  return customer.id.replace('gid://shopify/Customer/', '');
+}
+
 // POST /store-credit/debit  — Secure backend endpoint callable from Flutter
 // Body: { email?: string, customerId?: string (gid or numeric), amount: number|string, currencyCode?: string, memo?: string, reason?: string }
 app.post('/store-credit/debit', async (req, res) => {
@@ -2415,6 +854,98 @@ app.post('/store-credit/debit', async (req, res) => {
   } catch (err) {
     console.error('❌ /store-credit/debit error', err.message);
     return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
+  }
+});
+
+// POST /orders/complete — Process store credit deductions for completed orders
+app.post('/orders/complete', async (req, res) => {
+  try {
+    const { orderId, customerEmail } = req.body || {};
+    if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
+    if (!customerEmail) return res.status(400).json({ success: false, error: 'customerEmail required' });
+
+    console.log(`🛒 Processing order completion: ${orderId} for ${customerEmail}`);
+
+    // Check if we have a store credit reservation for this customer
+    const email = customerEmail.toLowerCase();
+    const reservedAmount = storeCreditReservations.get(email);
+    
+    if (!reservedAmount || reservedAmount <= 0) {
+      console.log(`✅ No store credit reserved for ${email}, nothing to deduct`);
+      return res.json({ success: true, message: 'No store credit to deduct', deducted: 0 });
+    }
+
+    // Deduct from Shopify using the working pattern from webhook
+    const mutation = `
+      mutation storeCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+        storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+          storeCreditAccountTransaction {
+            id
+            account { balance { amount currencyCode } }
+          }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    // Find customer's store credit account
+    const customerGid = `gid://shopify/Customer/${await getCustomerIdByEmail(email)}`;
+    const storeCreditQuery = `
+      query getStoreCreditAccounts($customerId: ID!) {
+        customer(id: $customerId) {
+          storeCreditAccounts(first: 5) {
+            edges {
+              node {
+                id
+                balance { amount currencyCode }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const accountRes = await shopify.graphql(storeCreditQuery, { customerId: customerGid });
+    const accounts = accountRes.data?.customer?.storeCreditAccounts?.edges || [];
+    
+    if (accounts.length === 0) {
+      console.log(`❌ No store credit account found for ${email}`);
+      return res.status(404).json({ success: false, error: 'No store credit account found' });
+    }
+
+    const accountId = accounts[0].node.id;
+    const debitRes = await shopify.graphql(mutation, {
+      id: accountId,
+      debitInput: {
+        amount: { amount: toMoneyString(reservedAmount), currencyCode: 'EUR' },
+        memo: `Order completion deduction - Order ${orderId}`
+      }
+    });
+
+    if (debitRes.data?.storeCreditAccountDebit?.userErrors?.length > 0) {
+      const errors = debitRes.data.storeCreditAccountDebit.userErrors;
+      console.error('❌ Shopify store credit debit errors:', errors);
+      return res.status(400).json({ success: false, error: 'Shopify debit failed', details: errors });
+    }
+
+    // Clear reservation and update local balance
+    storeCreditReservations.delete(email);
+    const newBalance = debitRes.data.storeCreditAccountDebit.storeCreditAccountTransaction.account.balance.amount;
+    setStoreCredit(email, Number(newBalance));
+    await persistStoreCreditLedger();
+
+    console.log(`✅ Successfully deducted ${reservedAmount}€ store credit for ${email}, new balance: ${newBalance}€`);
+
+    return res.json({
+      success: true,
+      deducted: reservedAmount,
+      newBalance: Number(newBalance),
+      orderId
+    });
+
+  } catch (err) {
+    console.error('❌ /orders/complete error:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal error', details: err.message });
   }
 });
 
