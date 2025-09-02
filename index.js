@@ -619,8 +619,8 @@ app.post('/orders/complete', async (req, res) => {
             try {
               if (reservation.storeCreditAccountId) {
                 const debitMutation = `
-                  mutation storeCreditAccountDebit($storeCreditAccountId: ID!, $amount: MoneyInput!) {
-                    storeCreditAccountDebit(storeCreditAccountId: $storeCreditAccountId, amount: $amount) {
+                  mutation storeCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+                    storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
                       storeCreditAccountTransaction {
                         id
                         amount {
@@ -639,10 +639,13 @@ app.post('/orders/complete', async (req, res) => {
                 const debitResponse = await axios.post(config.adminApiUrl, {
                   query: debitMutation,
                   variables: {
-                    storeCreditAccountId: reservation.storeCreditAccountId,
-                    amount: {
-                      amount: reservation.amount.toFixed(2),
-                      currencyCode: 'EUR'
+                    id: reservation.storeCreditAccountId,
+                    debitInput: {
+                      debitAmount: {
+                        amount: reservation.amount.toFixed(2),
+                        currencyCode: 'EUR'
+                      },
+                      note: `Store Credit Used - Order ${orderToken}`
                     }
                   }
                 }, {
