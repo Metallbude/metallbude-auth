@@ -868,12 +868,25 @@ app.post('/orders/complete', async (req, res) => {
 
     // Check if we have a store credit reservation for this customer
     const email = customerEmail.toLowerCase();
-    const reservedAmount = storeCreditReservations.get(email);
+    let reservation = null;
+    let reservedAmount = 0;
     
-    if (!reservedAmount || reservedAmount <= 0) {
+    // Find reservation by email (stored by reservationId but contains email)
+    for (const [reservationId, res] of storeCreditReservations.entries()) {
+      if (res.email === email && res.status === 'reserved') {
+        reservation = res;
+        reservedAmount = res.amount;
+        break;
+      }
+    }
+    
+    if (!reservation || reservedAmount <= 0) {
       console.log(`✅ No store credit reserved for ${email}, nothing to deduct`);
       return res.json({ success: true, message: 'No store credit to deduct', deducted: 0 });
     }
+    
+    console.log(`💳 Found reservation for ${email}: ${reservedAmount}€`);
+    const accountId = reservation.storeCreditAccountId;
 
     // Deduct from Shopify using the working pattern from webhook
     const mutation = `
@@ -888,32 +901,6 @@ app.post('/orders/complete', async (req, res) => {
       }
     `;
 
-    // Find customer's store credit account
-    const customerGid = `gid://shopify/Customer/${await getCustomerIdByEmail(email)}`;
-    const storeCreditQuery = `
-      query getStoreCreditAccounts($customerId: ID!) {
-        customer(id: $customerId) {
-          storeCreditAccounts(first: 5) {
-            edges {
-              node {
-                id
-                balance { amount currencyCode }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const accountRes = await shopify.graphql(storeCreditQuery, { customerId: customerGid });
-    const accounts = accountRes.data?.customer?.storeCreditAccounts?.edges || [];
-    
-    if (accounts.length === 0) {
-      console.log(`❌ No store credit account found for ${email}`);
-      return res.status(404).json({ success: false, error: 'No store credit account found' });
-    }
-
-    const accountId = accounts[0].node.id;
     const debitRes = await shopify.graphql(mutation, {
       id: accountId,
       debitInput: {
@@ -929,10 +916,11 @@ app.post('/orders/complete', async (req, res) => {
     }
 
     // Clear reservation and update local balance
-    storeCreditReservations.delete(email);
+    storeCreditReservations.delete(reservation.id);
     const newBalance = debitRes.data.storeCreditAccountDebit.storeCreditAccountTransaction.account.balance.amount;
     setStoreCredit(email, Number(newBalance));
     await persistStoreCreditLedger();
+    await persistStoreCreditReservations();
 
     console.log(`✅ Successfully deducted ${reservedAmount}€ store credit for ${email}, new balance: ${newBalance}€`);
 
