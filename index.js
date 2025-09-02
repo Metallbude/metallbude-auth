@@ -860,20 +860,26 @@ app.post('/store-credit/debit', async (req, res) => {
 // POST /orders/complete — Process store credit deductions for completed orders
 app.post('/orders/complete', async (req, res) => {
   try {
-    const { orderId, customerEmail } = req.body || {};
-    if (!orderId) return res.status(400).json({ success: false, error: 'orderId required' });
-    if (!customerEmail) return res.status(400).json({ success: false, error: 'customerEmail required' });
+    const { orderId, customerEmail, orderToken, email } = req.body || {};
+    
+    // Be flexible with parameter names - Flutter might send different field names
+    const finalOrderId = orderId || orderToken || 'flutter_completion_' + Date.now();
+    const finalEmail = customerEmail || email;
+    
+    if (!finalEmail) {
+      return res.status(400).json({ success: false, error: 'customerEmail or email required' });
+    }
 
-    console.log(`🛒 Processing order completion: ${orderId} for ${customerEmail}`);
+    console.log(`🛒 Processing order completion: ${finalOrderId} for ${finalEmail}`);
 
     // Check if we have a store credit reservation for this customer
-    const email = customerEmail.toLowerCase();
+    const emailLower = finalEmail.toLowerCase();
     let reservation = null;
     let reservedAmount = 0;
     
     // Find reservation by email (stored by reservationId but contains email)
     for (const [reservationId, res] of storeCreditReservations.entries()) {
-      if (res.email === email && res.status === 'reserved') {
+      if (res.email === emailLower && res.status === 'reserved') {
         reservation = res;
         reservedAmount = res.amount;
         break;
@@ -881,11 +887,11 @@ app.post('/orders/complete', async (req, res) => {
     }
     
     if (!reservation || reservedAmount <= 0) {
-      console.log(`✅ No store credit reserved for ${email}, nothing to deduct`);
+      console.log(`✅ No store credit reserved for ${emailLower}, nothing to deduct`);
       return res.json({ success: true, message: 'No store credit to deduct', deducted: 0 });
     }
     
-    console.log(`💳 Found reservation for ${email}: ${reservedAmount}€`);
+    console.log(`💳 Found reservation for ${emailLower}: ${reservedAmount}€`);
     const accountId = reservation.storeCreditAccountId;
 
     // Deduct from Shopify using the working pattern from webhook
@@ -917,17 +923,17 @@ app.post('/orders/complete', async (req, res) => {
     // Clear reservation and update local balance
     storeCreditReservations.delete(reservation.id);
     const newBalance = debitRes.data.storeCreditAccountDebit.storeCreditAccountTransaction.account.balance.amount;
-    setStoreCredit(email, Number(newBalance));
+    setStoreCredit(emailLower, Number(newBalance));
     await persistStoreCreditLedger();
     await persistStoreCreditReservations();
 
-    console.log(`✅ Successfully deducted ${reservedAmount}€ store credit for ${email}, new balance: ${newBalance}€`);
+    console.log(`✅ Successfully deducted ${reservedAmount}€ store credit for ${emailLower}, new balance: ${newBalance}€`);
 
     return res.json({
       success: true,
       deducted: reservedAmount,
       newBalance: Number(newBalance),
-      orderId
+      orderId: finalOrderId
     });
 
   } catch (err) {
