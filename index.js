@@ -901,7 +901,7 @@ app.post('/orders/complete', async (req, res) => {
       }
     `;
 
-    const debitRes = await shopify.graphql(mutation, {
+    const debitRes = await adminGraphQL(mutation, {
       id: accountId,
       debitInput: {
         amount: { amount: toMoneyString(reservedAmount), currencyCode: 'EUR' },
