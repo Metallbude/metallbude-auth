@@ -2134,6 +2134,73 @@ app.get('/debug/store-credit', async (req, res) => {
   return res.json({ email, balance: getStoreCredit(email) });
 });
 
+// New endpoint to check real Shopify store credit balance
+app.get('/debug/shopify-store-credit', async (req, res) => {
+  try {
+    const email = (req.query.email || '').toLowerCase();
+    if (!email) return res.status(400).json({ error: 'email query param required' });
+
+    // Find customer by email using Shopify Admin API
+    const customerQuery = `
+      query($query: String!) {
+        customers(first: 1, query: $query) {
+          edges {
+            node {
+              id
+              email
+              storeCreditAccounts(first: 10) {
+                edges {
+                  node {
+                    id
+                    balance {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const customerResponse = await axios.post(config.adminApiUrl, {
+      query: customerQuery,
+      variables: { query: `email:${email}` }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const customer = customerResponse.data?.data?.customers?.edges?.[0]?.node;
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const storeCreditAccounts = customer.storeCreditAccounts?.edges || [];
+    const totalBalance = storeCreditAccounts.reduce((sum, edge) => {
+      return sum + parseFloat(edge.node.balance?.amount || 0);
+    }, 0);
+
+    return res.json({ 
+      email, 
+      customerId: customer.id,
+      localBalance: getStoreCredit(email),
+      shopifyBalance: totalBalance,
+      storeCreditAccounts: storeCreditAccounts.map(edge => ({
+        id: edge.node.id,
+        balance: edge.node.balance
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching Shopify store credit:', error);
+    return res.status(500).json({ error: 'Failed to fetch Shopify store credit balance' });
+  }
+});
+
 app.post('/debug/store-credit/adjust', express.json(), async (req, res) => {
   const email = (req.body?.email || '').toLowerCase();
   const delta = Number(req.body?.delta || 0);
