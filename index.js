@@ -619,8 +619,8 @@ app.post('/orders/complete', async (req, res) => {
             try {
               if (reservation.storeCreditAccountId) {
                 const debitMutation = `
-                  mutation storeCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
-                    storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+                  mutation storeCreditAccountDebit($storeCreditAccountId: ID!, $amount: MoneyInput!) {
+                    storeCreditAccountDebit(storeCreditAccountId: $storeCreditAccountId, amount: $amount) {
                       storeCreditAccountTransaction {
                         id
                         amount {
@@ -639,13 +639,10 @@ app.post('/orders/complete', async (req, res) => {
                 const debitResponse = await axios.post(config.adminApiUrl, {
                   query: debitMutation,
                   variables: {
-                    id: reservation.storeCreditAccountId,
-                    debitInput: {
-                      debitAmount: {
-                        amount: reservation.amount.toFixed(2),
-                        currencyCode: 'EUR'
-                      },
-                      note: `Store Credit Used - Order ${orderToken}`
+                    storeCreditAccountId: reservation.storeCreditAccountId,
+                    amount: {
+                      amount: reservation.amount.toFixed(2),
+                      currencyCode: 'EUR'
                     }
                   }
                 }, {
@@ -656,6 +653,19 @@ app.post('/orders/complete', async (req, res) => {
                 });
 
                 console.log(`💰 Shopify debit result:`, JSON.stringify(debitResponse.data, null, 2));
+
+                // Check if successful and update local balance
+                if (debitResponse.data?.data?.storeCreditAccountDebit?.storeCreditAccountTransaction) {
+                  console.log(`✅ Successfully deducted ${reservation.amount}€ from Shopify store credit account`);
+                  
+                  // Update local balance to match Shopify
+                  const currentBalance = getStoreCredit(reservation.email) || 0;
+                  const newBalance = Math.max(0, currentBalance - reservation.amount);
+                  setStoreCredit(reservation.email, newBalance);
+                  await persistStoreCreditLedger();
+                } else {
+                  console.error(`❌ Shopify debit failed:`, debitResponse.data?.errors || debitResponse.data?.data?.storeCreditAccountDebit?.userErrors);
+                }
               }
             } catch (shopifyError) {
               console.error(`❌ Shopify debit failed for ${reservationId}:`, shopifyError.message);
