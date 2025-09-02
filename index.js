@@ -904,8 +904,7 @@ app.post('/orders/complete', async (req, res) => {
     const debitRes = await adminGraphQL(mutation, {
       id: accountId,
       debitInput: {
-        amount: { amount: toMoneyString(reservedAmount), currencyCode: 'EUR' },
-        memo: `Order completion deduction - Order ${orderId}`
+        debitAmount: { amount: toMoneyString(reservedAmount), currencyCode: 'EUR' }
       }
     });
 
