@@ -187,6 +187,315 @@ const config = {
   sessions: new Map(),
   customerEmails: new Map(),
 };
+// ==== Shopify Admin GraphQL helper ====
+async function adminGraphQL(query, variables = {}) {
+  const url = config.adminApiUrl; // e.g. https://<shop>/admin/api/2024-10/graphql.json
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Shopify-Access-Token': config.adminToken,
+  };
+  const resp = await axios.post(url, { query, variables }, { headers });
+  if (resp.data && resp.data.errors) {
+    const msg = resp.data.errors.map(e => e.message).join('; ');
+    throw new Error(`GraphQL error: ${msg}`);
+  }
+  return resp.data;
+}
+
+// Map Order LineItem.id -> FulfillmentLineItem.id for a given order
+async function mapFulfillmentLineItems(orderId) {
+  const q = `
+    query($orderId: ID!) {
+      order(id: $orderId) {
+        id
+        fulfillments(first: 50) {
+          edges { node { fulfillmentLineItems(first: 250) { edges { node { id lineItem { id } quantity } } } } }
+        }
+      }
+    }
+  `;
+  const data = await adminGraphQL(q, { orderId });
+  const edges = (data?.data?.order?.fulfillments?.edges) || [];
+  const map = {};
+  for (const f of edges) {
+    const flis = f?.node?.fulfillmentLineItems?.edges || [];
+    for (const e of flis) {
+      const n = e.node;
+      if (n?.lineItem?.id && n?.id) map[n.lineItem.id] = n.id;
+    }
+  }
+  return map; // { lineItemId -> fulfillmentLineItemId }
+}
+
+
+        
+// Create a REQUESTED return (Rückgabe angefragt)
+async function createReturnRequested({ orderId, items, customerNote }) {
+  // items: [{ lineItemId, fulfillmentLineItemId?, quantity, reason, customerNote? }]
+  // Build fulfillmentLineItemId map if needed
+  const needsMap = items.some(i => !i.fulfillmentLineItemId);
+  let lineToFli = {};
+  if (needsMap) {
+    lineToFli = await mapFulfillmentLineItems(orderId);
+  }
+
+  const returnLineItems = items.map(i => ({
+    fulfillmentLineItemId: i.fulfillmentLineItemId || lineToFli[i.lineItemId],
+    quantity: i.quantity,
+    returnReason: i.reason,              // e.g. WRONG_ITEM, SIZE_TOO_SMALL, DAMAGED, etc.
+    customerNote: i.customerNote || customerNote || undefined,
+  })).filter(x => !!x.fulfillmentLineItemId && x.quantity > 0);
+
+  const mutation = `
+    mutation ReturnRequest($input: ReturnRequestInput!) {
+      returnRequest(input: $input) {
+        userErrors { field message }
+        return { id status order { id } }
+      }
+    }
+  `;
+
+  const variables = { input: { orderId, returnLineItems } };
+  const data = await adminGraphQL(mutation, variables);
+  const payload = data?.data?.returnRequest;
+  if (payload?.userErrors?.length) {
+    const msg = payload.userErrors.map(e => `${e.field?.join('.') || 'input'}: ${e.message}`).join(' | ');
+    throw new Error(msg);
+  }
+  return payload.return; // { id, status: 'REQUESTED', order { id } }
+}
+
+// Create an OPEN return with exchange items (auto-fills Umtausch-Artikel)
+async function returnCreateWithExchange({ orderId, items, exchanges, note }) {
+  // items: [{ lineItemId, fulfillmentLineItemId?, quantity }]
+  // exchanges: [{ variantId, quantity }]
+  const needsMap = items.some(i => !i.fulfillmentLineItemId);
+  let lineToFli = {};
+  if (needsMap) lineToFli = await mapFulfillmentLineItems(orderId);
+
+  const returnLineItems = items.map(i => ({
+    fulfillmentLineItemId: i.fulfillmentLineItemId || lineToFli[i.lineItemId],
+    quantity: i.quantity,
+  })).filter(x => !!x.fulfillmentLineItemId && x.quantity > 0);
+
+  const exchangeLineItems = (exchanges || []).map(e => ({
+    variantId: e.variantId,
+    quantity: e.quantity || 1,
+  }));
+
+  const mutation = `
+    mutation ReturnCreate($input: ReturnInput!) {
+      returnCreate(input: $input) {
+        return { id status exchangeLineItems(first: 50) { nodes { id quantity variant { id title } } } }
+        userErrors { field message code }
+      }
+    }`;
+  const variables = { input: { orderId, returnLineItems, exchangeLineItems, note } };
+  const data = await adminGraphQL(mutation, variables);
+  const payload = data?.data?.returnCreate;
+  if (payload?.userErrors?.length) {
+    const msg = payload.userErrors.map(e => `${e.field?.join('.') || 'input'}: ${e.message}`).join(' | ');
+    throw new Error(msg);
+  }
+  return payload.return; // { id, status: 'OPEN' }
+}
+
+// Approve REQUESTED → OPEN (needed before shipping/label)
+async function approveReturnRequest(returnId) {
+  const mutation = `
+    mutation Approve($input: ReturnApproveRequestInput!) {
+      returnApproveRequest(input: $input) { return { id status } userErrors { field message } }
+    }`;
+  const variables = { input: { id: returnId } };
+  const data = await adminGraphQL(mutation, variables);
+  const payload = data?.data?.returnApproveRequest;
+  if (payload?.userErrors?.length) {
+    const msg = payload.userErrors.map(e => `${e.field?.join('.') || 'input'}: ${e.message}`).join(' | ');
+    throw new Error(msg);
+  }
+  return payload.return; // status -> OPEN
+}
+
+// Get reverse fulfillment order for return shipping
+async function getReverseFulfillmentOrder(returnId) {
+  const q = `
+    query($id: ID!) {
+      return(id: $id) {
+        reverseFulfillmentOrders(first: 5) {
+          nodes { id lineItems(first: 100) { nodes { id quantity } } }
+        }
+      }
+    }`;
+  const data = await adminGraphQL(q, { id: returnId });
+  const nodes = data?.data?.return?.reverseFulfillmentOrders?.nodes || [];
+  if (!nodes.length) throw new Error('No ReverseFulfillmentOrder found (ensure return is OPEN)');
+  return nodes[0];
+}
+
+// Create staged upload for file upload
+async function stagedUploadsCreate(filename, mimeType, fileSize) {
+  const mutation = `
+    mutation StagedUploads($input: [StagedUploadInput!]!) {
+      stagedUploadsCreate(input: $input) {
+        stagedTargets { resourceUrl url parameters { name value } }
+        userErrors { field message }
+      }
+    }`;
+  const variables = { input: [{ filename, httpMethod: "POST", mimeType, resource: "FILE", fileSize }] };
+  const data = await adminGraphQL(mutation, variables);
+  const payload = data?.data?.stagedUploadsCreate;
+  if (payload?.userErrors?.length) {
+    const msg = payload.userErrors.map(e => `${e.field?.join('.') || 'input'}: ${e.message}`).join(' | ');
+    throw new Error(msg);
+  }
+  return payload.stagedTargets[0]; // { url, parameters[], resourceUrl }
+}
+
+// Upload file to staged target
+const FormData = require('form-data');
+async function uploadToStagedTarget(target, buffer) {
+  const form = new FormData();
+  for (const p of target.parameters) form.append(p.name, p.value);
+  form.append('file', buffer);
+  const resp = await axios.post(target.url, form, { headers: form.getHeaders() });
+  if (resp.status >= 300) throw new Error(`Staged upload failed: ${resp.status}`);
+  return target.resourceUrl; // pass as stagedUploadPath
+}
+
+// Create reverse delivery with shipping (label or tracking)
+async function reverseDeliveryCreateWithShipping({ reverseFulfillmentOrderId, lineItems, labelInput, trackingInput, notifyCustomer }) {
+  const mutation = `
+    mutation MakeReverse($id: ID!, $items: [ReverseDeliveryLineItemInput!]!, $label: ReverseDeliveryLabelInput, $tracking: ReverseDeliveryTrackingInput, $notify: Boolean) {
+      reverseDeliveryCreateWithShipping(
+        reverseFulfillmentOrderId: $id,
+        reverseDeliveryLineItems: $items,
+        labelInput: $label,
+        trackingInput: $tracking,
+        notifyCustomer: $notify
+      ) {
+        reverseDelivery { id deliverable { ... on ReverseDeliveryShippingDeliverable { label { publicFileUrl } tracking { number url carrierName } } } }
+        userErrors { field message }
+      }
+    }`;
+  const variables = { id: reverseFulfillmentOrderId, items: lineItems || [], label: labelInput || null, tracking: trackingInput || null, notify: !!notifyCustomer };
+  const data = await adminGraphQL(mutation, variables);
+  const payload = data?.data?.reverseDeliveryCreateWithShipping;
+  if (payload?.userErrors?.length) {
+    const msg = payload.userErrors.map(e => `${e.field?.join('.') || 'input'}: ${e.message}`).join(' | ');
+    throw new Error(msg);
+  }
+  return payload.reverseDelivery;
+}
+
+// POST /returns  => ensures REQUESTED state (Rückgabe angefragt)
+app.post('/returns', async (req, res) => {
+  try {
+    const { orderId, items, customerNote, exchangeSelections, resolution } = req.body || {};
+    if (!orderId || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ ok: false, error: 'orderId and items[] are required' });
+    }
+
+    // Sanitize items and remove unsupported fields that caused errors before
+    const cleanItems = items.map(i => ({
+      lineItemId: i.lineItemId,
+      fulfillmentLineItemId: i.fulfillmentLineItemId, // optional
+      quantity: Number(i.quantity || 0),
+      reason: i.reason,                 // Shopify enum string
+      customerNote: i.customerNote,
+    }));
+
+    const result = await createReturnRequested({ orderId, items: cleanItems, customerNote });
+
+    // If exchange is requested, create exchange line items for Shopify Admin
+    if (resolution === 'exchange' && exchangeSelections && exchangeSelections.length > 0) {
+      console.log('🔄 Processing exchange selections:', exchangeSelections);
+      
+      // TODO: Create exchange order or draft order with requested items
+      // For now, we'll store the exchange data in the return notes
+      const exchangeDetails = exchangeSelections.map(ex => 
+        `Exchange: ${ex.wantedTitle || ex.wantedSku || ex.wantedVariantId} (Qty: ${ex.quantity || 1})`
+      ).join('; ');
+      
+      console.log('✅ Exchange details logged:', exchangeDetails);
+      // Note: Shopify Admin API doesn't directly support exchanges in returnRequest
+      // The merchant will need to manually create exchange orders based on the request
+    }
+
+    return res.status(201).json({ 
+      ok: true, 
+      return: result,
+      ...(resolution === 'exchange' && { exchangeSelections: exchangeSelections })
+    });
+  } catch (err) {
+    console.error('❌ Error creating REQUESTED return:', err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Unknown error' });
+  }
+});
+
+// POST /returns/exchange => Create OPEN return with exchange items (auto-fills Umtausch-Artikel)
+app.post('/returns/exchange', async (req, res) => {
+  try {
+    const { orderId, items, exchanges, note } = req.body || {};
+    if (!orderId || !Array.isArray(items) || !items.length) {
+      return res.status(400).json({ ok: false, error: 'orderId and items[] are required' });
+    }
+    if (!Array.isArray(exchanges) || !exchanges.length) {
+      return res.status(400).json({ ok: false, error: 'exchanges[] (variantId, quantity) required' });
+    }
+    const result = await returnCreateWithExchange({ orderId, items, exchanges, note });
+    return res.status(201).json({ ok: true, return: result });
+  } catch (err) {
+    console.error('❌ /returns/exchange failed:', err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Unknown error' });
+  }
+});
+
+// POST /returns/:id/approve => Approve REQUESTED → OPEN
+app.post('/returns/:id/approve', async (req, res) => {
+  try {
+    const result = await approveReturnRequest(req.params.id);
+    res.status(200).json({ ok: true, return: result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// POST /returns/:id/reverse-delivery => Rückversandoptionen (label upload or tracking)
+app.post('/returns/:id/reverse-delivery', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { mode, fileName, mimeType, base64, trackingNumber, trackingUrl, carrierName, quantitiesByRfoLineId, notifyCustomer } = req.body || {};
+
+    const rfo = await getReverseFulfillmentOrder(id);
+    const reverseFulfillmentOrderId = rfo.id;
+
+    const lineItems = Object.entries(quantitiesByRfoLineId || {}).map(([rfoLineId, qty]) => ({
+      reverseFulfillmentOrderLineItemId: rfoLineId,
+      quantity: Number(qty) || 1,
+    }));
+
+    let labelInput = null; let trackingInput = null;
+    if (mode === 'label') {
+      if (!fileName || !mimeType || !base64) return res.status(400).json({ ok: false, error: 'fileName, mimeType, base64 required' });
+      const target = await stagedUploadsCreate(fileName, mimeType, Buffer.byteLength(base64, 'base64'));
+      const path = await uploadToStagedTarget(target, Buffer.from(base64, 'base64'));
+      labelInput = { stagedUploadPath: path, mimeType };
+    } else if (mode === 'tracking') {
+      if (!trackingNumber) return res.status(400).json({ ok: false, error: 'trackingNumber required' });
+      trackingInput = { number: trackingNumber, url: trackingUrl || null, carrierName: carrierName || null };
+    } else {
+      return res.status(400).json({ ok: false, error: "mode must be 'label' or 'tracking'" });
+    }
+
+    const reverse = await reverseDeliveryCreateWithShipping({
+      reverseFulfillmentOrderId, lineItems, labelInput, trackingInput, notifyCustomer: !!notifyCustomer
+    });
+    return res.status(201).json({ ok: true, reverseDelivery: reverse });
+  } catch (err) {
+    console.error('❌ /returns/:id/reverse-delivery failed:', err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Unknown error' });
+  }
+});
 
 // Helper function to get real customer email from Shopify for public endpoints
 async function getRealCustomerEmail(customerId) {
@@ -1966,67 +2275,62 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    // Query the ACTUAL return and its order details for complete product info
-    const returnQuery = `
-      query getReturnWithOrderDetails($id: ID!) {
-        return(id: $id) {
-          id
-          name
-          status
-          order {
-            id
-            name
-            customer {
-              email
-            }
-            lineItems(first: 50) {
-              edges {
-                node {
-                  id
-                  title
-                  quantity
-                  variant {
+    // First query to find all returns for the customer
+    const returnsQuery = `
+      query getCustomerReturns($customerEmail: String!) {
+        orders(first: 100, query: "email:${customerEmail}") {
+          edges {
+            node {
+              id
+              name
+              customer {
+                email
+              }
+              returns(first: 20) {
+                edges {
+                  node {
                     id
-                    title
-                    price
-                    sku
-                    image {
-                      url
+                    name
+                    status
+                    order {
+                      id
+                      name
                     }
-                  }
-                  originalUnitPriceSet {
-                    shopMoney {
-                      amount
-                      currencyCode
-                    }
-                  }
-                  discountedUnitPriceSet {
-                    shopMoney {
-                      amount
-                      currencyCode
+                    returnLineItems(first: 50) {
+                      edges {
+                        node {
+                          id
+                          quantity
+                          returnReason
+                          returnReasonNote
+                          fulfillmentLineItem {
+                            lineItem {
+                              id
+                              title
+                              variant {
+                                id
+                                title
+                                price
+                                sku
+                                image {
+                                  url
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
               }
             }
           }
-          returnLineItems(first: 50) {
-            edges {
-              node {
-                id
-                quantity
-                returnReason
-                returnReasonNote
-              }
-            }
-          }
         }
       }`;
 
-    // Query the specific return that was created successfully
     const response = await axios.post(config.adminApiUrl, {
-      query: returnQuery,
-      variables: { id: 'gid://shopify/Return/17455055116' }
+      query: returnsQuery
     }, {
       headers: {
         'X-Shopify-Access-Token': config.adminToken,
@@ -2045,69 +2349,63 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    // Verify this return belongs to the customer
-    const orderCustomerEmail = returnData.order?.customer?.email;
-    if (orderCustomerEmail !== customerEmail) {
-      console.log('❌ Return does not belong to this customer');
-      return [];
+    const orders = response.data.data?.orders?.edges || [];
+    const returnRequests = [];
+
+    console.log(`📋 Found ${orders.length} orders for ${customerEmail}`);
+
+    for (const orderEdge of orders) {
+      const order = orderEdge.node;
+      const returns = order.returns?.edges || [];
+      
+      console.log(`📦 Order ${order.name}: ${returns.length} returns`);
+      
+      for (const returnEdge of returns) {
+        const returnData = returnEdge.node;
+        const returnLineItems = returnData.returnLineItems?.edges || [];
+        
+        const items = [];
+        for (const lineItemEdge of returnLineItems) {
+          const returnLineItem = lineItemEdge.node;
+          const fulfillmentLineItem = returnLineItem.fulfillmentLineItem;
+          const lineItem = fulfillmentLineItem?.lineItem;
+          const variant = lineItem?.variant;
+          
+          items.push({
+            lineItemId: lineItem?.id || returnLineItem.id,
+            productId: variant?.id || lineItem?.id || 'unknown',
+            title: lineItem?.title || 'Unknown Product',
+            imageUrl: variant?.image?.url || null,
+            quantity: returnLineItem.quantity || 1,
+            price: parseFloat(variant?.price || '0'),
+            sku: variant?.sku || '',
+            variantTitle: variant?.title || 'Standard',
+            returnReason: returnLineItem.returnReason || 'OTHER',
+            customerNote: returnLineItem.returnReasonNote || ''
+          });
+        }
+
+        returnRequests.push({
+          id: returnData.id,
+          orderId: order.id,
+          orderNumber: order.name.replace('#', ''),
+          items: items,
+          reason: mapShopifyReasonToInternal(items[0]?.returnReason || 'OTHER'),
+          additionalNotes: items[0]?.customerNote || '',
+          preferredResolution: 'refund',
+          customerEmail: customerEmail,
+          requestDate: new Date().toISOString(),
+          status: mapShopifyStatusToInternal(returnData.status),
+          shopifyReturnRequestId: returnData.id,
+        });
+      }
     }
 
-    // Process return line items with REAL product data from order
-    const returnLineItems = returnData.returnLineItems?.edges || [];
-    const orderLineItems = returnData.order?.lineItems?.edges || [];
-    
-    const processedItems = returnLineItems.map(itemEdge => {
-      const returnLineItem = itemEdge.node;
-      
-      // Find the corresponding order line item (simplified matching by first available)
-      const orderLineItem = orderLineItems[0]?.node; // For now, match to first item
-      const variant = orderLineItem?.variant;
-      
-      // Use discounted price if available (sale price), otherwise original price
-      const discountedPrice = orderLineItem?.discountedUnitPriceSet?.shopMoney?.amount;
-      const originalPrice = orderLineItem?.originalUnitPriceSet?.shopMoney?.amount;
-      const actualPrice = discountedPrice || originalPrice || '0';
-      
-      return {
-        lineItemId: returnLineItem.id,
-        productId: orderLineItem?.id || 'unknown',
-        title: orderLineItem?.title || `Return Item (${returnData.name})`,
-        imageUrl: variant?.image?.url || null,
-        quantity: returnLineItem.quantity || 1,
-        price: parseFloat(actualPrice),
-        sku: variant?.sku || returnLineItem.id,
-        variantTitle: variant?.title || 'Returned Item',
-        returnReason: returnLineItem.returnReason || 'OTHER',
-        customerNote: returnLineItem.returnReasonNote || ''
-      };
-    });
-
-    const customerReturn = {
-      id: returnData.id,
-      orderId: returnData.order?.id || '',
-      orderNumber: (returnData.order?.name || '').replace('#', ''), // Remove # from order name
-      items: processedItems,
-      reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
-      additionalNotes: processedItems[0]?.customerNote || '',
-      preferredResolution: 'refund',
-      customerEmail: customerEmail,
-      requestDate: new Date().toISOString(),
-      status: returnData.status?.toLowerCase() || 'open',
-      shopifyReturnRequestId: returnData.id,
-    };
-
-    console.log(`✅ Found 1 return for customer: ${customerEmail}`);
-    console.log('📦 Return details:', {
-      id: customerReturn.id,
-      orderNumber: customerReturn.orderNumber,
-      itemCount: customerReturn.items.length,
-      status: customerReturn.status
-    });
-
-    return [customerReturn];
+    console.log(`✅ Retrieved ${returnRequests.length} return requests from Admin API for ${customerEmail}`);
+    return returnRequests;
 
   } catch (error) {
-    console.error('❌ Error fetching Admin API returns:', error.message);
+    console.error('❌ Error fetching returns from Admin API:', error.message);
     return [];
   }
 }
