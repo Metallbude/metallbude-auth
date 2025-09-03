@@ -1252,39 +1252,41 @@ async function sendVerificationEmail(email, code) {
   }
 }
 
-// 🔥 ADDED: Return management helper functions
+// 🔥 ADDED: Return management helper functions - All Shopify-supported reasons
 function mapReasonToShopify(reason) {
   const mapping = {
-    'size_dimensions': 'SIZE_TOO_LARGE',
-    'color_finish': 'COLOR',
-    'quality_material': 'DEFECTIVE',  // Changed from 'QUALITY' to 'DEFECTIVE'
-    'style_design': 'NOT_AS_DESCRIBED',
-    'transport_damage': 'DEFECTIVE',  // Changed from 'DAMAGED' to 'DEFECTIVE'
-    'assembly_issues': 'DEFECTIVE',
-    'defective': 'DEFECTIVE',
-    'wrong_item': 'WRONG_ITEM',
-    'not_as_described': 'NOT_AS_DESCRIBED',
-    'changed_mind': 'UNWANTED',  // Changed from 'NO_LONGER_NEEDED' to 'UNWANTED'
-    'delivery_delay': 'UNWANTED',  // Changed from 'NO_LONGER_NEEDED' to 'UNWANTED'
-    'duplicate_order': 'UNWANTED',
-    'comfort_ergonomics': 'NOT_AS_DESCRIBED',
-    'space_planning': 'UNWANTED',  // Changed from 'NO_LONGER_NEEDED' to 'UNWANTED'
-    'other': 'OTHER',
+    // Direct Shopify mapping - all supported reasons
+    'defective': 'DEFECTIVE',                   // Defekt/Beschädigt
+    'transport_damage': 'DEFECTIVE',            // Transportschaden (maps to DEFECTIVE)
+    'wrong_item': 'WRONG_ITEM',                 // Falscher Artikel geliefert
+    'not_as_described': 'NOT_AS_DESCRIBED',     // Nicht wie beschrieben
+    'size_too_large': 'SIZE_TOO_LARGE',         // Zu groß
+    'size_too_small': 'SIZE_TOO_SMALL',         // Zu klein
+    'color_finish': 'COLOR',                    // Farbe/Oberfläche anders
+    'style_design': 'STYLE',                    // Stil gefällt nicht
+    'quality_material': 'DEFECTIVE',            // Qualität unzureichend (maps to DEFECTIVE)
+    'changed_mind': 'UNWANTED',                 // Gefällt nicht/Reue
+    'other': 'OTHER',                           // Sonstiges
+    
+    // Legacy mappings for backward compatibility
+    'size_dimensions': 'SIZE_TOO_LARGE',        // Old size reason
   };
   return mapping[reason] || 'OTHER';
 }
 
 function mapShopifyReasonToInternal(reason) {
   const mapping = {
-    'SIZE_TOO_LARGE': 'size_dimensions',
-    'SIZE_TOO_SMALL': 'size_dimensions',
-    'COLOR': 'color_finish',
-    'DEFECTIVE': 'transport_damage',  // Maps DEFECTIVE back to transport_damage (most common case)
-    'WRONG_ITEM': 'wrong_item',
-    'NOT_AS_DESCRIBED': 'not_as_described',
-    'UNWANTED': 'changed_mind',  // Maps UNWANTED back to changed_mind
-    'OTHER': 'other',
-    'UNKNOWN': 'other',
+    // Complete Shopify to internal mapping
+    'DEFECTIVE': 'defective',                   // General defects
+    'WRONG_ITEM': 'wrong_item',                 // Wrong item sent
+    'NOT_AS_DESCRIBED': 'not_as_described',     // Product description mismatch
+    'SIZE_TOO_LARGE': 'size_too_large',         // Too big
+    'SIZE_TOO_SMALL': 'size_too_small',         // Too small
+    'COLOR': 'color_finish',                    // Color/finish issues
+    'STYLE': 'style_design',                    // Style issues
+    'UNWANTED': 'changed_mind',                 // Customer changed mind
+    'OTHER': 'other',                           // Other reasons
+    'UNKNOWN': 'other',                         // Unknown reasons
   };
   return mapping[reason] || 'other';
 }
