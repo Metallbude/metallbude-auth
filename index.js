@@ -2267,32 +2267,72 @@ async function getShopifyCustomerReturns(customerToken) {
   }
 }
 
-// 🔥 ADDED: Get returns from Admin API (for returns created via Admin API)
-async function getAdminApiReturns(customerEmail) {
-  try {
-    console.log(`📥 Fetching returns from Shopify Admin API for: ${customerEmail}`);
+// Find a customer by email, return their orders and embedded returns
+async function fetchCustomerReturnsByEmail(email) {
+  const q = `
+    query CustomerReturns($query: String!) {
+      customers(first: 1, query: $query) {
+        edges {
+          node {
+            id
+            email
+            orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+              edges {
+                node {
+                  id
+                  name
+                  processedAt
+                  returns(first: 50) {
+                    edges {
+                      node {
+                        id
+                        status
+                        totalQuantity
+                        createdAt
+                        updatedAt
+                        order { id name }
+                        returnLineItems(first: 50) {
+                          edges {
+                            node {
+                              id
+                              quantity
+                              returnReason
+                              returnReasonNote
+                              lineItem {
+                                id
+                                title
+                                variant {
+                                  id
+                                  title
+                                  image { url }
+                                  price { amount currencyCode }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`;
+  const variables = { query: `email:${email}` };
+  const data = await adminGraphQL(q, variables);
+  const customerEdge = data?.data?.customers?.edges?.[0];
+  if (!customerEdge) return { email, returns: [], orders: [] };
 
-    // For now, let's check our backend database first for stored returns
-    // This is where returns created through our /returns endpoint should be stored
-    const backendReturns = Array.from(returnStorage.values())
-      .filter(returnData => returnData.customerEmail === customerEmail);
-
-    if (backendReturns.length > 0) {
-      console.log(`📊 Final return count: ${backendReturns.length} returns for ${customerEmail} from backend storage`);
-      console.log(`✅ Backend storage returned ${backendReturns.length} returns`);
-      return backendReturns;
-    }
-
-    // If no returns in backend storage, return empty array
-    // The Shopify API queries are failing, so let's not try them for now
-    console.log(`📊 Final return count: 0 returns for ${customerEmail}`);
-    console.log(`✅ Admin API returned 0 returns`);
-    return [];
-    
-  } catch (error) {
-    console.error('❌ Error fetching returns from Shopify Admin API:', error.message);
-    return [];
+  const orders = (customerEdge.node.orders.edges || []).map(e => e.node);
+  const returns = [];
+  for (const o of orders) {
+    const edges = o?.returns?.edges || [];
+    for (const r of edges) returns.push({ ...r.node, _orderName: o.name, _orderId: o.id });
   }
+  return { email: customerEdge.node.email, orders, returns };
 }
 
 // Helper function to set address as default
@@ -10263,51 +10303,41 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
   }
 });
 
+// GET /returns/history?email=<customerEmail> - Fetch return history using Admin API only
+app.get('/returns/history', async (req, res) => {
+  try {
+    const email = (req.query.email || '').toString().trim().toLowerCase();
+    if (!email) return res.status(400).json({ ok: false, error: 'Missing email query parameter' });
+    const result = await fetchCustomerReturnsByEmail(email);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('❌ /returns/history failed:', err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Unknown error' });
+  }
+});
+
 // 🔥 UPDATED: Get return history from both Customer Account API and Admin API
 app.get('/returns', authenticateAppToken, async (req, res) => {
   try {
-    const customerToken = req.headers.authorization?.substring(7);
     const customerEmail = req.session.email;
     
-    if (!customerToken) {
+    if (!customerEmail) {
       return res.status(401).json({ 
         success: false, 
-        error: 'No authentication token' 
+        error: 'No customer email in session' 
       });
     }
 
     console.log('📋 Fetching return history for:', customerEmail);
     
-    // Try Customer Account API first
-    let shopifyReturns = [];
-    try {
-      shopifyReturns = await getShopifyCustomerReturns(customerToken);
-      console.log(`✅ Customer Account API returned ${shopifyReturns.length} returns`);
-    } catch (error) {
-      console.log('⚠️ Customer Account API failed, trying Admin API fallback:', error.message);
-    }
-
-    // If we have few or no returns from Customer Account API, also try Admin API
-    // This helps with returns created via Admin API that might not show up immediately
-    if (shopifyReturns.length === 0) {
-      try {
-        console.log('🔄 Fetching returns from Admin API as fallback...');
-        const adminReturns = await getAdminApiReturns(customerEmail);
-        console.log(`✅ Admin API returned ${adminReturns.length} returns`);
-        
-        // Merge results (Admin API format should match our expected format)
-        shopifyReturns = [...shopifyReturns, ...adminReturns];
-      } catch (adminError) {
-        console.log('⚠️ Admin API fallback also failed:', adminError.message);
-      }
-    }
+    // Use the new Admin API function to get all returns
+    const result = await fetchCustomerReturnsByEmail(customerEmail);
     
-    // Log final results
-    console.log(`📊 Final return count: ${shopifyReturns.length} returns for ${customerEmail}`);
+    console.log(`📊 Final return count: ${result.returns.length} returns for ${customerEmail}`);
     
     res.json({
       success: true,
-      returns: shopifyReturns
+      returns: result.returns || []
     });
     
   } catch (error) {
@@ -10368,8 +10398,8 @@ app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
     // If none or to supplement, try Admin API
     if (config.adminToken) {
       try {
-        const adminReturns = await getAdminApiReturns(customerEmail);
-        const matchingAdmin = adminReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
+        const result = await fetchCustomerReturnsByEmail(customerEmail);
+        const matchingAdmin = result.returns.filter(r => r._orderId === `gid://shopify/Order/${orderId}` || r._orderName === orderId);
         console.log(`🔎 Found ${matchingAdmin.length} returns for order ${orderId} via Admin API`);
         // Merge unique by id
         const byId = new Map();
