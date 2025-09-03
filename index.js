@@ -3472,6 +3472,7 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
       email: customerEmail,
       purpose: 'store_credit',
       storeCredit: totalStoreCredit,
+      version: 2, // Version 2 to invalidate old cached tokens
       iat: Math.floor(Date.now() / 1000),
       exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
     };
