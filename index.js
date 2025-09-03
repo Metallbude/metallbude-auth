@@ -1308,9 +1308,7 @@ async function createReturnViaAdminAPI(returnData) {
     const variables = {
       input: {
         orderId: returnData.orderId,
-        returnLineItems: returnData.returnLineItems,
-        notifyCustomer: false,
-        note: returnData.additionalNotes || `Return request: ${getReasonDescription(returnData.reason || 'other')}`
+        returnLineItems: returnData.returnLineItems
       }
     };
 
