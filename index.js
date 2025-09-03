@@ -6287,15 +6287,9 @@ app.post('/shopify/create-customer-token', authenticateAppToken, async (req, res
     // 2. Create a discount code in Shopify if needed
     // 3. Return the discount code to be applied
     
-    // For now, we'll return the store credit information
-    // Replace this with your actual store credit logic
-    let storeCreditAmount = 0;
-    
-    // Example: Get store credit from your database
-    // This is where you'd query your customer database for store credit
-    if (customerEmail === 'klause.rudolf@gmail.com') {
-      storeCreditAmount = 20.0; // Example store credit
-    }
+    // Get store credit from local ledger (synced with Shopify)
+    const emailLower = customerEmail.toLowerCase();
+    const storeCreditAmount = getStoreCredit(emailLower);
     
     if (storeCreditAmount <= 0) {
       return res.json({
