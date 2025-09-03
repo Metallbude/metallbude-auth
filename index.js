@@ -9521,7 +9521,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
 
         console.log('✅ Return created via Admin API:', createdReturn.id);
-        return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: createdReturn.status, method: 'admin_api' });
+        return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: 'requested', method: 'admin_api' });
 
       } catch (adminError) {
         console.error('❌ Admin API path failed (will fallback):', adminError?.message || adminError);
@@ -9546,7 +9546,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       shopifyStatus: shopifyResult.status,
       customerEmail: customerEmail,
       requestDate: new Date().toISOString(),
-      status: mapShopifyStatusToInternal(shopifyResult.status),
+      status: 'requested', // Force all returns to start as "requested" status for proper approval workflow
       preferredResolution: returnRequest.preferredResolution || 'refund',
       // Keep requested exchange variants per item for backend tracking
       items: (returnRequest.items || []).map(it => ({
