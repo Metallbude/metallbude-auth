@@ -2068,19 +2068,17 @@ async function getAdminApiReturns(customerEmail) {
                           quantity
                           returnReason
                           returnReasonNote
-                          fulfillmentLineItem {
-                            lineItem {
+                          lineItem {
+                            id
+                            title
+                            variant {
                               id
                               title
-                              variant {
-                                id
-                                title
-                                sku
-                                image {
-                                  url
-                                }
-                                price
+                              sku
+                              image {
+                                url
                               }
+                              price
                             }
                           }
                         }
@@ -2118,11 +2116,10 @@ async function getAdminApiReturns(customerEmail) {
           
           const processedItems = returnLineItems.map((itemEdge, index) => {
             const returnLineItem = itemEdge.node;
-            const fulfillmentLineItem = returnLineItem.fulfillmentLineItem;
-            const lineItem = fulfillmentLineItem?.lineItem;
+            const lineItem = returnLineItem.lineItem;  // Direct access, no fulfillmentLineItem
             const variant = lineItem?.variant;
             
-            // Fallback to order line items if fulfillment data is incomplete
+            // Fallback to order line items if line item data is incomplete
             const orderLineItem = orderLineItems[index]?.node;
             const fallbackVariant = orderLineItem?.variant;
             
