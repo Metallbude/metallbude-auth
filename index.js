@@ -2288,8 +2288,6 @@ async function fetchCustomerReturnsByEmail(email) {
                         id
                         status
                         totalQuantity
-                        createdAt
-                        updatedAt
                         order { id name }
                         returnLineItems(first: 50) {
                           edges {
@@ -2298,14 +2296,17 @@ async function fetchCustomerReturnsByEmail(email) {
                               quantity
                               returnReason
                               returnReasonNote
-                              lineItem {
+                              fulfillmentLineItem {
                                 id
-                                title
-                                variant {
+                                lineItem {
                                   id
                                   title
-                                  image { url }
-                                  price { amount currencyCode }
+                                  variant {
+                                    id
+                                    title
+                                    image { url }
+                                    price { amount currencyCode }
+                                  }
                                 }
                               }
                             }
