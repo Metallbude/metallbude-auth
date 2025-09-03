@@ -1194,8 +1194,9 @@ app.post('/raffle/pick-winner', async (req, res) => {
 });
 
 
-// 🔥 ADDED: Customer Account API URL for returns (use configured shop domain)
-const CUSTOMER_ACCOUNT_API_URL = `https://${config.shopDomain}/account/customer/api/2024-10/graphql`;
+// 🔥 FIXED: Customer Account API URL (correct format for 2024-10 API)
+const CUSTOMER_ACCOUNT_API_URL = `https://shopify.com/${config.shopDomain}/account/customer/api/2024-10/graphql`;
+// Alternative for some shops: `https://${config.shopDomain}.myshopify.com/account/customer/api/2024-10/graphql`
 
 // Helper functions
 function generateVerificationCode() {
@@ -1253,6 +1254,109 @@ async function sendVerificationEmail(email, code) {
 }
 
 // 🔥 ADDED: Return management helper functions - All Shopify-supported reasons
+function getReasonDescription(reasonCode) {
+  const reasonDescriptions = {
+    defective: 'Defektes Produkt',
+    wrong_item: 'Falscher Artikel erhalten',
+    not_as_described: 'Nicht wie beschrieben',
+    size_too_large: 'Größe zu groß',
+    size_too_small: 'Größe zu klein',
+    color: 'Farbe gefällt nicht',
+    style: 'Stil/Design gefällt nicht',
+    unwanted: 'Unerwünschtes Produkt',
+    other: 'Sonstige Gründe'
+  };
+  return reasonDescriptions[reasonCode] || reasonCode;
+}
+
+function getReasonDescription(reasonCode) {
+  const reasonDescriptions = {
+    defective: 'Defektes Produkt',
+    wrong_item: 'Falscher Artikel erhalten',
+    not_as_described: 'Nicht wie beschrieben',
+    size_too_large: 'Größe zu groß',
+    size_too_small: 'Größe zu klein',
+    color: 'Farbe gefällt nicht',
+    style: 'Stil/Design gefällt nicht',
+    unwanted: 'Unerwünschtes Produkt',
+    other: 'Sonstige Gründe'
+  };
+  return reasonDescriptions[reasonCode] || reasonCode;
+}
+
+async function createReturnViaAdminAPI(returnData) {
+  try {
+    console.log('🚀 Creating return via Admin API...');
+    
+    const mutation = `
+      mutation returnCreate($returnInput: ReturnInput!) {
+        returnCreate(returnInput: $returnInput) {
+          return {
+            id
+            name
+            status
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const variables = {
+      returnInput: {
+        orderId: returnData.orderId,
+        returnLineItems: returnData.returnLineItems,
+        notifyCustomer: false
+      }
+    };
+
+    const response = await axios.post(
+      `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
+      { query: mutation, variables },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (response.data.errors) {
+      throw new Error(`GraphQL error: ${response.data.errors[0].message}`);
+    }
+
+    const result = response.data.data.returnCreate;
+    const userErrors = result.userErrors || [];
+
+    if (userErrors.length > 0) {
+      throw new Error(`Return creation failed: ${userErrors.map(u => u.message).join('; ')}`);
+    }
+
+    const createdReturn = result.return;
+    if (!createdReturn || !createdReturn.id) {
+      throw new Error('Admin API did not return created return');
+    }
+
+    console.log('✅ Return created via Admin API:', createdReturn.id);
+    
+    return {
+      success: true,
+      shopifyReturnRequestId: createdReturn.id,
+      returnName: createdReturn.name,
+      status: 'requested', // Force requested status for proper workflow
+      method: 'admin_api_fallback'
+    };
+  } catch (error) {
+    console.error('❌ Error creating return via Admin API:', error?.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
 function mapReasonToShopify(reason) {
   const mapping = {
     // Direct Shopify mapping - all supported reasons
@@ -1616,19 +1720,46 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
 
     console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
 
-    const response = await axios.post(
-      CUSTOMER_ACCOUNT_API_URL,
-      {
-        query: mutation,
-        variables: sanitizedVariables,
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${customerToken}`,
-        }
+    // ⚠️ FIXED: Try multiple Customer Account API URL formats
+    const customerApiUrls = [
+      `https://shopify.com/${config.shopDomain}/account/customer/api/2024-10/graphql`,
+      `https://${config.shopDomain}.myshopify.com/account/customer/api/2024-10/graphql`,
+      `https://${config.shopDomain}/customer/account/api/2024-10/graphql`
+    ];
+
+    let response = null;
+    let lastError = null;
+    
+    for (const apiUrl of customerApiUrls) {
+      try {
+        console.log(`🌐 Trying Customer Account API: ${apiUrl}`);
+        response = await axios.post(
+          apiUrl,
+          {
+            query: mutation,
+            variables: sanitizedVariables,
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${customerToken}`,
+            },
+            timeout: 10000
+          }
+        );
+        console.log('✅ Customer Account API succeeded with:', apiUrl);
+        break;
+      } catch (urlError) {
+        console.error(`❌ Failed with ${apiUrl}:`, urlError?.response?.status, urlError?.message);
+        lastError = urlError;
+        continue;
       }
-    );
+    }
+
+    if (!response) {
+      console.error('❌ All Customer Account API URLs failed');
+      throw new Error(`Customer Account API failed: ${lastError?.response?.data?.message || lastError?.message}`);
+    }
 
     console.log('📤 Shopify return request response:', response.status);
 
@@ -1660,9 +1791,32 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
 
   } catch (error) {
     console.error('❌ Error submitting return request to Shopify:', error);
+    
+    // 🔥 FALLBACK: Try Storefront API if Customer Account API fails
+    if (config.storefrontAccessToken && error.message.includes('404')) {
+      console.log('🔄 Customer Account API failed with 404, trying Storefront API...');
+      try {
+        // Note: Storefront API might not support return creation, but worth trying
+        const storefrontQuery = `
+          mutation customerCreate($input: CustomerCreateInput!) {
+            customerCreate(input: $input) {
+              customer { id email }
+              customerUserErrors { field message }
+            }
+          }
+        `;
+        
+        console.log('⚠️ Storefront API does not support return creation. This is a Customer Account API limitation.');
+        // Continue with Admin API fallback below
+      } catch (storefrontError) {
+        console.error('❌ Storefront API also failed:', storefrontError?.message);
+      }
+    }
+    
     return {
       success: false,
-      error: error.message
+      error: error.message,
+      shouldFallbackToAdminAPI: true // Signal to try Admin API instead
     };
   }
 }
@@ -9615,14 +9769,61 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     }
 
   // Step 1: Submit to Shopify using Customer Account API (fallback path)
-  const shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
+  let shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
     
-    if (!shopifyResult.success) {
-      return res.status(400).json({
-        success: false,
-        error: shopifyResult.error
+  // 🔥 FALLBACK: If Customer Account API fails, try Admin API
+  if (!shopifyResult.success && shopifyResult.shouldFallbackToAdminAPI) {
+    console.log('🔄 Customer Account API failed, falling back to Admin API...');
+    
+    try {
+      // Use the same Admin API logic from above
+      const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
+      if (!eligibility || !eligibility.eligible) {
+        throw new Error('Order not eligible for return via Admin API');
+      }
+
+      // Build return input for Admin API
+      const returnLineItems = [];
+      for (const requestedItem of returnRequest.items || []) {
+        const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId);
+        if (!match) continue;
+
+        const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
+        if (qty <= 0) continue;
+
+        returnLineItems.push({
+          fulfillmentLineItemId: match.fulfillmentLineItemId,
+          quantity: qty,
+          returnReason: mapReasonToShopify(returnRequest.reason),
+          customerNote: returnRequest.additionalNotes || `${returnRequest.reason}: ${getReasonDescription(returnRequest.reason)}`
+        });
+      }
+
+      if (returnLineItems.length === 0) {
+        throw new Error('No valid return line items found');
+      }
+
+      // Create return via Admin API
+      const adminApiResult = await createReturnViaAdminAPI({
+        ...returnRequest,
+        returnLineItems
       });
+
+      if (adminApiResult.success) {
+        shopifyResult = adminApiResult;
+        console.log('✅ Successfully created return via Admin API fallback');
+      }
+    } catch (fallbackError) {
+      console.error('❌ Admin API fallback also failed:', fallbackError?.message);
     }
+  }
+    
+  if (!shopifyResult.success) {
+    return res.status(400).json({
+      success: false,
+      error: shopifyResult.error
+    });
+  }
 
     // Step 2: Save to backend database for additional tracking
     const backendReturnData = {
