@@ -9521,6 +9521,42 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
 
         console.log('✅ Return created via Admin API:', createdReturn.id);
+        
+        // Try to update return status to REQUESTED (for proper approval workflow)
+        try {
+          const statusUpdateMutation = `
+            mutation returnRequest($id: ID!) {
+              returnRequest(id: $id) {
+                return {
+                  id
+                  status
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }`;
+          
+          console.log('🔄 Attempting to set return status to REQUESTED...');
+          const statusResponse = await axios.post(config.adminApiUrl, {
+            query: statusUpdateMutation,
+            variables: { id: createdReturn.id }
+          }, {
+            headers: {
+              'X-Shopify-Access-Token': config.adminToken,
+              'Content-Type': 'application/json'
+            }
+          });
+          
+          if (!statusResponse.data.errors && !statusResponse.data.data?.returnRequest?.userErrors?.length) {
+            console.log('✅ Return status updated to REQUESTED');
+            return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: 'requested', method: 'admin_api' });
+          }
+        } catch (statusError) {
+          console.log('⚠️ Could not update return status, but return was created:', statusError.message);
+        }
+        
         return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: 'requested', method: 'admin_api' });
 
       } catch (adminError) {
