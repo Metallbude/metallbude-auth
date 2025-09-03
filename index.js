@@ -2068,19 +2068,6 @@ async function getAdminApiReturns(customerEmail) {
                           quantity
                           returnReason
                           returnReasonNote
-                          lineItem {
-                            id
-                            title
-                            variant {
-                              id
-                              title
-                              sku
-                              image {
-                                url
-                              }
-                              price
-                            }
-                          }
                         }
                       }
                     }
@@ -2116,12 +2103,11 @@ async function getAdminApiReturns(customerEmail) {
           
           const processedItems = returnLineItems.map((itemEdge, index) => {
             const returnLineItem = itemEdge.node;
-            const lineItem = returnLineItem.lineItem;  // Direct access, no fulfillmentLineItem
-            const variant = lineItem?.variant;
             
-            // Fallback to order line items if line item data is incomplete
+            // Since ReturnLineItemType doesn't have direct product info,
+            // we'll need to match with original order line items
             const orderLineItem = orderLineItems[index]?.node;
-            const fallbackVariant = orderLineItem?.variant;
+            const variant = orderLineItem?.variant;
             
             // Use discounted price if available
             const discountedPrice = orderLineItem?.discountedUnitPriceSet?.shopMoney?.amount;
@@ -2130,13 +2116,13 @@ async function getAdminApiReturns(customerEmail) {
             
             return {
               lineItemId: returnLineItem.id,
-              productId: lineItem?.id || orderLineItem?.id || 'unknown',
-              title: lineItem?.title || orderLineItem?.title || `Return Item (${returnData.name})`,
-              imageUrl: variant?.image?.url || fallbackVariant?.image?.url || null,
+              productId: orderLineItem?.id || 'unknown',
+              title: orderLineItem?.title || `Return Item (${returnData.name})`,
+              imageUrl: variant?.image?.url || null,
               quantity: returnLineItem.quantity || 1,
               price: parseFloat(actualPrice),
-              sku: variant?.sku || fallbackVariant?.sku || returnLineItem.id,
-              variantTitle: variant?.title || fallbackVariant?.title || 'Returned Item',
+              sku: variant?.sku || returnLineItem.id,
+              variantTitle: variant?.title || 'Returned Item',
               returnReason: returnLineItem.returnReason || 'OTHER',
               customerNote: returnLineItem.returnReasonNote || ''
             };
