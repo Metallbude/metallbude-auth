@@ -1288,11 +1288,11 @@ async function createReturnViaAdminAPI(returnData) {
   try {
     console.log('🚀 Creating return via Admin API...');
     
-    // 🔥 FIXED: Use returnRequestCreate to get REQUESTED status (Rückgabe angefragt)
+    // 🔥 FIXED: Use returnRequest to get REQUESTED status ("Rückgabe angefragt")
     const mutation = `
-      mutation returnRequestCreate($returnRequest: ReturnRequestInput!) {
-        returnRequestCreate(returnRequest: $returnRequest) {
-          returnRequest {
+      mutation returnRequest($input: ReturnRequestInput!) {
+        returnRequest(input: $input) {
+          return {
             id
             name
             status
@@ -1306,10 +1306,10 @@ async function createReturnViaAdminAPI(returnData) {
     `;
 
     const variables = {
-      returnRequest: {
+      input: {
         orderId: returnData.orderId,
         returnLineItems: returnData.returnLineItems,
-        reason: mapReasonToShopify(returnData.reason || 'other'),
+        notifyCustomer: false,
         note: returnData.additionalNotes || `Return request: ${getReasonDescription(returnData.reason || 'other')}`
       }
     };
@@ -1329,27 +1329,27 @@ async function createReturnViaAdminAPI(returnData) {
       throw new Error(`GraphQL error: ${response.data.errors[0].message}`);
     }
 
-    const result = response.data.data.returnRequestCreate;
+    const result = response.data.data.returnRequest;
     const userErrors = result.userErrors || [];
 
     if (userErrors.length > 0) {
-      throw new Error(`Return request creation failed: ${userErrors.map(u => u.message).join('; ')}`);
+      throw new Error(`Return creation failed: ${userErrors.map(u => u.message).join('; ')}`);
     }
 
-    const createdReturnRequest = result.returnRequest;
-    if (!createdReturnRequest || !createdReturnRequest.id) {
-      throw new Error('Admin API did not return created return request');
+    const createdReturn = result.return;
+    if (!createdReturn || !createdReturn.id) {
+      throw new Error('Admin API did not return created return');
     }
 
-    console.log('✅ Return REQUEST created via Admin API:', createdReturnRequest.id);
-    console.log('🔍 Return request status:', createdReturnRequest.status);
+    console.log('✅ Return created via Admin API:', createdReturn.id);
+    console.log('🔍 Return status:', createdReturn.status);
     
     return {
       success: true,
-      shopifyReturnRequestId: createdReturnRequest.id,
-      returnName: createdReturnRequest.name,
-      status: 'requested', // returnRequestCreate should create REQUESTED status
-      method: 'admin_api_returnRequestCreate'
+      shopifyReturnRequestId: createdReturn.id,
+      returnName: createdReturn.name,
+      status: createdReturn.status.toLowerCase(), // Use actual status from Shopify
+      method: 'admin_api_returnRequest'
     };
   } catch (error) {
     console.error('❌ Error creating return via Admin API:', error?.message);
@@ -9587,7 +9587,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       // 🔥 APPROACH 2: Try creating as DRAFT first, then convert to REQUEST
       console.log('🚀 Trying Admin API with draft-to-request conversion...');
       try {
-        // Step 1: Create return as draft
+        // Step 1: Create return with request flag to get REQUESTED status
         const draftMutation = `
           mutation returnCreate($returnInput: ReturnInput!) {
             returnCreate(returnInput: $returnInput) {
@@ -9608,12 +9608,13 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           returnInput: {
             orderId: returnRequest.orderId,
             returnLineItems: returnLineItems,
+            requestReturn: true, // Request flag to create as request, not auto-approved
             notifyCustomer: false,
-            note: "Customer-initiated return request"
+            note: returnRequest.additionalNotes || "Customer-initiated return request"
           }
         };
 
-        console.log('📤 Creating return as draft...');
+        console.log('📤 Creating return with request flag...');
         const draftResponse = await axios.post(
           `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
           { query: draftMutation, variables: draftVariables },
@@ -9626,7 +9627,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         );
 
         if (draftResponse.data.errors) {
-          throw new Error(`Draft creation failed: ${draftResponse.data.errors[0].message}`);
+          throw new Error(`Return creation failed: ${draftResponse.data.errors[0].message}`);
         }
 
         const draftResult = draftResponse.data.data.returnCreate;
@@ -9641,10 +9642,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           throw new Error('Draft return creation failed');
         }
 
-        console.log('✅ Draft return created:', createdReturn.id);
+        console.log('✅ Return created:', createdReturn.id);
+        console.log('🔍 Return status from Shopify:', createdReturn.status);
         
-        // Step 2: Try to convert draft to requested status using returnRequest mutation
-        console.log('🔄 Converting draft to requested status...');
+        // The requestReturn flag should create it in REQUESTED status
+        console.log('✅ Return created via Admin API with request flag');
         try {
           const requestMutation = `
             mutation returnRequest($id: ID!, $requestedAt: DateTime!) {
@@ -9698,13 +9700,13 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       }
     }
 
-    // 🔥 APPROACH 3: Try returnRequestCreate mutation (if it exists)
-    console.log('🚀 Trying returnRequestCreate mutation...');
+    // 🔥 APPROACH 3: Try returnCreate mutation with request flag (alternative approach)
+    console.log('🚀 Trying returnCreate with alternate structure...');
     try {
-      const requestCreateMutation = `
-        mutation returnRequestCreate($returnInput: ReturnRequestInput!) {
-          returnRequestCreate(returnInput: $returnInput) {
-            returnRequest {
+      const alternateMutation = `
+        mutation returnCreate($returnInput: ReturnInput!) {
+          returnCreate(returnInput: $returnInput) {
+            return {
               id
               name
               status
@@ -9717,25 +9719,19 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
       `;
 
-      // Convert line items format for returnRequestCreate
-      const requestLineItems = returnLineItems.map(item => ({
-        fulfillmentLineItemId: item.fulfillmentLineItemId,
-        quantity: item.quantity,
-        returnReason: item.returnReason,
-        customerNote: item.customerNote
-      }));
-
-      const requestVariables = {
+      // Use standard ReturnInput format
+      const alternateVariables = {
         returnInput: {
           orderId: returnRequest.orderId,
-          returnLineItems: requestLineItems
+          returnLineItems: returnLineItems,
+          requestReturn: true // This should put it in REQUESTED status
         }
       };
 
-      console.log('📤 Creating return request directly...');
-      const requestResponse = await axios.post(
+      console.log('📤 Creating return with alternate approach...');
+      const alternateResponse = await axios.post(
         `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
-        { query: requestCreateMutation, variables: requestVariables },
+        { query: alternateMutation, variables: alternateVariables },
         {
           headers: {
             'X-Shopify-Access-Token': config.adminToken,
@@ -9744,43 +9740,42 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
       );
 
-      if (requestResponse.data.errors) {
-        // If returnRequestCreate doesn't exist, GraphQL will return an error
-        console.log('⚠️ returnRequestCreate mutation not available:', requestResponse.data.errors[0].message);
-        throw new Error('returnRequestCreate not supported');
+      if (alternateResponse.data.errors) {
+        console.log('⚠️ Alternate returnCreate failed:', alternateResponse.data.errors[0].message);
+        throw new Error('Alternate returnCreate failed');
       }
 
-      const requestResult = requestResponse.data.data?.returnRequestCreate;
-      if (!requestResult) {
-        throw new Error('returnRequestCreate mutation failed');
+      const alternateResult = alternateResponse.data.data?.returnCreate;
+      if (!alternateResult) {
+        throw new Error('Alternate returnCreate mutation failed');
       }
 
-      const requestUserErrors = requestResult.userErrors || [];
-      if (requestUserErrors.length > 0) {
-        throw new Error(`Return request failed: ${requestUserErrors.map(u => u.message).join('; ')}`);
+      const alternateUserErrors = alternateResult.userErrors || [];
+      if (alternateUserErrors.length > 0) {
+        throw new Error(`Alternate return failed: ${alternateUserErrors.map(u => u.message).join('; ')}`);
       }
 
-      const createdRequestReturn = requestResult.returnRequest;
-      if (createdRequestReturn && createdRequestReturn.id) {
-        console.log('✅ Return request created via returnRequestCreate:', createdRequestReturn.id);
-        console.log('🔍 Return request status:', createdRequestReturn.status);
+      const createdAlternateReturn = alternateResult.return;
+      if (createdAlternateReturn && createdAlternateReturn.id) {
+        console.log('✅ Return created via alternate returnCreate:', createdAlternateReturn.id);
+        console.log('🔍 Alternate return status:', createdAlternateReturn.status);
         
         return res.json({
           success: true,
-          returnId: createdRequestReturn.id,
-          returnName: createdRequestReturn.name,
+          returnId: createdAlternateReturn.id,
+          returnName: createdAlternateReturn.name,
           status: 'requested',
-          method: 'return_request_create',
-          shopifyStatus: createdRequestReturn.status
+          method: 'alternate_return_create',
+          shopifyStatus: createdAlternateReturn.status
         });
       }
       
-    } catch (requestCreateError) {
-      console.error('❌ returnRequestCreate failed:', requestCreateError?.message);
+    } catch (alternateCreateError) {
+      console.error('❌ Alternate returnCreate failed:', alternateCreateError?.message);
     }
 
     // 🔥 FALLBACK: Standard GraphQL Admin API (creates OPEN status)
-    console.log('🔄 Falling back to standard returnCreate (will be OPEN status)...');
+    console.log('🔄 Falling back to standard returnCreate (will be OPEN status, then request)...');
     if (config.adminToken) {
       console.log('🚀 Trying REST Admin API for return request creation...');
       try {
