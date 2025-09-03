@@ -1843,9 +1843,13 @@ async function getShopifyCustomerReturns(customerToken) {
                       id
                       status
                       totalQuantity
+                      createdAt
+                      updatedAt
                       order {
                         id
                         name
+                        createdAt
+                        processedAt
                       }
                       returnLineItems(first: 50) {
                         edges {
@@ -1940,7 +1944,7 @@ async function getShopifyCustomerReturns(customerToken) {
               : '',
           preferredResolution: 'refund',
           customerEmail: '',
-          requestDate: new Date().toISOString(), // Remove createdAt which doesn't exist
+          requestDate: returnData.createdAt || order.processedAt || order.createdAt || new Date().toISOString(), // 🔥 FIX: Use return creation date, fallback to order dates
           status: mapShopifyStatusToInternal(returnData.status),
           shopifyReturnRequestId: returnData.id,
         });
@@ -2061,6 +2065,8 @@ async function getAdminApiReturns(customerEmail) {
                     id
                     name
                     status
+                    createdAt
+                    updatedAt
                     returnLineItems(first: 20) {
                       edges {
                         node {
@@ -2137,7 +2143,7 @@ async function getAdminApiReturns(customerEmail) {
             additionalNotes: processedItems[0]?.customerNote || '',
             preferredResolution: 'refund',
             customerEmail: customerEmail,
-            requestDate: new Date().toISOString(),
+            requestDate: returnData.createdAt || order.processedAt || new Date().toISOString(), // 🔥 FIX: Use return creation date, fallback to order date
             status: returnData.status?.toLowerCase() || 'open',
             shopifyReturnRequestId: returnData.id,
           };
