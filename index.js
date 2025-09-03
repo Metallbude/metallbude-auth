@@ -1966,59 +1966,50 @@ async function getAdminApiReturns(customerEmail) {
       return [];
     }
 
-    // First, let's query for all recent returns (last 50) and filter by customer email
-    const allReturnsQuery = `
-      query getAllReturns {
-        returns(first: 50, sortKey: CREATED_AT, reverse: true) {
+    // Step 1: Find the customer first
+    const customerQuery = `
+      query findCustomer($query: String!) {
+        customers(first: 1, query: $query) {
           edges {
             node {
               id
-              name
-              status
-              order {
-                id
-                name
-                customer {
-                  email
-                }
-                lineItems(first: 50) {
-                  edges {
-                    node {
-                      id
-                      title
-                      quantity
-                      variant {
-                        id
-                        title
-                        price
-                        sku
-                        image {
-                          url
-                        }
-                      }
-                      originalUnitPriceSet {
-                        shopMoney {
-                          amount
-                          currencyCode
-                        }
-                      }
-                      discountedUnitPriceSet {
-                        shopMoney {
-                          amount
-                          currencyCode
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-              returnLineItems(first: 50) {
+              email
+              orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
                 edges {
                   node {
                     id
-                    quantity
-                    returnReason
-                    returnReasonNote
+                    name
+                    processedAt
+                    lineItems(first: 50) {
+                      edges {
+                        node {
+                          id
+                          title
+                          quantity
+                          variant {
+                            id
+                            title
+                            price
+                            sku
+                            image {
+                              url
+                            }
+                          }
+                          originalUnitPriceSet {
+                            shopMoney {
+                              amount
+                              currencyCode
+                            }
+                          }
+                          discountedUnitPriceSet {
+                            shopMoney {
+                              amount
+                              currencyCode
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -2027,9 +2018,11 @@ async function getAdminApiReturns(customerEmail) {
         }
       }`;
 
-    // Query all returns from Shopify
-    const response = await axios.post(config.adminApiUrl, {
-      query: allReturnsQuery
+    console.log('🔍 Querying customer and orders...');
+    
+    const customerResponse = await axios.post(config.adminApiUrl, {
+      query: customerQuery,
+      variables: { query: `email:${customerEmail}` }
     }, {
       headers: {
         'X-Shopify-Access-Token': config.adminToken,
@@ -2037,75 +2030,145 @@ async function getAdminApiReturns(customerEmail) {
       }
     });
 
-    if (response.data.errors) {
-      console.error('❌ GraphQL errors:', response.data.errors);
+    if (customerResponse.data.errors) {
+      console.error('❌ Customer query GraphQL errors:', customerResponse.data.errors);
       return [];
     }
 
-    const allReturns = response.data.data?.returns?.edges || [];
-    console.log(`📦 Found ${allReturns.length} total returns in Shopify`);
-
-    // Filter returns by customer email
-    const customerReturns = [];
-    
-    for (const returnEdge of allReturns) {
-      const returnData = returnEdge.node;
-      const orderCustomerEmail = returnData.order?.customer?.email;
-      
-      if (orderCustomerEmail !== customerEmail) {
-        continue; // Skip returns not belonging to this customer
-      }
-
-      // Process return line items with product data from order
-      const returnLineItems = returnData.returnLineItems?.edges || [];
-      const orderLineItems = returnData.order?.lineItems?.edges || [];
-      
-      const processedItems = returnLineItems.map(itemEdge => {
-        const returnLineItem = itemEdge.node;
-        
-        // Find the corresponding order line item (simplified matching by first available)
-        const orderLineItem = orderLineItems[0]?.node; // For now, match to first item
-        const variant = orderLineItem?.variant;
-        
-        // Use discounted price if available (sale price), otherwise original price
-        const discountedPrice = orderLineItem?.discountedUnitPriceSet?.shopMoney?.amount;
-        const originalPrice = orderLineItem?.originalUnitPriceSet?.shopMoney?.amount;
-        const actualPrice = discountedPrice || originalPrice || '0';
-        
-        return {
-          lineItemId: returnLineItem.id,
-          productId: orderLineItem?.id || 'unknown',
-          title: orderLineItem?.title || `Return Item (${returnData.name})`,
-          imageUrl: variant?.image?.url || null,
-          quantity: returnLineItem.quantity || 1,
-          price: parseFloat(actualPrice),
-          sku: variant?.sku || returnLineItem.id,
-          variantTitle: variant?.title || 'Returned Item',
-          returnReason: returnLineItem.returnReason || 'OTHER',
-          customerNote: returnLineItem.returnReasonNote || ''
-        };
-      });
-
-      const customerReturn = {
-        id: returnData.id,
-        orderId: returnData.order?.id || '',
-        orderNumber: (returnData.order?.name || '').replace('#', ''), // Remove # from order name
-        items: processedItems,
-        reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
-        additionalNotes: processedItems[0]?.customerNote || '',
-        preferredResolution: 'refund',
-        customerEmail: customerEmail,
-        requestDate: new Date().toISOString(),
-        status: returnData.status?.toLowerCase() || 'open',
-        shopifyReturnRequestId: returnData.id,
-      };
-
-      customerReturns.push(customerReturn);
+    const customer = customerResponse.data.data?.customers?.edges?.[0]?.node;
+    if (!customer) {
+      console.log('❌ Customer not found');
+      return [];
     }
 
-    console.log(`✅ Found ${customerReturns.length} returns for customer: ${customerEmail}`);
-    if (customerReturns.length > 0) {
-      console.log('📦 Return details:', customerReturns.map(r => ({
+    const orders = customer.orders.edges.map(edge => edge.node);
+    console.log(`📦 Found ${orders.length} orders for customer`);
+
+    // Step 2: For each order, check if there are any returns using a separate query
+    const allReturns = [];
+    
+    for (const order of orders) {
+      try {
+        // Query returns for this specific order using the order's returns connection
+        const orderReturnsQuery = `
+          query getOrderReturns($orderId: ID!) {
+            order(id: $orderId) {
+              id
+              name
+              returns(first: 10) {
+                edges {
+                  node {
+                    id
+                    name
+                    status
+                    returnLineItems(first: 20) {
+                      edges {
+                        node {
+                          id
+                          quantity
+                          returnReason
+                          returnReasonNote
+                          fulfillmentLineItem {
+                            lineItem {
+                              id
+                              title
+                              variant {
+                                id
+                                title
+                                sku
+                                image {
+                                  url
+                                }
+                                price
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }`;
+
+        const orderReturnsResponse = await axios.post(config.adminApiUrl, {
+          query: orderReturnsQuery,
+          variables: { orderId: order.id }
+        }, {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (orderReturnsResponse.data.errors) {
+          console.log(`⚠️ Order returns query failed for ${order.name}:`, orderReturnsResponse.data.errors);
+          continue;
+        }
+
+        const orderReturns = orderReturnsResponse.data.data?.order?.returns?.edges || [];
+        
+        for (const returnEdge of orderReturns) {
+          const returnData = returnEdge.node;
+          
+          // Process return line items
+          const returnLineItems = returnData.returnLineItems?.edges || [];
+          const orderLineItems = order.lineItems?.edges || [];
+          
+          const processedItems = returnLineItems.map((itemEdge, index) => {
+            const returnLineItem = itemEdge.node;
+            const fulfillmentLineItem = returnLineItem.fulfillmentLineItem;
+            const lineItem = fulfillmentLineItem?.lineItem;
+            const variant = lineItem?.variant;
+            
+            // Fallback to order line items if fulfillment data is incomplete
+            const orderLineItem = orderLineItems[index]?.node;
+            const fallbackVariant = orderLineItem?.variant;
+            
+            // Use discounted price if available
+            const discountedPrice = orderLineItem?.discountedUnitPriceSet?.shopMoney?.amount;
+            const originalPrice = orderLineItem?.originalUnitPriceSet?.shopMoney?.amount;
+            const actualPrice = discountedPrice || originalPrice || variant?.price || '0';
+            
+            return {
+              lineItemId: returnLineItem.id,
+              productId: lineItem?.id || orderLineItem?.id || 'unknown',
+              title: lineItem?.title || orderLineItem?.title || `Return Item (${returnData.name})`,
+              imageUrl: variant?.image?.url || fallbackVariant?.image?.url || null,
+              quantity: returnLineItem.quantity || 1,
+              price: parseFloat(actualPrice),
+              sku: variant?.sku || fallbackVariant?.sku || returnLineItem.id,
+              variantTitle: variant?.title || fallbackVariant?.title || 'Returned Item',
+              returnReason: returnLineItem.returnReason || 'OTHER',
+              customerNote: returnLineItem.returnReasonNote || ''
+            };
+          });
+
+          const customerReturn = {
+            id: returnData.id,
+            orderId: order.id,
+            orderNumber: order.name.replace('#', ''),
+            items: processedItems,
+            reason: processedItems[0]?.returnReason?.toLowerCase() || 'other',
+            additionalNotes: processedItems[0]?.customerNote || '',
+            preferredResolution: 'refund',
+            customerEmail: customerEmail,
+            requestDate: new Date().toISOString(),
+            status: returnData.status?.toLowerCase() || 'open',
+            shopifyReturnRequestId: returnData.id,
+          };
+
+          allReturns.push(customerReturn);
+        }
+      } catch (orderError) {
+        console.log(`⚠️ Error querying returns for order ${order.name}:`, orderError.message);
+      }
+    }
+
+    console.log(`✅ Found ${allReturns.length} total returns for customer: ${customerEmail}`);
+    if (allReturns.length > 0) {
+      console.log('📦 Return details:', allReturns.map(r => ({
         id: r.id,
         orderNumber: r.orderNumber,
         itemCount: r.items.length,
@@ -2113,10 +2176,11 @@ async function getAdminApiReturns(customerEmail) {
       })));
     }
 
-    return customerReturns;
+    return allReturns;
 
   } catch (error) {
     console.error('❌ Error fetching Admin API returns:', error.message);
+    console.error('❌ Full error:', error.response?.data || error);
     return [];
   }
 }
