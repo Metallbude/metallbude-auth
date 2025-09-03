@@ -9404,7 +9404,80 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       customer: customerEmail
     });
 
-    // 🔥 NEW: Try Admin API first if available, fall back to Customer Account API
+    // 🔥 NEW: Try REST Admin API first for return requests (creates REQUESTED status)
+    if (config.adminToken) {
+      console.log('🚀 Trying REST Admin API for return request creation...');
+      try {
+        // Extract order ID from GID
+        const numericOrderId = returnRequest.orderId.replace('gid://shopify/Order/', '');
+        
+        // Build return request payload for REST API
+        const returnRequestPayload = {
+          return_request: {
+            order_id: numericOrderId,
+            return_line_items: []
+          }
+        };
+
+        // Get eligibility to map line items to fulfillment line items
+        const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
+        if (!eligibility || !eligibility.eligible) {
+          throw new Error('Order not eligible for return via REST API');
+        }
+
+        // Map return items to REST API format
+        for (const requestedItem of returnRequest.items || []) {
+          const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId);
+          if (!match) continue;
+
+          const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
+          if (qty <= 0) continue;
+
+          returnRequestPayload.return_request.return_line_items.push({
+            fulfillment_line_item_id: match.fulfillmentLineItemId.replace('gid://shopify/FulfillmentLineItem/', ''),
+            quantity: qty,
+            return_reason: mapReasonToShopify(returnRequest.reason),
+            customer_note: returnRequest.additionalNotes || `${returnRequest.reason}: ${getReasonDescription(returnRequest.reason)}`
+          });
+        }
+
+        if (returnRequestPayload.return_request.return_line_items.length === 0) {
+          throw new Error('No valid return line items for REST API');
+        }
+
+        console.log('📤 Creating return request via REST Admin API...');
+        const restResponse = await axios.post(
+          `https://${config.shopDomain}/admin/api/2024-10/orders/${numericOrderId}/return_requests.json`,
+          returnRequestPayload,
+          {
+            headers: {
+              'X-Shopify-Access-Token': config.adminToken,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        const createdReturnRequest = restResponse.data?.return_request;
+        if (createdReturnRequest && createdReturnRequest.id) {
+          console.log('✅ Return request created via REST Admin API:', createdReturnRequest.id);
+          console.log('🔍 Return request status:', createdReturnRequest.status);
+          
+          return res.json({
+            success: true,
+            returnId: `gid://shopify/ReturnRequest/${createdReturnRequest.id}`,
+            returnName: `#${createdReturnRequest.name || createdReturnRequest.id}`,
+            status: 'requested', // REST API should create in requested status
+            method: 'rest_admin_api',
+            shopifyStatus: createdReturnRequest.status
+          });
+        }
+      } catch (restError) {
+        console.error('❌ REST Admin API failed:', restError?.response?.data || restError?.message);
+        console.log('⚠️ Falling back to GraphQL Admin API...');
+      }
+    }
+
+    // 🔥 FALLBACK: GraphQL Admin API (creates returns in OPEN status)
     if (config.adminToken) {
       console.log('🚀 Using Admin API for return creation (safer path)...');
       try {
@@ -9480,7 +9553,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         const returnInput = {
           orderId: returnRequest.orderId,
           returnLineItems: returnLineItems,
-          notifyCustomer: true
+          // Don't notify customer initially - this might keep it in REQUESTED status
+          notifyCustomer: false
         };
 
         // Attach exchangeLineItems when present (Admin API supports ExchangeLineItemInput)
@@ -9521,43 +9595,18 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
 
         console.log('✅ Return created via Admin API:', createdReturn.id);
+        console.log('🔍 Return status from Shopify:', createdReturn.status);
         
-        // Try to update return status to REQUESTED (for proper approval workflow)
-        try {
-          const statusUpdateMutation = `
-            mutation returnRequest($id: ID!) {
-              returnRequest(id: $id) {
-                return {
-                  id
-                  status
-                }
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }`;
-          
-          console.log('🔄 Attempting to set return status to REQUESTED...');
-          const statusResponse = await axios.post(config.adminApiUrl, {
-            query: statusUpdateMutation,
-            variables: { id: createdReturn.id }
-          }, {
-            headers: {
-              'X-Shopify-Access-Token': config.adminToken,
-              'Content-Type': 'application/json'
-            }
-          });
-          
-          if (!statusResponse.data.errors && !statusResponse.data.data?.returnRequest?.userErrors?.length) {
-            console.log('✅ Return status updated to REQUESTED');
-            return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: 'requested', method: 'admin_api' });
-          }
-        } catch (statusError) {
-          console.log('⚠️ Could not update return status, but return was created:', statusError.message);
-        }
-        
-        return res.json({ success: true, returnId: createdReturn.id, returnName: createdReturn.name, status: 'requested', method: 'admin_api' });
+        // Always return 'requested' status to ensure proper workflow
+        // Admin API creates returns as OPEN, but we want them to be treated as requests
+        return res.json({ 
+          success: true, 
+          returnId: createdReturn.id, 
+          returnName: createdReturn.name, 
+          status: 'requested', // Force requested status for approval workflow
+          method: 'admin_api',
+          shopifyStatus: createdReturn.status // Keep original status for reference
+        });
 
       } catch (adminError) {
         console.error('❌ Admin API path failed (will fallback):', adminError?.message || adminError);
