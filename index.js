@@ -2296,17 +2296,14 @@ async function fetchCustomerReturnsByEmail(email) {
                               quantity
                               returnReason
                               returnReasonNote
-                              fulfillmentLineItem {
+                              lineItem {
                                 id
-                                lineItem {
+                                title
+                                variant {
                                   id
                                   title
-                                  variant {
-                                    id
-                                    title
-                                    image { url }
-                                    price { amount currencyCode }
-                                  }
+                                  image { url }
+                                  price { amount currencyCode }
                                 }
                               }
                             }
