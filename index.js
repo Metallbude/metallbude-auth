@@ -9848,6 +9848,19 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
     
     console.log('Total store credit:', totalCredit);
 
+    // Sync the authoritative balance to local ledger for consistency
+    try {
+      const customerEmail = response.data?.data?.customer?.email;
+      if (customerEmail) {
+        const emailLower = customerEmail.toLowerCase();
+        setStoreCredit(emailLower, totalCredit);
+        await persistStoreCreditLedger();
+        console.log(`💾 Synced authoritative balance ${totalCredit} for ${emailLower} to local ledger`);
+      }
+    } catch (syncErr) {
+      console.error('⚠️ Failed to sync store credit to local ledger:', syncErr.message);
+    }
+
     res.json({
       amount: totalCredit,
       currency: 'EUR'
