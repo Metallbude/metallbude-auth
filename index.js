@@ -2288,6 +2288,8 @@ async function fetchCustomerReturnsByEmail(email) {
                         id
                         status
                         totalQuantity
+                        createdAt
+                        updatedAt
                         order { id name }
                         returnLineItems(first: 50) {
                           edges {
@@ -2296,16 +2298,6 @@ async function fetchCustomerReturnsByEmail(email) {
                               quantity
                               returnReason
                               returnReasonNote
-                              lineItem {
-                                id
-                                title
-                                variant {
-                                  id
-                                  title
-                                  image { url }
-                                  price { amount currencyCode }
-                                }
-                              }
                             }
                           }
                         }
@@ -2320,16 +2312,32 @@ async function fetchCustomerReturnsByEmail(email) {
       }
     }`;
   const variables = { query: `email:${email}` };
+  console.log(`🔍 Searching for customer with email: ${email}`);
   const data = await adminGraphQL(q, variables);
+  console.log(`📊 GraphQL response:`, JSON.stringify(data, null, 2));
+  
   const customerEdge = data?.data?.customers?.edges?.[0];
-  if (!customerEdge) return { email, returns: [], orders: [] };
+  if (!customerEdge) {
+    console.log(`❌ No customer found for email: ${email}`);
+    return { email, returns: [], orders: [] };
+  }
 
+  console.log(`✅ Found customer: ${customerEdge.node.email}`);
   const orders = (customerEdge.node.orders.edges || []).map(e => e.node);
+  console.log(`📦 Found ${orders.length} orders for customer`);
+  
   const returns = [];
   for (const o of orders) {
     const edges = o?.returns?.edges || [];
-    for (const r of edges) returns.push({ ...r.node, _orderName: o.name, _orderId: o.id });
+    console.log(`📄 Order ${o.name} has ${edges.length} returns`);
+    for (const r of edges) {
+      const returnData = { ...r.node, _orderName: o.name, _orderId: o.id };
+      returns.push(returnData);
+      console.log(`➕ Added return: ${returnData.id} with status ${returnData.status}`);
+    }
   }
+  
+  console.log(`🎯 Total returns found: ${returns.length}`);
   return { email: customerEdge.node.email, orders, returns };
 }
 
