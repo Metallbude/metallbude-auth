@@ -10292,6 +10292,17 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
     }
 
     console.log('📋 Fetching return history for:', customerEmail);
+    console.log('📋 Request parameters:', req.query);
+    
+    // Check what shipping-related parameters were requested
+    const includeShipping = req.query.includeShipping === 'true';
+    const includeShippingLabels = req.query.includeShippingLabels === 'true';
+    const includeTracking = req.query.includeTracking === 'true';
+    
+    console.log('🚚 Shipping parameters requested:');
+    console.log('  - includeShipping:', includeShipping);
+    console.log('  - includeShippingLabels:', includeShippingLabels);
+    console.log('  - includeTracking:', includeTracking);
     
     // Try Customer Account API first
     let shopifyReturns = [];
@@ -10315,6 +10326,50 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
       } catch (adminError) {
         console.log('⚠️ Admin API fallback also failed:', adminError.message);
       }
+    }
+    
+    // 🔥 NEW: Add shipping label data if requested
+    if (includeShipping || includeShippingLabels || includeTracking) {
+      console.log('🚚 Adding shipping label data to returns...');
+      
+      for (let i = 0; i < shopifyReturns.length; i++) {
+        const returnData = shopifyReturns[i];
+        console.log(`🔍 Checking shipping data for return ${returnData.orderNumber}...`);
+        
+        // TODO: Here we would check your shipping label storage system
+        // For now, let's see if there are any files uploaded for this return
+        
+        // Mock shipping data for testing - you'll need to replace this with actual storage lookup
+        const hasShippingLabel = false; // This should check your actual storage
+        const hasTrackingNumber = false; // This should check your actual database
+        
+        console.log(`  - Has shipping label: ${hasShippingLabel}`);
+        console.log(`  - Has tracking number: ${hasTrackingNumber}`);
+        
+        if (hasShippingLabel) {
+          returnData.shippingLabelUrl = `https://your-storage.com/labels/${returnData.id}.pdf`;
+          returnData.shippingLabelMime = 'application/pdf';
+          returnData.shippingLabelName = `return_label_${returnData.orderNumber}.pdf`;
+        } else {
+          returnData.shippingLabelUrl = null;
+          returnData.shippingLabelMime = null;
+          returnData.shippingLabelName = null;
+        }
+        
+        if (hasTrackingNumber) {
+          returnData.trackingNumber = 'DHL123456789DE'; // This should come from your database
+          returnData.carrierName = 'DHL'; // This should come from your database
+        } else {
+          returnData.trackingNumber = null;
+          returnData.carrierName = null;
+        }
+        
+        returnData.noShippingRequired = false; // This should be based on your business logic
+        
+        console.log(`  ✅ Updated return ${returnData.orderNumber} with shipping data`);
+      }
+    } else {
+      console.log('🚚 No shipping data requested - skipping shipping enhancement');
     }
     
     // Log final results
