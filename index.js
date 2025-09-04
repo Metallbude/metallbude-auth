@@ -9971,18 +9971,30 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
         // Build exchangeLineItems when customer requests an exchange
         const exchangeLineItems = [];
-        if ((returnRequest.preferredResolution || '').toLowerCase() === 'exchange') {
+        const hasExchangeResolution = (returnRequest.preferredResolution || '').toLowerCase() === 'exchange' || 
+                                    (returnRequest.preferredResolution || '').toLowerCase() === 'mixed';
+        
+        if (hasExchangeResolution) {
           for (const requestedItem of returnRequest.items || []) {
             const qty = Number(requestedItem.quantity || 1);
             const requestedVariant = requestedItem.requestedExchangeVariantId || requestedItem.exchangeVariantId || null;
-            if (requestedVariant && qty > 0) {
-              exchangeLineItems.push({
-                variantId: requestedVariant,
-                quantity: qty
-              });
+            const itemResolution = requestedItem.itemResolution || '';
+            
+            // Include item if it has exchange variant or is marked as exchange
+            if ((requestedVariant && qty > 0) || itemResolution.toLowerCase() === 'exchange') {
+              const variantId = requestedVariant || requestedItem.variantId;
+              if (variantId) {
+                exchangeLineItems.push({
+                  variantId: variantId,
+                  quantity: qty
+                });
+                console.log(`📦 Added exchange line item: ${variantId} (qty: ${qty})`);
+              }
             }
           }
         }
+        
+        console.log(`🔍 Exchange line items count: ${exchangeLineItems.length}`);
         const returnMutation = `
           mutation returnRequestCreate($returnRequest: ReturnRequestInput!) {
             returnRequestCreate(returnRequest: $returnRequest) {
@@ -10008,6 +10020,9 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         // Attach exchangeLineItems when present (Admin API might support ExchangeLineItemInput)
         if (exchangeLineItems.length > 0) {
           returnRequestInput.exchangeLineItems = exchangeLineItems;
+          console.log(`🔄 Adding ${exchangeLineItems.length} exchange items to Shopify request:`, exchangeLineItems);
+        } else {
+          console.log(`⚠️ No exchange items found - Umtauschartikel will be empty`);
         }
 
         console.log('🔥 Creating return REQUEST with Admin API - payload:', { returnLineItemsCount: returnLineItems.length });
@@ -10133,12 +10148,13 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         requestedExchangeVariantId: it.requestedExchangeVariantId || it.exchangeVariantId || null,
         returnReason: it.returnReason || returnRequest.reason,
         customerNote: it.customerNote || returnRequest.additionalNotes,
-        // 🔥 DETERMINE ITEM RESOLUTION: exchange if has exchange data, otherwise refund
-        itemResolution: (it.requestedExchangeVariantId || (it.selectedOptions && Object.keys(it.selectedOptions).length > 0)) ? 'exchange' : 'refund'
+        // 🔥 FIXED: Only set exchange if item explicitly has exchange variant ID or itemResolution is exchange
+        itemResolution: it.itemResolution || (it.requestedExchangeVariantId ? 'exchange' : 'refund')
       })),
       reason: returnRequest.reason,
       additionalNotes: returnRequest.additionalNotes,
       preferredResolution: returnRequest.preferredResolution || 'refund',
+      preferredRefundMethod: returnRequest.preferredRefundMethod || 'original_payment',
       exchangeProductId: returnRequest.exchangeProductId,
       exchangeOptions: returnRequest.exchangeOptions || {},
       customerEmail: customerEmail,
