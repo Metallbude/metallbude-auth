@@ -42,7 +42,28 @@ try {
   console.log('⚠️ Optional services not available (./services/*), continuing without Firebase/wishlist');
 }
 
-// Initialize Express app
+// Simple in-memory storage for returns (in production, use a proper database)
+const returnStorage = new Map();
+
+async function saveReturnToDatabase(returnData) {
+  console.log('💾 Saving return to storage:', returnData.id);
+  returnStorage.set(returnData.id, returnData);
+  return returnData;
+}
+
+async function getReturnFromDatabase(returnId) {
+  return returnStorage.get(returnId) || null;
+}
+
+async function getAllReturnsForCustomer(customerEmail) {
+  const customerReturns = [];
+  for (const [id, returnData] of returnStorage.entries()) {
+    if (returnData.customerEmail === customerEmail) {
+      customerReturns.push(returnData);
+    }
+  }
+  return customerReturns;
+}
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -10096,24 +10117,39 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
     // Step 2: Save to backend database for additional tracking
     const backendReturnData = {
-      ...returnRequest,
-      shopifyReturnRequestId: shopifyResult.shopifyReturnRequestId,
-      shopifyStatus: shopifyResult.status,
-      customerEmail: customerEmail,
-      requestDate: new Date().toISOString(),
-      status: 'requested', // Force all returns to start as "requested" status for proper approval workflow
-      preferredResolution: returnRequest.preferredResolution || 'refund',
-      // Keep requested exchange variants per item for backend tracking
+      id: shopifyResult.shopifyReturnRequestId,
+      orderId: returnRequest.orderId,
+      orderNumber: returnRequest.orderNumber,
       items: (returnRequest.items || []).map(it => ({
         lineItemId: it.lineItemId,
-        quantity: it.quantity,
+        productId: it.productId,
+        title: it.title,
+        imageUrl: it.imageUrl,
+        quantity: it.quantity || 1,
+        price: it.price || 0,
+        sku: it.sku,
+        variantTitle: it.variantTitle,
+        selectedOptions: it.selectedOptions || {},
         requestedExchangeVariantId: it.requestedExchangeVariantId || it.exchangeVariantId || null,
-        reason: it.reason || returnRequest.reason || 'other'
-      }))
+        returnReason: it.returnReason || returnRequest.reason,
+        customerNote: it.customerNote || returnRequest.additionalNotes,
+        // 🔥 DETERMINE ITEM RESOLUTION: exchange if has exchange data, otherwise refund
+        itemResolution: (it.requestedExchangeVariantId || (it.selectedOptions && Object.keys(it.selectedOptions).length > 0)) ? 'exchange' : 'refund'
+      })),
+      reason: returnRequest.reason,
+      additionalNotes: returnRequest.additionalNotes,
+      preferredResolution: returnRequest.preferredResolution || 'refund',
+      exchangeProductId: returnRequest.exchangeProductId,
+      exchangeOptions: returnRequest.exchangeOptions || {},
+      customerEmail: customerEmail,
+      requestDate: new Date().toISOString(),
+      status: 'requested',
+      shopifyReturnRequestId: shopifyResult.shopifyReturnRequestId,
+      shopifyStatus: shopifyResult.status
     };
 
-    // Here you would save to your database
-    // await saveReturnToDatabase(backendReturnData);
+    // Save to our database
+    await saveReturnToDatabase(backendReturnData);
 
     console.log('✅ Return request submitted successfully:', shopifyResult.shopifyReturnRequestId);
 
@@ -10148,7 +10184,16 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
 
     console.log('📋 Fetching return history for:', customerEmail);
     
-    // Try Customer Account API first
+    // Get returns from our database first (has correct resolution data)
+    let ourReturns = [];
+    try {
+      ourReturns = await getAllReturnsForCustomer(customerEmail);
+      console.log(`💾 Found ${ourReturns.length} returns in our database`);
+    } catch (dbError) {
+      console.log('⚠️ Database query failed:', dbError.message);
+    }
+    
+    // Try Customer Account API for additional returns
     let shopifyReturns = [];
     try {
       shopifyReturns = await getShopifyCustomerReturns(customerToken);
@@ -10158,26 +10203,42 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
     }
 
     // If we have few or no returns from Customer Account API, also try Admin API
-    // This helps with returns created via Admin API that might not show up immediately
     if (shopifyReturns.length === 0) {
       try {
         console.log('🔄 Fetching returns from Admin API as fallback...');
         const adminReturns = await getAdminApiReturns(customerEmail);
         console.log(`✅ Admin API returned ${adminReturns.length} returns`);
         
-        // Merge results (Admin API format should match our expected format)
         shopifyReturns = [...shopifyReturns, ...adminReturns];
       } catch (adminError) {
         console.log('⚠️ Admin API fallback also failed:', adminError.message);
       }
     }
     
-    // Log final results
-    console.log(`📊 Final return count: ${shopifyReturns.length} returns for ${customerEmail}`);
+    // Merge our database data with Shopify data, prioritizing our data
+    const mergedReturns = [];
+    const processedIds = new Set();
+    
+    // First add all returns from our database (these have correct resolution data)
+    for (const ourReturn of ourReturns) {
+      mergedReturns.push(ourReturn);
+      processedIds.add(ourReturn.shopifyReturnRequestId);
+      processedIds.add(ourReturn.id);
+    }
+    
+    // Then add Shopify returns that we don't have in our database
+    for (const shopifyReturn of shopifyReturns) {
+      if (!processedIds.has(shopifyReturn.id) && !processedIds.has(shopifyReturn.shopifyReturnRequestId)) {
+        mergedReturns.push(shopifyReturn);
+      }
+    }
+    
+    console.log(`📊 Final return count: ${mergedReturns.length} returns for ${customerEmail}`);
+    console.log(`📊 Database returns: ${ourReturns.length}, Shopify only: ${mergedReturns.length - ourReturns.length}`);
     
     res.json({
       success: true,
-      returns: shopifyReturns
+      returns: mergedReturns
     });
     
   } catch (error) {
