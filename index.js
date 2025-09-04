@@ -702,61 +702,6 @@ function mapReasonToShopify(reasonId) {
 }
 
 // Build the Admin API ReturnRequestInput
-function buildReturnRequestInputFromApp(appPayload) {
-  const {
-    orderId,
-    items = [], // [{ fulfillmentLineItemId, quantity, reasonId, reasonNote }]
-    exchangeSelections = [], // [{ fulfillmentLineItemId, wantedVariantId, wantedSku?, wantedTitle? }]
-    refundMethods = {}, // { fulfillmentLineItemId: 'wie_bezahlt' | 'guthaben' }
-    resolution, // 'refund' | 'store_credit' | 'exchange' | 'mixed'
-    customerNote,
-  } = appPayload || {};
-
-  // REQUEST can only have returnLineItems; exchange is recorded in note
-  const returnLineItems = items.map(li => ({
-    fulfillmentLineItemId: li.fulfillmentLineItemId,
-    quantity: Number(li.quantity || 1),
-    returnReason: mapReasonToShopify(li.reasonId),
-    returnReasonNote: li.reasonNote || null,
-  }));
-
-  const lines = [];
-  if (customerNote) lines.push(customerNote.trim());
-  if (resolution === 'exchange') lines.push('Kundenwunsch: Umtausch');
-  if (resolution === 'refund') lines.push('Kundenwunsch: Rückerstattung (wie bezahlt)');
-  if (resolution === 'store_credit') lines.push('Kundenwunsch: Guthaben');
-  if (resolution === 'mixed') lines.push('Kundenwunsch: Gemischt');
-
-  // Per-line refund prefs → note only (returnRequest has no refundPreference field)
-  const mapRefund = (v) => {
-    const s = String(v || '').toLowerCase();
-    if (s.includes('wie') || s.includes('bezahlt') || s.includes('original')) return 'Wie bezahlt';
-    if (s.includes('guthaben') || s.includes('credit')) return 'Guthaben';
-    return null;
-  };
-  const refundNotes = Object.entries(refundMethods).map(([fid, pref]) => `• ${fid}: ${mapRefund(pref) || '—'}`);
-  if (refundNotes.length) {
-    lines.push('Erstattungspräferenz pro Position:');
-    lines.push(...refundNotes);
-  }
-
-  // Exchange intent recorded for later approval step
-  const exLines = exchangeSelections
-    .filter(e => e.wantedVariantId)
-    .map(e => `• ${e.fulfillmentLineItemId} ⇒ ${e.wantedVariantId}${e.wantedSku ? ' ('+e.wantedSku+')' : ''}${e.wantedTitle ? ' – '+e.wantedTitle : ''}`);
-  if (exLines.length) {
-    lines.push('Umtausch-Auswahl:');
-    lines.push(...exLines);
-  }
-
-  return {
-    orderId,
-    notifyCustomer: true,
-    note: lines.length ? lines.join(' | ') : null,
-    returnLineItems,
-  };
-}
-
 const MUTATION_DEBIT = `
 mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
   storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
@@ -1398,7 +1343,7 @@ function buildReturnRequestInputFromApp(appPayload) {
     other: 'OTHER',
   };
 
-  // For returnRequest, line items are simpler - no exchange or refund preference fields
+  // For returnRequest, line items are simpler - only basic fields supported
   const returnLineItems = items.map((li) => {
     console.log(`📦 Item ${li.fulfillmentLineItemId} wants exchange to: ${exchangeSelections?.[li.fulfillmentLineItemId]?.wantedVariantId || 'none'}`);
     console.log(`💰 Item ${li.fulfillmentLineItemId} refund method: ${refundMethods?.[li.fulfillmentLineItemId] || 'default'}`);
@@ -1406,36 +1351,19 @@ function buildReturnRequestInputFromApp(appPayload) {
     return {
       fulfillmentLineItemId: li.fulfillmentLineItemId,
       quantity: li.quantity,
-      returnReason: reasonMap[li.reasonId] || 'OTHER',
-      returnReasonNote: li.reasonNote || null,
+      returnReason: reasonMap[li.reasonId] || 'OTHER'
+      // Note: returnReasonNote is not supported by ReturnRequestInput
     };
   });
 
-  // Build note with exchange and refund information
-  const noteLines = [];
-  if (customerNote) noteLines.push(customerNote.trim());
-  
-  // Add exchange information to note
-  if (exchangeSelections) {
-    Object.entries(exchangeSelections).forEach(([fulfillmentLineItemId, selection]) => {
-      if (selection?.wantedVariantId) {
-        noteLines.push(`Umtausch-Artikel: Line ${fulfillmentLineItemId} -> Variant ${selection.wantedVariantId}`);
-      }
-    });
-  }
-  
-  // Add refund method information to note
-  if (refundMethods) {
-    Object.entries(refundMethods).forEach(([fulfillmentLineItemId, method]) => {
-      const methodText = method === 'wie_bezahlt' ? 'Wie bezahlt' : 'Guthaben';
-      noteLines.push(`Erstattungsart Line ${fulfillmentLineItemId}: ${methodText}`);
-    });
-  }
+  // Note: ReturnRequestInput doesn't support note field
+  // Exchange and refund info will be stored separately if needed
+  console.log('📋 Exchange selections and refund methods logged above for reference');
 
   const input = {
     orderId,
-    returnLineItems,
-    ...(noteLines.length ? { note: noteLines.join(' | ') } : {}),
+    returnLineItems
+    // Note: note field is not supported by ReturnRequestInput
   };
 
   return input;
