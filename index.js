@@ -10395,10 +10395,17 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
       
       for (let i = 0; i < shopifyReturns.length; i++) {
         const returnData = shopifyReturns[i];
-        console.log(`🔍 Loading shipping data for return ${returnData.orderNumber}...`);
+        console.log(`🔍 Loading shipping data for return ${returnData.orderNumber} (ID: ${returnData.id})...`);
         
-        // Get real shipping data from storage
+        // Get real shipping data from storage using the full Shopify GID
         const rs = returnShipping.get(returnData.id) || null;
+        
+        // Debug: Log what we're looking for and what we found
+        console.log(`  🔍 Looking for shipping data with key: "${returnData.id}"`);
+        console.log(`  📦 Available shipping keys:`, Array.from(returnShipping.keys()));
+        if (rs) {
+          console.log(`  ✅ Found shipping data:`, rs);
+        }
         
         returnData.shippingLabelUrl = rs?.url || null;
         returnData.shippingLabelMime = rs?.mime || null;
@@ -14227,8 +14234,179 @@ app.post('/apply-store-credit', async (req, res) => {
 // ===== ADMIN SHIPPING UPLOAD INTERFACE =====
 
 // Serve admin shipping upload interface
-app.get('/admin/shipping-upload', (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin_shipping_upload.html'));
+app.get('/admin/shipping', (req, res) => {
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Return Shipping Label Upload</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { background: #4CAF50; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .section { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+        .return-card { border: 1px solid #ccc; padding: 15px; margin: 10px 0; border-radius: 5px; background: #f9f9f9; }
+        .upload-form { background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; margin-top: 10px; }
+        .form-row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
+        .form-row input, .form-row select { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+        .form-row button { background: #4CAF50; color: white; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; }
+        .form-row button:hover { background: #45a049; }
+        .status { padding: 5px 10px; border-radius: 3px; font-size: 12px; }
+        .status.shipped { background: #d4edda; color: #155724; }
+        .status.pending { background: #fff3cd; color: #856404; }
+        .success { color: green; } .error { color: red; }
+        .return-id { font-family: monospace; font-size: 11px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚚 Return Shipping Label Upload</h1>
+        <p>Upload shipping labels for customer returns</p>
+    </div>
+
+    <div class="section">
+        <h3>📧 Load Returns by Customer Email</h3>
+        <div class="form-row">
+            <input type="email" id="customerEmail" placeholder="customer@example.com" style="flex: 1;">
+            <button onclick="loadReturns()">Load Returns</button>
+        </div>
+        <div id="loadStatus"></div>
+    </div>
+
+    <div class="section">
+        <h3>📋 Customer Returns</h3>
+        <div id="returnsList">
+            <p>Enter customer email above to load returns</p>
+        </div>
+    </div>
+
+    <script>
+        async function loadReturns() {
+            const email = document.getElementById('customerEmail').value.trim();
+            if (!email) {
+                alert('Please enter customer email');
+                return;
+            }
+
+            const statusDiv = document.getElementById('loadStatus');
+            statusDiv.innerHTML = '<p>🔄 Loading returns...</p>';
+
+            try {
+                const response = await fetch(\`/admin/returns?customerEmail=\${encodeURIComponent(email)}\`);
+                const data = await response.json();
+
+                if (data.success) {
+                    statusDiv.innerHTML = \`<p class="success">✅ Found \${data.returns.length} returns</p>\`;
+                    displayReturns(data.returns);
+                } else {
+                    statusDiv.innerHTML = \`<p class="error">❌ Error: \${data.error}</p>\`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = \`<p class="error">❌ Network error: \${error.message}</p>\`;
+            }
+        }
+
+        function displayReturns(returns) {
+            const container = document.getElementById('returnsList');
+            
+            if (returns.length === 0) {
+                container.innerHTML = '<p>No returns found for this customer</p>';
+                return;
+            }
+
+            container.innerHTML = returns.map(returnData => {
+                const itemsList = returnData.items.map(item => 
+                    \`<li>\${item.title} (Qty: \${item.quantity})</li>\`
+                ).join('');
+                
+                return \`
+                    <div class="return-card">
+                        <h4>Return #\${returnData.orderNumber}</h4>
+                        <p class="return-id">ID: \${returnData.id}</p>
+                        <p><strong>Status:</strong> <span class="status \${returnData.status}">\${returnData.status}</span></p>
+                        <p><strong>Items:</strong></p>
+                        <ul>\${itemsList}</ul>
+                        
+                        <div class="upload-form">
+                            <h5>📦 Upload Shipping Label</h5>
+                            <div class="form-row">
+                                <input type="file" id="file-\${returnData.orderNumber}" accept=".pdf,.jpg,.jpeg,.png">
+                                <input type="text" id="tracking-\${returnData.orderNumber}" placeholder="Tracking Number" style="width: 150px;">
+                                <select id="carrier-\${returnData.orderNumber}" style="width: 120px;">
+                                    <option value="">Select Carrier</option>
+                                    <option value="DHL">DHL</option>
+                                    <option value="DPD">DPD</option>
+                                    <option value="UPS">UPS</option>
+                                    <option value="Hermes">Hermes</option>
+                                    <option value="GLS">GLS</option>
+                                </select>
+                                <button onclick="uploadShipping('\${returnData.id}', '\${returnData.orderNumber}')">Upload</button>
+                            </div>
+                            <div class="form-row">
+                                <label>
+                                    <input type="checkbox" id="noship-\${returnData.orderNumber}"> No shipping required
+                                </label>
+                            </div>
+                            <div id="status-\${returnData.orderNumber}"></div>
+                        </div>
+                    </div>
+                \`;
+            }).join('');
+        }
+
+        async function uploadShipping(returnId, orderNumber) {
+            const fileInput = document.getElementById(\`file-\${orderNumber}\`);
+            const trackingInput = document.getElementById(\`tracking-\${orderNumber}\`);
+            const carrierSelect = document.getElementById(\`carrier-\${orderNumber}\`);
+            const noShipCheckbox = document.getElementById(\`noship-\${orderNumber}\`);
+            const statusDiv = document.getElementById(\`status-\${orderNumber}\`);
+
+            const file = fileInput.files[0];
+            const tracking = trackingInput.value.trim();
+            const carrier = carrierSelect.value;
+            const noShip = noShipCheckbox.checked;
+
+            if (!file && !tracking && !noShip) {
+                statusDiv.innerHTML = '<p class="error">❌ Please provide a file, tracking number, or mark as no shipping required</p>';
+                return;
+            }
+
+            statusDiv.innerHTML = '<p>🔄 Uploading...</p>';
+
+            try {
+                const formData = new FormData();
+                if (file) formData.append('label', file);
+                if (tracking) formData.append('trackingNumber', tracking);
+                if (carrier) formData.append('carrierName', carrier);
+                if (noShip) formData.append('noShippingRequired', 'true');
+
+                const response = await fetch(\`/returns/\${encodeURIComponent(returnId)}/shipping\`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    statusDiv.innerHTML = '<p class="success">✅ Shipping data uploaded successfully!</p>';
+                    // Clear form
+                    fileInput.value = '';
+                    trackingInput.value = '';
+                    carrierSelect.value = '';
+                    noShipCheckbox.checked = false;
+                } else {
+                    statusDiv.innerHTML = \`<p class="error">❌ Upload failed: \${result.error}</p>\`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = \`<p class="error">❌ Upload error: \${error.message}</p>\`;
+            }
+        }
+    </script>
+</body>
+</html>
+  `;
+  res.send(html);
 });
 
 // Admin API: Get returns for a customer by email
