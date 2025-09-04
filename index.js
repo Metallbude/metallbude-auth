@@ -14224,6 +14224,44 @@ app.post('/apply-store-credit', async (req, res) => {
   }
 });
 
+// ===== ADMIN SHIPPING UPLOAD INTERFACE =====
+
+// Serve admin shipping upload interface
+app.get('/admin/shipping-upload', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin_shipping_upload.html'));
+});
+
+// Admin API: Get returns for a customer by email
+app.get('/admin/returns', async (req, res) => {
+  try {
+    const customerEmail = req.query.customerEmail;
+    if (!customerEmail) {
+      return res.status(400).json({ success: false, error: 'customerEmail parameter required' });
+    }
+
+    console.log(`🔧 Admin: Loading returns for customer: ${customerEmail}`);
+
+    // Use our existing Admin API function to get returns
+    const adminReturns = await getAdminApiReturns(customerEmail);
+    
+    console.log(`🔧 Admin: Found ${adminReturns.length} returns for ${customerEmail}`);
+
+    res.json({
+      success: true,
+      returns: adminReturns,
+      count: adminReturns.length
+    });
+
+  } catch (error) {
+    console.error('❌ Admin returns lookup error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to load returns',
+      details: error.message
+    });
+  }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
