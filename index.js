@@ -727,6 +727,7 @@ function buildReturnCreateInputFromApp(appPayload) {
   const anyExchange = resolution === 'exchange' || resolution === 'mixed';
 
   const returnLineItems = items.map((li) => {
+    console.log('🔍 Processing line item:', JSON.stringify(li, null, 2));
     const lineRefundPref = refundMap(refundMethods?.[li.fulfillmentLineItemId]);
     const obj = {
       fulfillmentLineItemId: li.fulfillmentLineItemId,
@@ -740,6 +741,7 @@ function buildReturnCreateInputFromApp(appPayload) {
       // If Shopify supports per-line refund preference on your version, include it:
       ...(lineRefundPref ? { refundPreference: lineRefundPref } : {}),
     };
+    console.log('🔍 Built return line item:', JSON.stringify(obj, null, 2));
     return obj;
   });
 
@@ -762,13 +764,16 @@ function buildReturnCreateInputFromApp(appPayload) {
     returnLineItems,
   };
 
+  console.log('🔍 Final returnLineItems count:', returnLineItems.length);
+  console.log('🔍 Final input to be sent:', JSON.stringify(input, null, 2));
+  
   return input;
 }
 
 async function adminReturnCreate(input) {
   const mutation = `
-    mutation returnCreate($input: ReturnCreateInput!) {
-      returnCreate(input: $input) {
+    mutation returnCreate($returnInput: ReturnInput!) {
+      returnCreate(returnInput: $returnInput) {
         return {
           id
           status
@@ -778,7 +783,7 @@ async function adminReturnCreate(input) {
       }
     }
   `;
-  const resp = await adminGraphQL(mutation, { input });
+  const resp = await adminGraphQL(mutation, { returnInput: input });
   const errors = resp?.data?.returnCreate?.userErrors;
   if (errors?.length) {
     throw new Error('Admin returnCreate userErrors: ' + JSON.stringify(errors));
