@@ -7,7 +7,6 @@ const cors = require('cors');
 const axios = require('axios');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs').promises;
 
 // Firebase services (optional)
 let initializeFirebase = null;
@@ -280,7 +279,6 @@ async function getRealCustomerEmail(customerId) {
 
 // 🔥 PERSISTENT SESSION STORAGE - Add this RIGHT AFTER the config object
 const fs = require('fs').promises;
-const path = require('path');
 
 const SESSION_FILE = '/opt/render/project/src/data/sessions.json';
 const REFRESH_TOKENS_FILE = '/opt/render/project/src/data/refresh_tokens.json';
