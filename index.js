@@ -669,6 +669,99 @@ async function adminGraphQL(query, variables) {
   return res.data;
 }
 
+// === Return REQUEST (Admin GraphQL) ===
+const MUTATION_RETURN_REQUEST = `
+  mutation returnRequest($input: ReturnRequestInput!) {
+    returnRequest(input: $input) {
+      return { id status totalQuantity }
+      userErrors { field message }
+    }
+  }
+`;
+
+function mapReasonToShopify(reasonId) {
+  const m = {
+    defective: 'DAMAGED',
+    transport_damage: 'DAMAGED',
+    wrong_item: 'WRONG_ITEM',
+    not_as_described: 'NOT_AS_DESCRIBED',
+    size_too_large: 'SIZE_TOO_LARGE',
+    size_too_small: 'SIZE_TOO_SMALL',
+    color_finish: 'COLOR_MISMATCH',
+    style_design: 'STYLE_NOT_LIKED',
+    quality_material: 'POOR_QUALITY',
+    changed_mind: 'BUYER_REMORSE',
+    other: 'OTHER',
+  };
+  return m[reasonId] || 'OTHER';
+}
+
+// Build the Admin API ReturnRequestInput
+function buildReturnRequestInputFromApp(appPayload) {
+  const {
+    orderId,
+    items = [], // [{ fulfillmentLineItemId, quantity, reasonId, reasonNote }]
+    exchangeSelections = [], // [{ fulfillmentLineItemId, wantedVariantId, wantedSku?, wantedTitle? }]
+    refundMethods = {}, // { fulfillmentLineItemId: 'wie_bezahlt' | 'guthaben' }
+    resolution, // 'refund' | 'store_credit' | 'exchange' | 'mixed'
+    customerNote,
+  } = appPayload || {};
+
+  // REQUEST can only have returnLineItems; exchange is recorded in note
+  const returnLineItems = items.map(li => ({
+    fulfillmentLineItemId: li.fulfillmentLineItemId,
+    quantity: Number(li.quantity || 1),
+    returnReason: mapReasonToShopify(li.reasonId),
+    returnReasonNote: li.reasonNote || null,
+  }));
+
+  const lines = [];
+  if (customerNote) lines.push(customerNote.trim());
+  if (resolution === 'exchange') lines.push('Kundenwunsch: Umtausch');
+  if (resolution === 'refund') lines.push('Kundenwunsch: Rückerstattung (wie bezahlt)');
+  if (resolution === 'store_credit') lines.push('Kundenwunsch: Guthaben');
+  if (resolution === 'mixed') lines.push('Kundenwunsch: Gemischt');
+
+  // Per-line refund prefs → note only (returnRequest has no refundPreference field)
+  const mapRefund = (v) => {
+    const s = String(v || '').toLowerCase();
+    if (s.includes('wie') || s.includes('bezahlt') || s.includes('original')) return 'Wie bezahlt';
+    if (s.includes('guthaben') || s.includes('credit')) return 'Guthaben';
+    return null;
+  };
+  const refundNotes = Object.entries(refundMethods).map(([fid, pref]) => `• ${fid}: ${mapRefund(pref) || '—'}`);
+  if (refundNotes.length) {
+    lines.push('Erstattungspräferenz pro Position:');
+    lines.push(...refundNotes);
+  }
+
+  // Exchange intent recorded for later approval step
+  const exLines = exchangeSelections
+    .filter(e => e.wantedVariantId)
+    .map(e => `• ${e.fulfillmentLineItemId} ⇒ ${e.wantedVariantId}${e.wantedSku ? ' ('+e.wantedSku+')' : ''}${e.wantedTitle ? ' – '+e.wantedTitle : ''}`);
+  if (exLines.length) {
+    lines.push('Umtausch-Auswahl:');
+    lines.push(...exLines);
+  }
+
+  return {
+    orderId,
+    notifyCustomer: true,
+    note: lines.length ? lines.join(' | ') : null,
+    returnLineItems,
+  };
+}
+
+async function adminReturnRequest(input) {
+  const resp = await adminGraphQL(MUTATION_RETURN_REQUEST, { input });
+  const payload = resp?.data?.returnRequest;
+  const errs = payload?.userErrors || [];
+  if (Array.isArray(errs) && errs.length) {
+    throw new Error('Admin returnRequest userErrors: ' + JSON.stringify(errs));
+  }
+  return payload?.return;
+}
+
 const MUTATION_DEBIT = `
 mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
   storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
@@ -1284,87 +1377,82 @@ function getReasonDescription(reasonCode) {
   return reasonDescriptions[reasonCode] || reasonCode;
 }
 
-// Build Admin GraphQL returnCreate input from app payload
-function buildReturnCreateInputFromApp(appPayload) {
+// Build Admin GraphQL returnRequest input from app payload
+function buildReturnRequestInputFromApp(appPayload) {
   const {
     orderId,                       // gid://shopify/Order/...
     items,                         // [{ fulfillmentLineItemId, quantity, reasonId, reasonNote, wantedVariantId? }]
     resolution,                    // 'refund' | 'store_credit' | 'exchange' | 'mixed'
     refundMethods,                 // { [fulfillmentLineItemId]: 'wie_bezahlt' | 'guthaben' }
     customerNote,                  // optional
+    exchangeSelections,            // { [fulfillmentLineItemId]: { wantedVariantId } }
   } = appPayload;
 
-  // Map UI reasons to Shopify enums
+  // Map UI reasons to Shopify enums (for returnRequest - simpler mapping)
   const reasonMap = {
-    defective: 'DAMAGED',
-    transport_damage: 'DAMAGED',
+    defective: 'DEFECTIVE',
+    transport_damage: 'DEFECTIVE',
     wrong_item: 'WRONG_ITEM',
     not_as_described: 'NOT_AS_DESCRIBED',
     size_too_large: 'SIZE_TOO_LARGE',
     size_too_small: 'SIZE_TOO_SMALL',
-    color_finish: 'COLOR_MISMATCH',
-    style_design: 'STYLE_NOT_LIKED',
-    quality_material: 'POOR_QUALITY',
-    changed_mind: 'BUYER_REMORSE',
+    color_finish: 'COLOR',
+    style_design: 'STYLE',
+    quality_material: 'DEFECTIVE',
+    changed_mind: 'UNWANTED',
     other: 'OTHER',
   };
 
-  // Map refund method per-line (fallback to selection at header)
-  const refundMap = (val) => {
-    if (!val) return null;
-    const v = String(val).toLowerCase();
-    if (v.includes('wie') || v.includes('bezahlt') || v === 'refund' || v === 'original') return 'ORIGINAL_PAYMENT';
-    if (v.includes('guthaben') || v.includes('credit') || v === 'store_credit') return 'STORE_CREDIT';
-    return null;
-  };
-
-  const anyExchange = resolution === 'exchange' || resolution === 'mixed';
-
+  // For returnRequest, line items are simpler - no exchange or refund preference fields
   const returnLineItems = items.map((li) => {
-    const lineRefundPref = refundMap(refundMethods?.[li.fulfillmentLineItemId]);
-    const obj = {
+    console.log(`📦 Item ${li.fulfillmentLineItemId} wants exchange to: ${exchangeSelections?.[li.fulfillmentLineItemId]?.wantedVariantId || 'none'}`);
+    console.log(`💰 Item ${li.fulfillmentLineItemId} refund method: ${refundMethods?.[li.fulfillmentLineItemId] || 'default'}`);
+    
+    return {
       fulfillmentLineItemId: li.fulfillmentLineItemId,
       quantity: li.quantity,
       returnReason: reasonMap[li.reasonId] || 'OTHER',
       returnReasonNote: li.reasonNote || null,
-      // Shopify ignores unknown fields, so only add this when we actually want an exchange
-      ...(anyExchange && li.wantedVariantId
-        ? { requestedExchangeVariantId: li.wantedVariantId }
-        : {}),
-      // If Shopify supports per-line refund preference on your version, include it:
-      ...(lineRefundPref ? { refundPreference: lineRefundPref } : {}),
     };
-    return obj;
   });
 
-  // Header-level refund preference (only if you don't set per-line)
-  let headerRefundPref = null;
-  if (resolution === 'refund') headerRefundPref = 'ORIGINAL_PAYMENT';
-  if (resolution === 'store_credit') headerRefundPref = 'STORE_CREDIT';
-
+  // Build note with exchange and refund information
   const noteLines = [];
   if (customerNote) noteLines.push(customerNote.trim());
-  if (headerRefundPref === 'ORIGINAL_PAYMENT') noteLines.push('Erstattungsart: Wie bezahlt');
-  if (headerRefundPref === 'STORE_CREDIT') noteLines.push('Erstattungsart: Guthaben');
+  
+  // Add exchange information to note
+  if (exchangeSelections) {
+    Object.entries(exchangeSelections).forEach(([fulfillmentLineItemId, selection]) => {
+      if (selection?.wantedVariantId) {
+        noteLines.push(`Umtausch-Artikel: Line ${fulfillmentLineItemId} -> Variant ${selection.wantedVariantId}`);
+      }
+    });
+  }
+  
+  // Add refund method information to note
+  if (refundMethods) {
+    Object.entries(refundMethods).forEach(([fulfillmentLineItemId, method]) => {
+      const methodText = method === 'wie_bezahlt' ? 'Wie bezahlt' : 'Guthaben';
+      noteLines.push(`Erstattungsart Line ${fulfillmentLineItemId}: ${methodText}`);
+    });
+  }
 
   const input = {
     orderId,
-    notifyCustomer: true,
-    note: noteLines.length ? noteLines.join(' | ') : null,
-    // If your API version supports it, keep this; otherwise remove:
-    ...(headerRefundPref ? { refundPreference: headerRefundPref } : {}),
     returnLineItems,
+    ...(noteLines.length ? { note: noteLines.join(' | ') } : {}),
   };
 
   return input;
 }
 
-async function adminReturnCreate(input) {
+async function adminReturnRequest(input) {
   const mutation = `
-    mutation returnCreate($input: ReturnCreateInput!) {
-      returnCreate(input: $input) {
+    mutation returnRequest($input: ReturnRequestInput!) {
+      returnRequest(input: $input) {
         return {
           id
+          name
           status
           totalQuantity
         }
@@ -1382,18 +1470,18 @@ async function adminReturnCreate(input) {
       }
     }
   );
-  const errors = response?.data?.data?.returnCreate?.userErrors;
+  const errors = response?.data?.data?.returnRequest?.userErrors;
   if (errors?.length) {
-    throw new Error('Admin returnCreate userErrors: ' + JSON.stringify(errors));
+    throw new Error('Admin returnRequest userErrors: ' + JSON.stringify(errors));
   }
-  return response?.data?.data?.returnCreate?.return;
+  return response?.data?.data?.returnRequest?.return;
 }
 
-async function createReturnViaAdminAPI(returnData) {
+async function createReturnRequestViaAdminAPI(returnData) {
   try {
-    console.log('🚀 Creating return via Admin API...');
+    console.log('🚀 Creating return REQUEST via Admin API...');
     
-    // 🔥 FIXED: Use returnRequest to get REQUESTED status ("Rückgabe angefragt")
+    // Use returnRequest to get REQUESTED status ("Rückgabe angefragt")
     const mutation = `
       mutation returnRequest($input: ReturnRequestInput!) {
         returnRequest(input: $input) {
@@ -1413,9 +1501,12 @@ async function createReturnViaAdminAPI(returnData) {
     const variables = {
       input: {
         orderId: returnData.orderId,
-        returnLineItems: returnData.returnLineItems
+        returnLineItems: returnData.returnLineItems,
+        ...(returnData.note ? { note: returnData.note } : {})
       }
     };
+
+    console.log('📤 Sending returnRequest with variables:', JSON.stringify(variables, null, 2));
 
     const response = await axios.post(
       `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
@@ -1436,26 +1527,26 @@ async function createReturnViaAdminAPI(returnData) {
     const userErrors = result.userErrors || [];
 
     if (userErrors.length > 0) {
-      throw new Error(`Return creation failed: ${userErrors.map(u => u.message).join('; ')}`);
+      throw new Error(`Return request creation failed: ${userErrors.map(u => u.message).join('; ')}`);
     }
 
     const createdReturn = result.return;
     if (!createdReturn || !createdReturn.id) {
-      throw new Error('Admin API did not return created return');
+      throw new Error('Admin API did not return created return request');
     }
 
-    console.log('✅ Return created via Admin API:', createdReturn.id);
+    console.log('✅ Return request created via Admin API:', createdReturn.id);
     console.log('🔍 Return status:', createdReturn.status);
     
     return {
       success: true,
       shopifyReturnRequestId: createdReturn.id,
       returnName: createdReturn.name,
-      status: createdReturn.status.toLowerCase(), // Use actual status from Shopify
+      status: createdReturn.status.toLowerCase(),
       method: 'admin_api_returnRequest'
     };
   } catch (error) {
-    console.error('❌ Error creating return via Admin API:', error?.message);
+    console.error('❌ Error creating return request via Admin API:', error?.message);
     return {
       success: false,
       error: error.message
@@ -1734,200 +1825,26 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
 }
 
 // 🔥 ADDED: Submit return using Customer Account API orderRequestReturn mutation
-async function submitShopifyReturnRequest(returnRequest, customerToken) {
+async function submitShopifyReturnRequest(appPayload) {
   try {
-    console.log('🚀 Submitting return request to Shopify Customer Account API');
-
-    // First check eligibility to get fulfillment line item IDs
-    const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, customerToken);
-    if (!eligibility.eligible) {
-      throw new Error(eligibility.reason || 'Order not eligible for return');
+    const input = buildReturnRequestInputFromApp(appPayload);
+    if (!input?.orderId) throw new Error('Missing orderId for returnRequest');
+    if (!Array.isArray(input.returnLineItems) || !input.returnLineItems.length) {
+      throw new Error('No returnLineItems provided for returnRequest');
     }
-
-    // Map return items to fulfillment line items
-    const returnLineItems = [];
-    
-    for (const item of returnRequest.items) {
-      const matchingItem = eligibility.returnableItems.find(
-        returnableItem => returnableItem.id === item.lineItemId
-      );
-
-      if (!matchingItem) {
-        throw new Error(`Item ${item.title} is not returnable`);
-      }
-
-      // Build payload for OrderReturnLineItemInput; include customerNote when available
-      const customerNote = item.reasonNote || item.customerNote || returnRequest.additionalNotes || '';
-      const line = {
-        fulfillmentLineItemId: matchingItem.fulfillmentLineItemId,
-        quantity: item.quantity,
-        returnReason: mapReasonToShopify(returnRequest.reason)
-      };
-      if (customerNote && customerNote.length > 0) line.customerNote = String(customerNote).substring(0, 255);
-      // Add resolution hint in the customerNote if provided (helps for Customer Account API flows)
-      if (returnRequest.preferredResolution) {
-        line.customerNote = (line.customerNote ? line.customerNote + ' | ' : '') + `preferredResolution:${returnRequest.preferredResolution}`;
-      }
-      returnLineItems.push(line);
-    }
-
-    // Use Customer Account API orderRequestReturn mutation
-    const mutation = `
-      mutation orderRequestReturn($orderId: ID!, $returnLineItems: [OrderReturnLineItemInput!]!) {
-        orderRequestReturn(
-          orderId: $orderId
-          returnLineItems: $returnLineItems
-        ) {
-          userErrors {
-            field
-            message
-            code
-          }
-          returnRequest {
-            id
-            status
-            requestedAt
-            order {
-              id
-              name
-            }
-            returnLineItems(first: 50) {
-              edges {
-                node {
-                  id
-                  quantity
-                  returnReason
-                  customerNote
-                  fulfillmentLineItem {
-                    id
-                    lineItem {
-                      title
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    // Sanitize payload before sending to Shopify Customer Account API and log the minimal shape
-    const sanitizedVariables = {
-      orderId: returnRequest.orderId,
-      returnLineItems: returnLineItems.map(li => ({
-        fulfillmentLineItemId: li.fulfillmentLineItemId,
-        quantity: Number(li.quantity || 1),
-  returnReason: li.returnReason,
-  // pass through customerNote when supported by the Customer Account API
-  ...(li.customerNote ? { customerNote: li.customerNote } : {})
-      }))
-    };
-
-    console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
-
-    // ⚠️ FIXED: Try multiple Customer Account API URL formats
-    const customerApiUrls = [
-      `https://shopify.com/${config.shopDomain}/account/customer/api/2024-10/graphql`,
-      `https://${config.shopDomain}.myshopify.com/account/customer/api/2024-10/graphql`,
-      `https://${config.shopDomain}/customer/account/api/2024-10/graphql`
-    ];
-
-    let response = null;
-    let lastError = null;
-    
-    for (const apiUrl of customerApiUrls) {
-      try {
-        console.log(`🌐 Trying Customer Account API: ${apiUrl}`);
-        response = await axios.post(
-          apiUrl,
-          {
-            query: mutation,
-            variables: sanitizedVariables,
-          },
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${customerToken}`,
-            },
-            timeout: 10000
-          }
-        );
-        console.log('✅ Customer Account API succeeded with:', apiUrl);
-        break;
-      } catch (urlError) {
-        console.error(`❌ Failed with ${apiUrl}:`, urlError?.response?.status, urlError?.message);
-        lastError = urlError;
-        continue;
-      }
-    }
-
-    if (!response) {
-      console.error('❌ All Customer Account API URLs failed');
-      throw new Error(`Customer Account API failed: ${lastError?.response?.data?.message || lastError?.message}`);
-    }
-
-    console.log('📤 Shopify return request response:', response.status);
-
-    if (response.data.errors) {
-      console.error('❌ GraphQL errors:', response.data.errors);
-      throw new Error(`Shopify GraphQL error: ${response.data.errors[0].message}`);
-    }
-    
-    const result = response.data.data.orderRequestReturn;
-    const userErrors = result.userErrors || [];
-    
-    if (userErrors.length > 0) {
-      console.error('❌ User errors:', userErrors);
-      throw new Error(`Return request failed: ${userErrors[0].message}`);
-    }
-    
-    const returnRequestData = result.returnRequest;
-    if (!returnRequestData) {
-      throw new Error('Failed to create return request in Shopify');
-    }
-    
-    console.log('✅ Shopify return request created:', returnRequestData.id);
-    
-    return {
-      success: true,
-      shopifyReturnRequestId: returnRequestData.id,
-      status: returnRequestData.status,
-    };
-
-  } catch (error) {
-    console.error('❌ Error submitting return request to Shopify:', error);
-    
-    // 🔥 FALLBACK: Try Storefront API if Customer Account API fails
-    if (config.storefrontAccessToken && error.message.includes('404')) {
-      console.log('🔄 Customer Account API failed with 404, trying Storefront API...');
-      try {
-        // Note: Storefront API might not support return creation, but worth trying
-        const storefrontQuery = `
-          mutation customerCreate($input: CustomerCreateInput!) {
-            customerCreate(input: $input) {
-              customer { id email }
-              customerUserErrors { field message }
-            }
-          }
-        `;
-        
-        console.log('⚠️ Storefront API does not support return creation. This is a Customer Account API limitation.');
-        // Continue with Admin API fallback below
-      } catch (storefrontError) {
-        console.error('❌ Storefront API also failed:', storefrontError?.message);
-      }
-    }
-    
-    return {
-      success: false,
-      error: error.message,
-      shouldFallbackToAdminAPI: true // Signal to try Admin API instead
-    };
+    console.log('� Creating return REQUEST with Admin API - input:', JSON.stringify({
+      orderId: input.orderId,
+      returnLineItemsCount: input.returnLineItems.length,
+      note: input.note
+    }));
+    const created = await adminReturnRequest(input);
+    console.log('✅ Return REQUEST created via Admin API:', created);
+    return { success: true, id: created?.id, status: created?.status || 'REQUESTED' };
+  } catch (err) {
+    console.error('❌ Error submitting return request to Shopify (Admin returnRequest):', err?.message || err);
+    return { success: false, error: err?.message || String(err) };
   }
-}
-
-// 🔥 ADDED: Get customer returns from Shopify Customer Account API
+}// 🔥 ADDED: Get customer returns from Shopify Customer Account API
 async function getShopifyCustomerReturns(customerToken) {
   try {
     console.log('📥 Fetching returns from Shopify Customer Account API');
@@ -10053,7 +9970,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
         // Map return request items to fulfillmentLineItemIds from eligibility result
         const returnLineItems = [];
-        const mapReturnReason = (reason) => mapReasonToShopify(reason || 'other');
+        const exchangeSelections = {};
+        const refundMethods = {};
 
         for (const requestedItem of returnRequest.items || []) {
           const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId || ri.title === requestedItem.title);
@@ -10065,107 +9983,53 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
           if (qty <= 0) continue;
 
-          // Build Admin ReturnLineItem input - include reason note if provided
-          const lineItemInput = {
+          // Store exchange and refund info for processing in buildReturnRequestInputFromApp
+          if (requestedItem.requestedExchangeVariantId) {
+            exchangeSelections[match.fulfillmentLineItemId] = { wantedVariantId: requestedItem.requestedExchangeVariantId };
+          }
+          
+          const refundMethod = (requestedItem.refundMethod === 'guthaben' || returnRequest.preferredResolution === 'store_credit') ? 'guthaben' : 'wie_bezahlt';
+          refundMethods[match.fulfillmentLineItemId] = refundMethod;
+
+          // Build returnRequest line item (simpler structure)
+          returnLineItems.push({
             fulfillmentLineItemId: match.fulfillmentLineItemId,
             quantity: qty,
-            returnReason: mapReturnReason(returnRequest.reason)
-          };
-
-          // If the customer provided per-item notes or an overall additionalNotes, include as returnReasonNote
-          const perItemNote = requestedItem.reasonNote || requestedItem.customerNote || returnRequest.additionalNotes || '';
-          if (perItemNote && perItemNote.length > 0) {
-            lineItemInput.returnReasonNote = String(perItemNote).substring(0, 255);
-          }
-
-          returnLineItems.push(lineItemInput);
+            reasonId: returnRequest.reason,
+            reasonNote: requestedItem.reasonNote || requestedItem.customerNote || returnRequest.additionalNotes || ''
+          });
         }
 
         if (returnLineItems.length === 0) {
           throw new Error('No matching fulfillment line items found for return (Admin API)');
         }
 
-        // Build exchangeLineItems when customer requests an exchange
-        const exchangeLineItems = [];
-        if ((returnRequest.preferredResolution || '').toLowerCase() === 'exchange') {
-          for (const requestedItem of returnRequest.items || []) {
-            const qty = Number(requestedItem.quantity || 1);
-            const requestedVariant = requestedItem.requestedExchangeVariantId || requestedItem.exchangeVariantId || null;
-            if (requestedVariant && qty > 0) {
-              exchangeLineItems.push({
-                variantId: requestedVariant,
-                quantity: qty
-              });
-            }
-          }
-        }
-        const returnMutation = `
-          mutation returnRequestCreate($returnRequest: ReturnRequestInput!) {
-            returnRequestCreate(returnRequest: $returnRequest) {
-              returnRequest {
-                id
-                name
-                status
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }`;
-
-        const returnRequestInput = {
+        // Build input using the new function for returnRequest
+        const returnRequestInput = buildReturnRequestInputFromApp({
           orderId: returnRequest.orderId,
-          returnLineItems: returnLineItems,
-          reason: mapReasonToShopify(returnRequest.reason),
-          note: returnRequest.additionalNotes || `Return request: ${returnRequest.reason}`
-        };
-
-        // Attach exchangeLineItems when present (Admin API might support ExchangeLineItemInput)
-        if (exchangeLineItems.length > 0) {
-          returnRequestInput.exchangeLineItems = exchangeLineItems;
-        }
+          items: returnLineItems,
+          resolution: returnRequest.preferredResolution || 'refund',
+          refundMethods,
+          exchangeSelections,
+          customerNote: returnRequest.additionalNotes
+        });
 
         console.log('🔥 Creating return REQUEST with Admin API - payload:', { returnLineItemsCount: returnLineItems.length });
 
-        const returnResponse = await axios.post(config.adminApiUrl, {
-          query: returnMutation,
-          variables: { returnRequest: returnRequestInput }
-        }, {
-          headers: {
-            'X-Shopify-Access-Token': config.adminToken,
-            'Content-Type': 'application/json'
-          }
-        });
+        // Use the correct returnRequest mutation (not returnRequestCreate)
+        const returnResponse = await adminReturnRequest(returnRequestInput);
 
-        if (returnResponse.data.errors) {
-          console.error('❌ Admin returnRequestCreate GraphQL errors:', returnResponse.data.errors);
-          throw new Error('Admin API returnRequestCreate failed');
-        }
-
-        const returnResult = returnResponse.data.data?.returnRequestCreate;
-        const userErrors = returnResult?.userErrors || [];
-        if (userErrors.length > 0) {
-          console.error('❌ Admin returnRequestCreate userErrors:', userErrors);
-          throw new Error('Return request creation failed: ' + userErrors.map(u => u.message).join('; '));
-        }
-
-        const createdReturnRequest = returnResult?.returnRequest;
-        if (!createdReturnRequest || !createdReturnRequest.id) {
-          throw new Error('Admin API did not return created return request');
-        }
-
-        console.log('✅ Return REQUEST created via Admin API:', createdReturnRequest.id);
-        console.log('🔍 Return request status from Shopify:', createdReturnRequest.status);
+        console.log('✅ Return REQUEST created via Admin API:', returnResponse.id);
+        console.log('🔍 Return request status from Shopify:', returnResponse.status);
         
         // Return request should have REQUESTED status which displays as "Rückgabe angefragt"
         return res.json({
           success: true, 
-          returnId: createdReturnRequest.id, 
-          returnName: createdReturnRequest.name, 
+          returnId: returnResponse.id, 
+          returnName: returnResponse.name, 
           status: 'requested', // Return requests should be in REQUESTED status
-          method: 'admin_api_returnRequestCreate',
-          shopifyStatus: createdReturnRequest.status // Keep original status for reference
+          method: 'admin_api_returnRequest',
+          shopifyStatus: returnResponse.status // Keep original status for reference
         });
 
       } catch (adminError) {
@@ -10174,59 +10038,8 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       }
     }
 
-  // Step 1: Submit to Shopify using Customer Account API (fallback path)
-  let shopifyResult = await submitShopifyReturnRequest(returnRequest, customerToken);
-    
-  // 🔥 FALLBACK: If Customer Account API fails, try Admin API
-  if (!shopifyResult.success && shopifyResult.shouldFallbackToAdminAPI) {
-    console.log('🔄 Customer Account API failed, falling back to Admin API...');
-    
-    try {
-      // Use the same Admin API logic from above
-      const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
-      if (!eligibility || !eligibility.eligible) {
-        throw new Error('Order not eligible for return via Admin API');
-      }
-
-      // Build return input for Admin API
-      const returnLineItems = [];
-      for (const requestedItem of returnRequest.items || []) {
-        const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId);
-        if (!match) continue;
-
-        const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
-        if (qty <= 0) continue;
-
-        returnLineItems.push({
-          fulfillmentLineItemId: match.fulfillmentLineItemId,
-          quantity: qty,
-          returnReason: mapReasonToShopify(returnRequest.reason),
-          customerNote: returnRequest.additionalNotes || `${returnRequest.reason}: ${getReasonDescription(returnRequest.reason)}`,
-          // 🔥 FIXED: Include exchange variant ID if customer selected one
-          ...(requestedItem.requestedExchangeVariantId ? { requestedExchangeVariantId: requestedItem.requestedExchangeVariantId } : {}),
-          // 🔥 FIXED: Set refund preference based on customer selection
-          refundPreference: (requestedItem.refundMethod === 'guthaben' || returnRequest.preferredResolution === 'store_credit') ? 'STORE_CREDIT' : 'ORIGINAL_PAYMENT'
-        });
-      }
-
-      if (returnLineItems.length === 0) {
-        throw new Error('No valid return line items found');
-      }
-
-      // Create return via Admin API
-      const adminApiResult = await createReturnViaAdminAPI({
-        ...returnRequest,
-        returnLineItems
-      });
-
-      if (adminApiResult.success) {
-        shopifyResult = adminApiResult;
-        console.log('✅ Successfully created return via Admin API fallback');
-      }
-    } catch (fallbackError) {
-      console.error('❌ Admin API fallback also failed:', fallbackError?.message);
-    }
-  }
+  // Step 1: Submit to Shopify using Admin API returnRequest (no more Customer Account API fallback)
+  let shopifyResult = await submitShopifyReturnRequest(returnRequest);
     
   if (!shopifyResult.success) {
     return res.status(400).json({
@@ -10238,7 +10051,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     // Step 2: Save to backend database for additional tracking
     const backendReturnData = {
       ...returnRequest,
-      shopifyReturnRequestId: shopifyResult.shopifyReturnRequestId,
+      shopifyReturnRequestId: shopifyResult.id,
       shopifyStatus: shopifyResult.status,
       customerEmail: customerEmail,
       requestDate: new Date().toISOString(),
@@ -10256,11 +10069,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     // Here you would save to your database
     // await saveReturnToDatabase(backendReturnData);
 
-    console.log('✅ Return request submitted successfully:', shopifyResult.shopifyReturnRequestId);
+    console.log('✅ Return request submitted successfully:', shopifyResult.id);
 
     res.json({
       success: true,
-      returnId: shopifyResult.shopifyReturnRequestId,
+      returnId: shopifyResult.id,
       status: shopifyResult.status,
       message: 'Return request submitted successfully'
     });
