@@ -1402,116 +1402,19 @@ function getReasonDescription(reasonCode) {
 }
 
 // Build Admin GraphQL returnCreate input from app payload
-function buildReturnCreateInputFromApp(appPayload) {
-  const {
-    orderId,                       // gid://shopify/Order/...
-    items,                         // [{ fulfillmentLineItemId, quantity, reasonId, reasonNote, wantedVariantId? }]
-    resolution,                    // 'refund' | 'store_credit' | 'exchange' | 'mixed'
-    refundMethods,                 // { [fulfillmentLineItemId]: 'wie_bezahlt' | 'guthaben' }
-    customerNote,                  // optional
-  } = appPayload;
-
-  // Map UI reasons to Shopify enums
-  const reasonMap = {
-    defective: 'DAMAGED',
-    transport_damage: 'DAMAGED',
-    wrong_item: 'WRONG_ITEM',
-    not_as_described: 'NOT_AS_DESCRIBED',
-    size_too_large: 'SIZE_TOO_LARGE',
-    size_too_small: 'SIZE_TOO_SMALL',
-    color_finish: 'COLOR_MISMATCH',
-    style_design: 'STYLE_NOT_LIKED',
-    quality_material: 'POOR_QUALITY',
-    changed_mind: 'BUYER_REMORSE',
-    color: 'COLOR_MISMATCH',
-    other: 'OTHER',
-  };
-
-  // Map refund method per-line (fallback to selection at header)
-  const refundMap = (val) => {
-    if (!val) return null;
-    const v = String(val).toLowerCase();
-    if (v.includes('wie') || v.includes('bezahlt') || v === 'refund' || v === 'original') return 'ORIGINAL_PAYMENT';
-    if (v.includes('guthaben') || v.includes('credit') || v === 'store_credit') return 'STORE_CREDIT';
-    return null;
-  };
-
-  const anyExchange = resolution === 'exchange' || resolution === 'mixed';
-
-  const returnLineItems = items.map((li) => {
-    const lineRefundPref = refundMap(refundMethods?.[li.fulfillmentLineItemId]);
-    const obj = {
-      fulfillmentLineItemId: li.fulfillmentLineItemId,
-      quantity: li.quantity,
-      returnReason: reasonMap[li.reasonId] || 'OTHER',
-      returnReasonNote: li.reasonNote || null,
-      // Shopify ignores unknown fields, so only add this when we actually want an exchange
-      ...(anyExchange && li.wantedVariantId
-        ? { requestedExchangeVariantId: li.wantedVariantId }
-        : {}),
-      // If Shopify supports per-line refund preference on your version, include it:
-      ...(lineRefundPref ? { refundPreference: lineRefundPref } : {}),
-    };
-    return obj;
-  });
-
-  // Header-level refund preference (only if you don't set per-line)
-  let headerRefundPref = null;
-  if (resolution === 'refund') headerRefundPref = 'ORIGINAL_PAYMENT';
-  if (resolution === 'store_credit') headerRefundPref = 'STORE_CREDIT';
-
-  const noteLines = [];
-  if (customerNote) noteLines.push(customerNote.trim());
-  if (headerRefundPref === 'ORIGINAL_PAYMENT') noteLines.push('Erstattungsart: Wie bezahlt');
-  if (headerRefundPref === 'STORE_CREDIT') noteLines.push('Erstattungsart: Guthaben');
-
-  const input = {
-    orderId,
-    notifyCustomer: true,
-    note: noteLines.length ? noteLines.join(' | ') : null,
-    // If your API version supports it, keep this; otherwise remove:
-    ...(headerRefundPref ? { refundPreference: headerRefundPref } : {}),
-    returnLineItems,
-  };
-
-  return input;
-}
-
 // Admin GraphQL returnCreate function
-async function adminReturnCreate(input) {
-  const mutation = `
-    mutation returnCreate($input: ReturnCreateInput!) {
-      returnCreate(input: $input) {
-        return {
-          id
-          status
-          totalQuantity
-        }
-        userErrors { field message }
-      }
-    }
-  `;
-  const response = await axios.post(
-    `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
-    { query: mutation, variables: { input } },
-    {
-      headers: {
-        'X-Shopify-Access-Token': config.adminToken,
-        'Content-Type': 'application/json'
-      }
-    }
-  );
 
-  const errors = response?.data?.data?.returnCreate?.userErrors;
-  if (errors?.length) {
-    throw new Error('Admin returnCreate userErrors: ' + JSON.stringify(errors));
-  }
-  return response?.data?.data?.returnCreate?.return;
-}
 
 async function createReturnViaAdminAPI(returnData) {
   try {
     console.log('🚀 Creating return via Admin API...');
+    console.log('📦 Input returnData:', JSON.stringify({
+      orderId: returnData.orderId,
+      items: returnData.items,
+      resolution: returnData.resolution,
+      refundMethods: returnData.refundMethods,
+      customerNote: returnData.customerNote
+    }, null, 2));
     
     // Build the proper input using the new builder
     const input = buildReturnCreateInputFromApp({
