@@ -788,6 +788,35 @@ function toMoneyString(n) {
   return (Math.round(Number(n) * 100) / 100).toFixed(2);
 }
 
+const MUTATION_METAFIELDS_SET = `
+  mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      metafields { key namespace value type ownerType }
+      userErrors { field message }
+    }
+  }
+`;
+
+async function saveExchangeSelectionsMetafield(orderId, exchangeSelections) {
+  if (!exchangeSelections || !exchangeSelections.length) return;
+  const variables = {
+    metafields: [{
+      ownerId: orderId,
+      namespace: 'mb.returns',
+      key: 'exchange_selections',
+      type: 'json',
+      value: JSON.stringify(exchangeSelections),
+    }]
+  };
+  try {
+    const res = await adminGraphQL(MUTATION_METAFIELDS_SET, variables);
+    const errs = res?.data?.metafieldsSet?.userErrors || [];
+    if (errs.length) console.warn('⚠️ metafieldsSet userErrors:', errs);
+  } catch (e) {
+    console.warn('⚠️ Failed to write exchange_selections metafield:', e?.message || e);
+  }
+}
+
 async function getCustomerIdByEmail(email) {
   const customer = await getShopifyCustomerByEmail(email);
   if (!customer?.id) throw new Error(`Customer not found for email: ${email}`);
@@ -1356,6 +1385,75 @@ async function createReturnViaAdminAPI(returnData) {
       error: error.message
     };
   }
+}
+
+function buildReturnRequestInputFromApp(appPayload = {}) {
+  const {
+    orderId,
+    items = [], // [{ fulfillmentLineItemId, quantity, reasonId, reasonNote }]
+    exchangeSelections = [], // [{ fulfillmentLineItemId, wantedVariantId, wantedSku?, wantedTitle? }]
+    refundMethods = {}, // { fid: 'wie_bezahlt' | 'guthaben' }
+    resolution, // 'refund' | 'store_credit' | 'exchange' | 'mixed'
+    customerNote,
+  } = appPayload;
+
+  const reasonMap = {
+    defective: 'DAMAGED',
+    transport_damage: 'DAMAGED',
+    wrong_item: 'WRONG_ITEM',
+    not_as_described: 'NOT_AS_DESCRIBED',
+    size_too_large: 'SIZE_TOO_LARGE',
+    size_too_small: 'SIZE_TOO_SMALL',
+    color_finish: 'COLOR_MISMATCH',
+    style_design: 'STYLE_NOT_LIKED',
+    quality_material: 'POOR_QUALITY',
+    changed_mind: 'BUYER_REMORSE',
+    other: 'OTHER',
+  };
+
+  const returnLineItems = items.map(li => ({
+    fulfillmentLineItemId: li.fulfillmentLineItemId,
+    quantity: Number(li.quantity || 1),
+    returnReason: reasonMap[li.reasonId] || 'OTHER',
+    returnReasonNote: li.reasonNote || null,
+  }));
+
+  const noteLines = [];
+  if (customerNote && customerNote.trim().length) noteLines.push(customerNote.trim());
+
+  if (resolution === 'exchange') noteLines.push('Kundenwunsch: Umtausch');
+  if (resolution === 'refund') noteLines.push('Kundenwunsch: Rückerstattung (wie bezahlt)');
+  if (resolution === 'store_credit') noteLines.push('Kundenwunsch: Guthaben');
+  if (resolution === 'mixed') noteLines.push('Kundenwunsch: Gemischt');
+
+  const mapRefundPref = (v) => {
+    const s = String(v || '').toLowerCase();
+    if (s.includes('wie') || s.includes('bezahlt') || s.includes('original')) return 'Wie bezahlt';
+    if (s.includes('guthaben') || s.includes('credit')) return 'Guthaben';
+    return '—';
+  };
+
+  const refundRows = Object.entries(refundMethods)
+    .map(([fid, pref]) => `• ${fid}: ${mapRefundPref(pref)}`);
+  if (refundRows.length) {
+    noteLines.push('Erstattungspräferenz:');
+    noteLines.push(...refundRows);
+  }
+
+  const exRows = exchangeSelections
+    .filter(x => x && x.wantedVariantId)
+    .map(x => `• ${x.fulfillmentLineItemId} ⇒ ${x.wantedVariantId}${x.wantedSku ? ' ('+x.wantedSku+')' : ''}${x.wantedTitle ? ' – '+x.wantedTitle : ''}`);
+  if (exRows.length) {
+    noteLines.push('Umtausch-Auswahl:');
+    noteLines.push(...exRows);
+  }
+
+  return {
+    orderId,
+    notifyCustomer: true,
+    note: noteLines.length ? noteLines.join(' | ') : null,
+    returnLineItems,
+  };
 }
 
 function mapReasonToShopify(reason) {
@@ -9675,78 +9773,15 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       // 🔥 APPROACH 2: Try creating as DRAFT first, then convert to REQUEST
       console.log('🚀 Trying Admin API with draft-to-request conversion...');
       try {
-        // Build returnLineItems from request data
-        const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
-        if (!eligibility || !eligibility.eligible) {
-          throw new Error('Order not eligible for return via Admin API');
-        }
-
-        const returnLineItems = [];
-        for (const requestedItem of returnRequest.items || []) {
-          const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId || ri.title === requestedItem.title);
-          if (!match) {
-            console.log('⚠️ Requested item not found among returnable items:', requestedItem);
-            continue;
-          }
-
-          const qty = Math.min(Number(requestedItem.quantity || 1), Number(match.quantity || 0));
-          if (qty <= 0) continue;
-
-          returnLineItems.push({
-            fulfillmentLineItemId: match.fulfillmentLineItemId,
-            quantity: qty,
-            returnReason: mapReasonToShopify(requestedItem.reason || returnRequest.reason),
-            returnReasonNote: requestedItem.reasonNote || returnRequest.additionalNotes || ''
-          });
-        }
-
-        if (returnLineItems.length === 0) {
-          throw new Error('No matching fulfillment line items found for return');
-        }
-
-        // 🔥 BUILD COMPREHENSIVE NOTES with exchange and refund info
-        const noteLines = [];
-        
-        // Add customer note
-        if (customerNote) {
-          noteLines.push(`🔄 RÜCKGABE-DETAILS\n\nGrund: ${returnRequest.reason}\n`);
-        }
-        
-        // Add item-specific exchange information
-        for (const item of returnRequest.items || []) {
-          if (item.requestedExchangeVariantId) {
-            const exchangeSelection = exchangeSelections.find(e => e.fulfillmentLineItemId === item.fulfillmentLineItemId);
-            const exchangeTitle = exchangeSelection?.wantedTitle || 'Unbekannt';
-            noteLines.push(`📦 ${item.title || 'Artikel'}\n   Lösung: Umtausch\n   Umtausch-Variante: ${exchangeTitle}\n`);
-          }
-        }
-        
-        // Add exchange variant mapping for Shopify processing
-        if (exchangeSelections.length > 0) {
-          const exchangeMapping = exchangeSelections
-            .filter(e => e.wantedVariantId)
-            .map((e, index) => `Line ${index} -> Variant ${e.wantedVariantId}`)
-            .join(' | ');
-          if (exchangeMapping) {
-            noteLines.push(`Umtausch-Artikel: ${exchangeMapping}`);
-          }
-        }
-        
-        // Add refund method mapping
-        if (Object.keys(refundMethods).length > 0) {
-          const refundMapping = Object.entries(refundMethods)
-            .map(([fulfillmentLineItemId, method]) => {
-              // 🔥 FIX: Properly map refund methods
-              const methodText = method === 'wie_bezahlt' ? 'Wie bezahlt' : 'Guthaben';
-              return `Erstattungsart Line ${fulfillmentLineItemId}: ${methodText}`;
-            })
-            .join(' | ');
-          if (refundMapping) {
-            noteLines.push(refundMapping);
-          }
-        }
-
-        const combinedNote = noteLines.join(' | ');
+        // Use the standardized input builder
+        const input = buildReturnRequestInputFromApp({
+          orderId: returnRequest.orderId,
+          items: returnRequest.items,
+          exchangeSelections,
+          refundMethods,
+          resolution: returnRequest.preferredResolution,
+          customerNote,
+        });
 
         // Step 1: Create return with request flag to get REQUESTED status
         const draftMutation = `
@@ -9767,17 +9802,17 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
         const draftVariables = {
           returnInput: {
-            orderId: returnRequest.orderId,
-            returnLineItems: returnLineItems,
+            orderId: input.orderId,
+            returnLineItems: input.returnLineItems,
             requestReturn: true, // Request flag to create as request, not auto-approved
-            notifyCustomer: false,
-            note: combinedNote || returnRequest.additionalNotes || "Customer-initiated return request"
+            notifyCustomer: input.notifyCustomer || false,
+            note: input.note || "Customer-initiated return request"
           }
         };
 
         console.log('📤 Creating return with request flag...');
-        console.log('🔥 Return line items count:', returnLineItems.length);
-        console.log('🔥 Combined note preview:', combinedNote?.substring(0, 200) + '...');
+        console.log('🔥 Return line items count:', input.returnLineItems.length);
+        console.log('🔥 Note preview:', input.note?.substring(0, 200) + '...');
         const draftResponse = await axios.post(
           `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
           { query: draftMutation, variables: draftVariables },
@@ -9807,6 +9842,9 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
         console.log('✅ Return created:', createdReturn.id);
         console.log('🔍 Return status from Shopify:', createdReturn.status);
+        
+        // Save exchange selections to Order metafield for staff processing
+        await saveExchangeSelectionsMetafield(input.orderId, exchangeSelections);
         
         // The requestReturn flag should create it in REQUESTED status
         console.log('✅ Return created via Admin API with request flag');
