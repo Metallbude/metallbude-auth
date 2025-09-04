@@ -10330,43 +10330,23 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
     
     // 🔥 NEW: Add shipping label data if requested
     if (includeShipping || includeShippingLabels || includeTracking) {
-      console.log('🚚 Adding shipping label data to returns...');
+      console.log('🚚 Checking for real shipping label data...');
       
       for (let i = 0; i < shopifyReturns.length; i++) {
         const returnData = shopifyReturns[i];
         console.log(`🔍 Checking shipping data for return ${returnData.orderNumber}...`);
         
-        // TODO: Here we would check your shipping label storage system
-        // For now, let's see if there are any files uploaded for this return
+        // TODO: Here we would check your actual shipping label storage system
+        // For now, all shipping fields are null since no real storage exists yet
         
-        // TEST: Add some mock shipping data for specific returns to test the frontend
-        const hasShippingLabel = returnData.orderNumber === '136306' || returnData.orderNumber === '136152'; // Test data
-        const hasTrackingNumber = returnData.orderNumber === '136306' || returnData.orderNumber === '136296'; // Test data
+        returnData.shippingLabelUrl = null;
+        returnData.shippingLabelMime = null;
+        returnData.shippingLabelName = null;
+        returnData.trackingNumber = null;
+        returnData.carrierName = null;
+        returnData.noShippingRequired = false;
         
-        console.log(`  - Has shipping label: ${hasShippingLabel}`);
-        console.log(`  - Has tracking number: ${hasTrackingNumber}`);
-        
-        if (hasShippingLabel) {
-          returnData.shippingLabelUrl = `https://metallbude-auth.onrender.com/api/returns/labels/${returnData.id}.pdf`;
-          returnData.shippingLabelMime = 'application/pdf';
-          returnData.shippingLabelName = `return_label_${returnData.orderNumber}.pdf`;
-        } else {
-          returnData.shippingLabelUrl = null;
-          returnData.shippingLabelMime = null;
-          returnData.shippingLabelName = null;
-        }
-        
-        if (hasTrackingNumber) {
-          returnData.trackingNumber = `DHL123456789DE_${returnData.orderNumber}`; // Unique tracking per return
-          returnData.carrierName = 'DHL';
-        } else {
-          returnData.trackingNumber = null;
-          returnData.carrierName = null;
-        }
-        
-        returnData.noShippingRequired = false; // This should be based on your business logic
-        
-        console.log(`  ✅ Updated return ${returnData.orderNumber} with shipping data`);
+        console.log(`  ℹ️ No shipping data found for return ${returnData.orderNumber}`);
       }
     } else {
       console.log('🚚 No shipping data requested - skipping shipping enhancement');
@@ -10387,69 +10367,6 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
       error: 'Failed to fetch return history'
     });
   }
-});
-
-// 🔥 ADDED: Mock endpoint to serve shipping labels for testing
-app.get('/api/returns/labels/:filename', (req, res) => {
-  const { filename } = req.params;
-  console.log(`📄 Mock shipping label requested: ${filename}`);
-  
-  // Generate a simple mock PDF response
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  
-  // Send a minimal PDF header (this would be a real PDF file in production)
-  const mockPdfContent = `%PDF-1.4
-1 0 obj
-<<
-/Type /Catalog
-/Pages 2 0 R
->>
-endobj
-2 0 obj
-<<
-/Type /Pages
-/Kids [3 0 R]
-/Count 1
->>
-endobj
-3 0 obj
-<<
-/Type /Page
-/Parent 2 0 R
-/MediaBox [0 0 612 792]
-/Contents 4 0 R
->>
-endobj
-4 0 obj
-<<
-/Length 44
->>
-stream
-BT
-/F1 12 Tf
-72 720 Td
-(Mock Shipping Label - ${filename}) Tj
-ET
-endstream
-endobj
-xref
-0 5
-0000000000 65535 f 
-0000000010 00000 n 
-0000000053 00000 n 
-0000000110 00000 n 
-0000000181 00000 n 
-trailer
-<<
-/Size 5
-/Root 1 0 R
->>
-startxref
-275
-%%EOF`;
-  
-  res.send(Buffer.from(mockPdfContent));
 });
 
 // 🔥 ADDED: Check existing returns for order
