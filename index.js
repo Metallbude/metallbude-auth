@@ -757,25 +757,6 @@ function buildReturnRequestInputFromApp(appPayload) {
   };
 }
 
-async function adminReturnRequest(input) {
-  console.log('🔥 Admin returnRequest input:', JSON.stringify(input, null, 2));
-  const resp = await adminGraphQL(MUTATION_RETURN_REQUEST, { input });
-  console.log('🔥 Admin returnRequest response:', JSON.stringify(resp, null, 2));
-  
-  const payload = resp?.data?.returnRequest;
-  const errs = payload?.userErrors || [];
-  if (Array.isArray(errs) && errs.length) {
-    throw new Error('Admin returnRequest userErrors: ' + JSON.stringify(errs));
-  }
-  
-  const returnObj = payload?.return;
-  if (!returnObj || !returnObj.id) {
-    throw new Error('Admin returnRequest did not return a valid return object: ' + JSON.stringify(payload));
-  }
-  
-  return returnObj;
-}
-
 const MUTATION_DEBIT = `
 mutation StoreCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
   storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
@@ -1461,6 +1442,8 @@ function buildReturnRequestInputFromApp(appPayload) {
 }
 
 async function adminReturnRequest(input) {
+  console.log('🔥 Admin returnRequest starting with input:', JSON.stringify(input, null, 2));
+  
   const mutation = `
     mutation returnRequest($input: ReturnRequestInput!) {
       returnRequest(input: $input) {
@@ -1474,21 +1457,43 @@ async function adminReturnRequest(input) {
       }
     }
   `;
-  const response = await axios.post(
-    `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
-    { query: mutation, variables: { input } },
-    {
-      headers: {
-        'X-Shopify-Access-Token': config.adminToken,
-        'Content-Type': 'application/json'
+  
+  try {
+    const response = await axios.post(
+      `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
+      { query: mutation, variables: { input } },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json'
+        }
       }
+    );
+    
+    console.log('🔥 Raw Shopify response:', JSON.stringify(response.data, null, 2));
+    
+    if (response.data.errors) {
+      throw new Error('GraphQL errors: ' + JSON.stringify(response.data.errors));
     }
-  );
-  const errors = response?.data?.data?.returnRequest?.userErrors;
-  if (errors?.length) {
-    throw new Error('Admin returnRequest userErrors: ' + JSON.stringify(errors));
+    
+    const errors = response?.data?.data?.returnRequest?.userErrors;
+    if (errors?.length) {
+      throw new Error('Admin returnRequest userErrors: ' + JSON.stringify(errors));
+    }
+    
+    const returnData = response?.data?.data?.returnRequest?.return;
+    if (!returnData) {
+      throw new Error('No return data in response: ' + JSON.stringify(response.data));
+    }
+    
+    console.log('✅ Return request created successfully:', returnData.id);
+    return returnData;
+    
+  } catch (error) {
+    console.error('❌ adminReturnRequest failed:', error.message);
+    console.error('❌ Full error:', error);
+    throw error;
   }
-  return response?.data?.data?.returnRequest?.return;
 }
 
 async function createReturnRequestViaAdminAPI(returnData) {
