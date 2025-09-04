@@ -5,6 +5,9 @@ const jwt = require('jsonwebtoken');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const axios = require('axios');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs').promises;
 
 // Firebase services (optional)
 let initializeFirebase = null;
@@ -127,6 +130,40 @@ app.use(cors(corsOptions));
 // Body parsing middleware with size limits
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+
+// === File uploads for return labels (PDF/JPG/PNG) ===
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const ensureUploadsDir = async () => {
+  try { await fs.mkdir(UPLOADS_DIR, { recursive: true }); } catch (_) {}
+};
+
+// Serve uploaded labels (simple static; your domain is config.issuer)
+app.use('/uploads', express.static(UPLOADS_DIR, {
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  }
+}));
+
+// Multer storage (keeps ext, unique filename)
+const storage = multer.diskStorage({
+  destination: async function (req, file, cb) { await ensureUploadsDir(); cb(null, UPLOADS_DIR); },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    const base = path.basename(file.originalname || 'label', ext).replace(/\s+/g,'_').slice(0,40);
+    const rand = Math.random().toString(36).slice(2,8);
+    cb(null, `${base}_${Date.now()}_${rand}${ext || ''}`);
+  }
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const ok = /pdf|png|jpg|jpeg/i.test(file.mimetype) || /\.(pdf|png|jpg|jpeg)$/i.test(file.originalname || '');
+    if (!ok) return cb(new Error('Only PDF/PNG/JPG allowed'));
+    cb(null, true);
+  },
+});
 
 // Generate RSA key pair for signing tokens
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
@@ -394,6 +431,12 @@ const storeCreditLedger = new Map();
 // In-memory map for store credit reservations: reservationId -> reservation object
 const storeCreditReservations = new Map();
 
+// ===== RETURN SHIPPING METADATA (persisted) =====
+const RETURN_SHIPPING_FILE = path.join(__dirname, 'data', 'return_shipping.json');
+// key: return GID (e.g., "gid://shopify/Return/17623286028")
+// val: { url, mime, name, trackingNumber, carrierName, noShippingRequired, updatedAt }
+const returnShipping = new Map();
+
 async function loadStoreCreditLedger() {
   try {
     const raw = await fs.readFile(STORE_CREDIT_FILE, 'utf8');
@@ -467,13 +510,33 @@ function adjustStoreCredit(email, delta) {
   return next;
 }
 
+async function loadReturnShipping() {
+  try {
+    const raw = await fs.readFile(RETURN_SHIPPING_FILE, 'utf8');
+    const entries = JSON.parse(raw);
+    returnShipping.clear();
+    for (const [k, v] of entries) returnShipping.set(k, v);
+    console.log(`📦 Loaded ${returnShipping.size} return shipping records`);
+  } catch (_) {
+    console.log('📦 No existing return_shipping file - starting fresh');
+  }
+}
+async function persistReturnShipping() {
+  try {
+    await fs.mkdir(path.dirname(RETURN_SHIPPING_FILE), { recursive: true });
+    await fs.writeFile(RETURN_SHIPPING_FILE, JSON.stringify(Array.from(returnShipping.entries())), 'utf8');
+  } catch (e) { console.error('❌ persist return shipping', e?.message || e); }
+}
+
 // Load at startup
 loadStoreCreditLedger().catch((e) => console.warn('Could not load store credit ledger at startup', e));
 loadStoreCreditReservations().catch((e) => console.warn('Could not load store credit reservations at startup', e));
+loadReturnShipping().catch(() => {});
 
 // Periodic flush (every 60s)
 setInterval(() => {
   persistStoreCreditLedger().catch(() => {});
+  persistReturnShipping().catch(() => {});
 }, 60 * 1000);
 
 // Cleanup expired reservations (every 5 minutes)
@@ -10330,23 +10393,27 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
     
     // 🔥 NEW: Add shipping label data if requested
     if (includeShipping || includeShippingLabels || includeTracking) {
-      console.log('🚚 Checking for real shipping label data...');
+      console.log('🚚 Loading real shipping label data...');
       
       for (let i = 0; i < shopifyReturns.length; i++) {
         const returnData = shopifyReturns[i];
-        console.log(`🔍 Checking shipping data for return ${returnData.orderNumber}...`);
+        console.log(`🔍 Loading shipping data for return ${returnData.orderNumber}...`);
         
-        // TODO: Here we would check your actual shipping label storage system
-        // For now, all shipping fields are null since no real storage exists yet
+        // Get real shipping data from storage
+        const rs = returnShipping.get(returnData.id) || null;
         
-        returnData.shippingLabelUrl = null;
-        returnData.shippingLabelMime = null;
-        returnData.shippingLabelName = null;
-        returnData.trackingNumber = null;
-        returnData.carrierName = null;
-        returnData.noShippingRequired = false;
+        returnData.shippingLabelUrl = rs?.url || null;
+        returnData.shippingLabelMime = rs?.mime || null;
+        returnData.shippingLabelName = rs?.name || null;
+        returnData.trackingNumber = rs?.trackingNumber || null;
+        returnData.carrierName = rs?.carrierName || null;
+        returnData.noShippingRequired = !!(rs?.noShippingRequired);
         
-        console.log(`  ℹ️ No shipping data found for return ${returnData.orderNumber}`);
+        if (rs) {
+          console.log(`  ✅ Found shipping data for return ${returnData.orderNumber}`);
+        } else {
+          console.log(`  ℹ️ No shipping data found for return ${returnData.orderNumber}`);
+        }
       }
     } else {
       console.log('🚚 No shipping data requested - skipping shipping enhancement');
@@ -10459,6 +10526,49 @@ app.post('/returns/:returnId/cancel', authenticateAppToken, async (req, res) => 
       success: false,
       error: 'Failed to cancel return request'
     });
+  }
+});
+
+// === Upload label & set tracking for a RETURN (REQUESTED) ===
+// POST /returns/:returnId/shipping
+// form-data:
+//   - label: (file) pdf/jpg/png  [optional]
+//   - trackingNumber: string     [optional]
+//   - carrierName: string        [optional]
+//   - noShippingRequired: 'true' | 'false'  [optional]
+//   - labelName: string          [optional]
+app.post('/returns/:returnId/shipping', upload.single('label'), async (req, res) => {
+  try {
+    const returnId = req.params.returnId; // e.g. gid://shopify/Return/17623286028
+    if (!returnId) return res.status(400).json({ success: false, error: 'returnId required' });
+
+    const trackingNumber = (req.body?.trackingNumber || '').trim();
+    const carrierName = (req.body?.carrierName || '').trim();
+    const noShippingRequired = String(req.body?.noShippingRequired || '').toLowerCase() === 'true';
+
+    let url = null, mime = null, name = null;
+    if (req.file) {
+      url = `${config.issuer}/uploads/${encodeURIComponent(req.file.filename)}`;
+      mime = req.file.mimetype || null;
+      name = (req.body?.labelName || req.file.originalname || req.file.filename || 'retoure_label').toString();
+    }
+
+    const prev = returnShipping.get(returnId) || {};
+    const next = {
+      url: url || prev.url || null,
+      mime: mime || prev.mime || null,
+      name: name || prev.name || 'retoure_label',
+      trackingNumber: trackingNumber || prev.trackingNumber || null,
+      carrierName: carrierName || prev.carrierName || null,
+      noShippingRequired: !!noShippingRequired,
+      updatedAt: new Date().toISOString(),
+    };
+    returnShipping.set(returnId, next);
+    await persistReturnShipping();
+    res.json({ success: true, returnId, shipping: next });
+  } catch (e) {
+    console.error('❌ /returns/:id/shipping', e);
+    res.status(500).json({ success: false, error: 'Internal error' });
   }
 });
 
