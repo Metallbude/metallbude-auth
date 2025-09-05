@@ -14231,6 +14231,163 @@ app.post('/apply-store-credit', async (req, res) => {
   }
 });
 
+// ===== SHOPIFY RETURN SHIPPING DATA FETCH =====
+
+// Function to fetch return shipping labels and tracking from Shopify
+async function fetchShopifyReturnShipping(orderId) {
+  try {
+    console.log(`🔍 Fetching return shipping data for order: ${orderId}`);
+    
+    const query = `
+      query GetReturnLabelAndTracking($orderId: ID!, $first: Int = 10) {
+        node(id: $orderId) {
+          ... on Order {
+            id
+            name
+            email
+            returns(first: $first) {
+              nodes {
+                id
+                status
+                reverseFulfillmentOrders(first: $first) {
+                  nodes {
+                    id
+                    reverseDeliveries(first: $first) {
+                      nodes {
+                        id
+                        deliverable {
+                          __typename
+                          ... on ReverseDeliveryShippingDeliverable {
+                            label {
+                              publicFileUrl
+                              createdAt
+                              updatedAt
+                            }
+                            tracking {
+                              carrierName
+                              number
+                              url
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const variables = {
+      orderId: orderId.startsWith('gid://') ? orderId : `gid://shopify/Order/${orderId}`,
+      first: 10
+    };
+
+    const response = await axios.post(
+      config.adminApiUrl,
+      {
+        query: query,
+        variables: variables
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const data = response.data?.data?.node;
+    if (!data || !data.returns) {
+      console.log(`ℹ️ No return data found for order ${orderId}`);
+      return null;
+    }
+
+    // Extract shipping information from the response
+    const shippingData = {
+      orderId: data.id,
+      orderName: data.name,
+      customerEmail: data.email,
+      returns: []
+    };
+
+    data.returns.nodes.forEach(returnNode => {
+      const returnData = {
+        id: returnNode.id,
+        status: returnNode.status,
+        shippingLabels: [],
+        trackingInfo: []
+      };
+
+      returnNode.reverseFulfillmentOrders.nodes.forEach(rfo => {
+        rfo.reverseDeliveries.nodes.forEach(delivery => {
+          if (delivery.deliverable && delivery.deliverable.__typename === 'ReverseDeliveryShippingDeliverable') {
+            // Extract label information
+            if (delivery.deliverable.label) {
+              returnData.shippingLabels.push({
+                url: delivery.deliverable.label.publicFileUrl,
+                createdAt: delivery.deliverable.label.createdAt,
+                updatedAt: delivery.deliverable.label.updatedAt
+              });
+            }
+
+            // Extract tracking information
+            if (delivery.deliverable.tracking) {
+              returnData.trackingInfo.push({
+                carrierName: delivery.deliverable.tracking.carrierName,
+                trackingNumber: delivery.deliverable.tracking.number,
+                trackingUrl: delivery.deliverable.tracking.url
+              });
+            }
+          }
+        });
+      });
+
+      shippingData.returns.push(returnData);
+    });
+
+    console.log(`✅ Found shipping data for ${shippingData.returns.length} returns`);
+    return shippingData;
+
+  } catch (error) {
+    console.error('❌ Error fetching Shopify return shipping data:', error);
+    throw error;
+  }
+}
+
+// API endpoint to get return shipping data from Shopify
+app.get('/api/returns/:orderId/shipping', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    console.log(`📦 API: Fetching return shipping data for order: ${orderId}`);
+
+    const shippingData = await fetchShopifyReturnShipping(orderId);
+    
+    if (!shippingData) {
+      return res.status(404).json({
+        success: false,
+        error: 'No return shipping data found for this order'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: shippingData
+    });
+
+  } catch (error) {
+    console.error('❌ Error in return shipping API:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch return shipping data',
+      details: error.message
+    });
+  }
+});
+
 // ===== ADMIN SHIPPING UPLOAD INTERFACE =====
 
 // Serve admin shipping upload interface
