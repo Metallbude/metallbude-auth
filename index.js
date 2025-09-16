@@ -1091,6 +1091,197 @@ app.post('/store-credit/credit', async (req, res) => {
   }
 });
 
+// 🎁 APP DOWNLOAD PROMOTION: Gift 15€ store credit to new app users
+// Time-limited promotion: September 16, 2025 - October 5, 2025 23:59 Berlin time
+const APP_PROMOTION_FILE = path.join(__dirname, 'data', 'app_promotion_redeemed.json');
+
+// Track who has already redeemed the app download promotion
+const appPromotionRedeemed = new Map(); // email -> { redeemedAt, amount, transactionId }
+
+async function loadAppPromotionData() {
+  try {
+    const raw = await fs.readFile(APP_PROMOTION_FILE, 'utf8');
+    const entries = JSON.parse(raw);
+    appPromotionRedeemed.clear();
+    for (const [email, data] of entries) {
+      appPromotionRedeemed.set((email || '').toLowerCase(), data);
+    }
+    console.log(`🎁 Loaded ${appPromotionRedeemed.size} app promotion redemptions`);
+  } catch (e) {
+    console.log('🎁 No existing app promotion file found - starting fresh');
+  }
+}
+
+async function persistAppPromotionData() {
+  try {
+    const entries = Array.from(appPromotionRedeemed.entries());
+    await fs.mkdir(path.dirname(APP_PROMOTION_FILE), { recursive: true });
+    await fs.writeFile(APP_PROMOTION_FILE, JSON.stringify(entries), 'utf8');
+    console.log(`🎁 Persisted ${entries.length} app promotion redemptions`);
+  } catch (e) {
+    console.error('❌ Failed to persist app promotion data:', e?.message || e);
+  }
+}
+
+function isPromotionActive() {
+  const now = new Date();
+  const berlinTimezone = 'Europe/Berlin';
+  
+  // Start: September 16, 2025 00:00 Berlin time
+  const startDate = new Date('2025-09-16T00:00:00');
+  
+  // End: October 5, 2025 23:59 Berlin time
+  const endDate = new Date('2025-10-05T23:59:59');
+  
+  // Convert to Berlin timezone for accurate comparison
+  const nowBerlin = new Date(now.toLocaleString('en-US', { timeZone: berlinTimezone }));
+  const startBerlin = new Date(startDate.toLocaleString('en-US', { timeZone: berlinTimezone }));
+  const endBerlin = new Date(endDate.toLocaleString('en-US', { timeZone: berlinTimezone }));
+  
+  return nowBerlin >= startBerlin && nowBerlin <= endBerlin;
+}
+
+// POST /app-promotion/claim — Claim 15€ app download promotion
+app.post('/app-promotion/claim', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ success: false, error: 'email required' });
+
+    const emailLower = email.toLowerCase();
+
+    // Check if promotion is still active
+    if (!isPromotionActive()) {
+      return res.status(410).json({ 
+        success: false, 
+        error: 'Promotion expired',
+        message: 'Die App-Download-Aktion ist abgelaufen.'
+      });
+    }
+
+    // Check if already redeemed
+    if (appPromotionRedeemed.has(emailLower)) {
+      const redemption = appPromotionRedeemed.get(emailLower);
+      return res.status(409).json({ 
+        success: false, 
+        error: 'Already redeemed',
+        message: 'Sie haben das Guthaben bereits erhalten.',
+        redemption
+      });
+    }
+
+    // Find customer in Shopify
+    const data = await adminGraphQL(QUERY_CUSTOMER_BY_EMAIL, { query: `email:${email}` });
+    const node = data?.data?.customers?.edges?.[0]?.node;
+    if (!node?.id) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Customer not found',
+        message: 'Kein Kundenkonto gefunden. Bitte zuerst anmelden.'
+      });
+    }
+
+    const customerGid = node.id;
+    const promotionAmount = '15.00';
+
+    // Add 15€ store credit
+    const creditRes = await adminGraphQL(MUTATION_CREDIT, {
+      id: customerGid,
+      creditInput: { 
+        creditAmount: { amount: promotionAmount, currencyCode: 'EUR' }
+      }
+    });
+
+    const userErrors = creditRes?.data?.storeCreditAccountCredit?.userErrors || [];
+    if (userErrors.length) {
+      console.error('❌ Shopify credit error for app promotion:', userErrors);
+      return res.status(422).json({ 
+        success: false, 
+        error: 'Credit error', 
+        details: userErrors,
+        message: 'Fehler beim Hinzufügen des Guthabens. Bitte versuchen Sie es später erneut.'
+      });
+    }
+
+    // Get updated balance
+    const balRes = await adminGraphQL(QUERY_CUSTOMER_BALANCE, { id: customerGid });
+    const accounts = balRes?.data?.customer?.storeCreditAccounts?.edges || [];
+    const balances = accounts.map(e => e.node.balance);
+    const totalBalance = balances.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalBalanceStr = toMoneyString(totalBalance);
+
+    // Record redemption
+    const redemption = {
+      redeemedAt: new Date().toISOString(),
+      amount: promotionAmount,
+      transactionId: creditRes.data.storeCreditAccountCredit.storeCreditAccountTransaction?.id || null,
+      customerGid,
+      promotionType: 'app_download'
+    };
+
+    appPromotionRedeemed.set(emailLower, redemption);
+    await persistAppPromotionData();
+
+    // Update local ledger
+    setStoreCredit(emailLower, Number(totalBalanceStr));
+    await persistStoreCreditLedger();
+
+    console.log(`🎁 App promotion: granted 15€ to ${email}, new balance: ${totalBalanceStr}€`);
+
+    return res.json({
+      success: true,
+      message: '15€ Guthaben erfolgreich hinzugefügt!',
+      credited: promotionAmount,
+      newBalance: totalBalanceStr,
+      redemption
+    });
+
+  } catch (err) {
+    console.error('❌ /app-promotion/claim error:', err.message);
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Internal error', 
+      message: 'Ein Fehler ist aufgetreten. Bitte versuchen Sie es später erneut.',
+      details: err.message 
+    });
+  }
+});
+
+// GET /app-promotion/status?email=... — Check promotion status for a customer
+app.get('/app-promotion/status', async (req, res) => {
+  try {
+    const { email } = req.query || {};
+    if (!email) return res.status(400).json({ success: false, error: 'email required' });
+
+    const emailLower = email.toLowerCase();
+    const active = isPromotionActive();
+    const redeemed = appPromotionRedeemed.has(emailLower);
+    const redemption = redeemed ? appPromotionRedeemed.get(emailLower) : null;
+
+    return res.json({
+      success: true,
+      active,
+      redeemed,
+      redemption,
+      promotionAmount: '15.00',
+      promotionCurrency: 'EUR',
+      endDate: '2025-10-05T23:59:59',
+      timeZone: 'Europe/Berlin'
+    });
+
+  } catch (err) {
+    console.error('❌ /app-promotion/status error:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal error', details: err.message });
+  }
+});
+
+// Load app promotion data on startup
+loadAppPromotionData().catch((e) => console.warn('Could not load app promotion data at startup', e));
+
+// Persist app promotion data periodically (every 60s)
+setInterval(() => {
+  persistAppPromotionData().catch(() => {});
+}, 60 * 1000);
+
 // GET /store-credit/balance?email=... or ?customerId=...
 app.get('/store-credit/balance', async (req, res) => {
   try {
