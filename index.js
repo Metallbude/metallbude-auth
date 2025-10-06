@@ -3649,6 +3649,43 @@ app.post('/reviews/debug/test-picture-urls', async (req, res) => {
   }
 });
 
+// Generate a WebView URL to the product page anchored to Judge.me reviews
+// GET /reviews/webview-url?product_id=gid_or_numeric
+app.get('/reviews/webview-url', async (req, res) => {
+  try {
+    const productIdRaw = req.query.product_id;
+    if (!productIdRaw) return res.status(400).json({ success: false, error: 'product_id is required' });
+
+    if (!config.adminToken) {
+      // Fallback: build a generic URL using configured shop domain
+      const handleFallback = productIdRaw; // not ideal; caller should provide a handle if no admin token
+      const url = `https://${config.shopDomain}/products/${handleFallback}#judgeme_product_reviews`;
+      return res.json({ success: true, url, note: 'Used fallback URL pattern (no admin token available)' });
+    }
+
+    // Normalize to GID if numeric
+    const gid = String(productIdRaw).startsWith('gid://')
+      ? String(productIdRaw)
+      : `gid://shopify/Product/${String(productIdRaw)}`;
+
+    const QUERY = `
+      query GetProductUrl($id: ID!) {
+        product(id: $id) { id handle onlineStoreUrl }
+      }
+    `;
+    const data = await adminGraphQL(QUERY, { id: gid });
+    const prod = data?.data?.product;
+    if (!prod) return res.status(404).json({ success: false, error: 'Product not found' });
+
+    const base = prod.onlineStoreUrl || `https://${config.shopDomain}/products/${prod.handle}`;
+    const url = `${base}#judgeme_product_reviews`;
+    return res.json({ success: true, url });
+  } catch (e) {
+    const err = e?.response?.data || e?.message || String(e);
+    return res.status(500).json({ success: false, error: 'Failed to build webview URL', details: err });
+  }
+});
+
 // POST /reviews/:reviewId/moderate - Moderate review via Judge.me API
 app.post('/reviews/:reviewId/moderate', async (req, res) => {
   try {
