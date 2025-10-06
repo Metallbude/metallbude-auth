@@ -3335,121 +3335,52 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       req.body?.photos || req.body?.pictures || req.body?.images
     ).filter((u) => typeof u === 'string' && u.startsWith('data:'));
 
-    // Prefer multipart with files or data URLs converted to files
+    // Host files (and base64 images) locally and send JSON picture_urls to Judge.me
+    let hostedUrls = [];
     if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
-  const form = new FormDataLib();
-  form.append('api_token', judgemeToken);
-  form.append('shop_domain', shopDomain);
-  form.append('platform', 'shopify');
-  // Provide both variants that Judge.me may accept
-  form.append('id', String(product_id));
-  form.append('product_id', String(product_id));
-  form.append('email', String(customer_email));
-  form.append('name', String(customer_name));
-  form.append('rating', String(rating));
-  form.append('title', String(title));
-  form.append('body', String(body));
-  // Duplicate as nested review[...] keys as used by their web form
-  form.append('review[id]', String(product_id));
-  form.append('review[email]', String(customer_email));
-  form.append('review[name]', String(customer_name));
-  form.append('review[rating]', String(rating));
-  form.append('review[title]', String(title));
-  form.append('review[body]', String(body));
-
-      // Append uploaded files
-      (fileFields || []).forEach((f, idx) => {
-        const filename = f.originalname || `photo_${idx + 1}.jpg`;
-        form.append('pictures[]', f.buffer, {
-          filename,
-          contentType: f.mimetype || 'image/jpeg',
-        });
-        // Also append under nested review[pictures][]
-        form.append('review[pictures][]', f.buffer, {
-          filename,
-          contentType: f.mimetype || 'image/jpeg',
-        });
-      });
-
-      // Append data URLs as files
-      (dataUrlCandidates || []).forEach((uri, idx) => {
-        const m = uri.match(/^data:(.+?);base64,(.+)$/);
-        if (!m) return;
-        const mime = m[1] || 'image/jpeg';
-        try {
-          const buf = Buffer.from(m[2], 'base64');
-          const ext = mime.includes('png')
-            ? 'png'
-            : mime.includes('webp')
-            ? 'webp'
-            : mime.includes('heic')
-            ? 'heic'
-            : 'jpg';
-          form.append('pictures[]', buf, {
-            filename: `photo_inline_${idx + 1}.${ext}`,
-            contentType: mime,
-          });
-          form.append('review[pictures][]', buf, {
-            filename: `photo_inline_${idx + 1}.${ext}`,
-            contentType: mime,
-          });
-        } catch (_) {}
-      });
-
-      console.log(
-        `🖼️ Forwarding review as multipart: files=${fileFields?.length || 0}, dataUrls=${
-          (dataUrlCandidates || []).length
-        }`
-      );
-      let response;
-      if (hasFormDataGetHeaders && typeof form.getHeaders === 'function') {
-        response = await axios.post('https://judge.me/api/v1/reviews.json', form, {
-          headers: { ...form.getHeaders(), Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
-          maxContentLength: Infinity,
-          maxBodyLength: Infinity,
-        });
-      } else {
-        // Fall back to fetch if form-data is not available in this runtime
-        const fetch = global.fetch || (await import('node-fetch')).default;
-        const r = await fetch('https://judge.me/api/v1/reviews.json', {
-          method: 'POST',
-          body: form,
-          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
-        });
-        const data = await r.json();
-        response = { data, status: r.status };
+      await ensureUploadsDir();
+      const makeName = (ext) => `review_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
+      // Save uploaded files
+      for (let i = 0; i < (fileFields || []).length; i++) {
+        const f = fileFields[i];
+        const mime = (f.mimetype || '').toLowerCase();
+        const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
+        const filename = makeName(ext);
+        await fs.writeFile(path.join(UPLOADS_DIR, filename), f.buffer);
+        hostedUrls.push(`${config.issuer}/uploads/${filename}`);
       }
-
-      console.log(
-        `✅ Review submitted (multipart) for product ${product_id} by ${customer_email}, pictures=${
-          response.data?.review?.pictures?.length || 0
-        }`
-      );
-      return res.json({
-        success: true,
-        message: 'Review submitted successfully',
-        review_id: response.data.review?.id,
-        echoed_pictures_count: response.data?.review?.pictures?.length || 0,
-      });
+      // Save base64 data URLs
+      for (let i = 0; i < (dataUrlCandidates || []).length; i++) {
+        const uri = dataUrlCandidates[i];
+        const m = uri.match(/^data:(.+?);base64,(.+)$/);
+        if (!m) continue;
+        const mime = (m[1] || 'image/jpeg').toLowerCase();
+        const buf = Buffer.from(m[2], 'base64');
+        const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
+        const filename = makeName(ext);
+        await fs.writeFile(path.join(UPLOADS_DIR, filename), buf);
+        hostedUrls.push(`${config.issuer}/uploads/${filename}`);
+      }
+      console.log(`🖼️ Stored ${hostedUrls.length} review image(s) locally for Judge.me ingestion`);
     }
 
-    // Fallback: JSON with picture_urls (requires public URLs)
+    // JSON with picture_urls (Judge.me documented way)
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
-      platform: 'general',
+      platform: 'shopify',
       id: product_id,
       email: customer_email,
       name: customer_name,
       rating: rating,
       title: title,
       body: body,
-      picture_urls: image_urls.join(','),
+      picture_urls: [...hostedUrls, ...image_urls].join(','),
     };
 
-    console.log(`📝 Forwarding review as JSON with picture_urls count=${image_urls.length}`);
+    console.log(`📝 Forwarding review as JSON with picture_urls=${reviewData.picture_urls ? reviewData.picture_urls.split(',').length : 0}`);
     const response = await axios.post('https://judge.me/api/v1/reviews.json', reviewData, {
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     });
 
     console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
