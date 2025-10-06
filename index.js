@@ -57,6 +57,8 @@ try {
 
 // Initialize Express app
 const app = express();
+// Trust reverse proxy (so req.protocol and X-Forwarded-Proto are honored)
+app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
 
 // Security middleware - Add security headers
@@ -3340,6 +3342,9 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
       await ensureUploadsDir();
       const makeName = (ext) => `review_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
+      const baseUrl = (process.env.SERVER_URL && process.env.SERVER_URL.startsWith('http'))
+        ? process.env.SERVER_URL.replace(/\/$/, '')
+        : `${req.protocol}://${req.get('host')}`;
       // Save uploaded files
       for (let i = 0; i < (fileFields || []).length; i++) {
         const f = fileFields[i];
@@ -3347,7 +3352,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
         const filename = makeName(ext);
         await fs.writeFile(path.join(UPLOADS_DIR, filename), f.buffer);
-        hostedUrls.push(`${config.issuer}/uploads/${filename}`);
+        hostedUrls.push(`${baseUrl}/uploads/${filename}`);
       }
       // Save base64 data URLs
       for (let i = 0; i < (dataUrlCandidates || []).length; i++) {
@@ -3359,7 +3364,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
         const filename = makeName(ext);
         await fs.writeFile(path.join(UPLOADS_DIR, filename), buf);
-        hostedUrls.push(`${config.issuer}/uploads/${filename}`);
+        hostedUrls.push(`${baseUrl}/uploads/${filename}`);
       }
       console.log(`🖼️ Stored ${hostedUrls.length} review image(s) locally for Judge.me ingestion`);
     }
@@ -3401,6 +3406,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       message: 'Review submitted successfully',
       review_id: response.data.review?.id,
       echoed_pictures_count: response.data?.review?.pictures?.length || 0,
+      picture_urls_sent: pictureUrlsStr,
     });
   } catch (error) {
     const errBody =
