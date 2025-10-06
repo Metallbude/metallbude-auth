@@ -3339,53 +3339,55 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
 
     // Prefer STRICT MULTIPART forward to Judge.me when files or data URLs are present
     if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
-      const url = 'https://judge.me/api/v1/reviews.json';
+      // Save incoming images to /uploads and send picture_urls to Judge.me
+      await ensureUploadsDir();
       const intRating = Math.max(1, Math.min(5, parseInt(String(rating), 10) || 0));
-      const form = new FormDataLib();
-      form.append('api_token', judgemeToken);
-      form.append('shop_domain', shopDomain);
-      form.append('platform', 'shopify');
-      form.append('id', String(product_id));
-      form.append('email', String(customer_email));
-      form.append('name', String(customer_name));
-      form.append('rating', String(intRating));
-      form.append('title', String(title));
-      form.append('body', String(body));
+      const makeName = (ext) => `review_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
+      const baseUrl = (process.env.SERVER_URL && process.env.SERVER_URL.startsWith('http'))
+        ? process.env.SERVER_URL.replace(/\/$/, '')
+        : `${req.protocol}://${req.get('host')}`;
 
-      (fileFields || []).forEach((file, idx) => {
-        const filename = file.originalname || `photo_${idx + 1}.jpg`;
-        const contentType = file.mimetype || 'image/jpeg';
-        form.append('pictures[]', file.buffer, { filename, contentType });
-      });
-      (dataUrlCandidates || []).forEach((uri, idx) => {
+      const hostedUrls = [];
+      // Save uploaded files
+      for (let i = 0; i < (fileFields || []).length; i++) {
+        const f = fileFields[i];
+        const mime = (f.mimetype || '').toLowerCase();
+        const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
+        const filename = makeName(ext);
+        await fs.writeFile(path.join(UPLOADS_DIR, filename), f.buffer);
+        hostedUrls.push(`${baseUrl}/uploads/${filename}`);
+      }
+      // Save base64 data URLs
+      for (let i = 0; i < (dataUrlCandidates || []).length; i++) {
+        const uri = dataUrlCandidates[i];
         const m = uri.match(/^data:(.+?);base64,(.+)$/);
-        if (!m) return;
-        const mime = m[1] || 'image/jpeg';
-        try {
-          const buf = Buffer.from(m[2], 'base64');
-          const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
-          const filename = `photo_inline_${idx + 1}.${ext}`;
-          form.append('pictures[]', buf, { filename, contentType: mime });
-        } catch (_) {}
-      });
-
-      console.log(`🖼️ Forwarding review as STRICT multipart (minimal): files=${fileFields?.length || 0}, dataUrls=${(dataUrlCandidates||[]).length}, shop_domain=${shopDomain}, rating=${intRating}`);
-      let response;
-      if (typeof form.getHeaders === 'function') {
-        response = await axios.post(url, form, {
-          headers: { ...form.getHeaders(), Accept: 'application/json', 'User-Agent': 'MetallbudeApp/1.0' },
-          maxContentLength: Infinity,
-          maxBodyLength: Infinity,
-        });
-      } else {
-        const fetch = global.fetch || (await import('node-fetch')).default;
-        const r = await fetch(url, { method: 'POST', body: form, headers: { Accept: 'application/json', 'User-Agent': 'MetallbudeApp/1.0' } });
-        const data = await r.json();
-        response = { data, status: r.status };
+        if (!m) continue;
+        const mime = (m[1] || 'image/jpeg').toLowerCase();
+        const buf = Buffer.from(m[2], 'base64');
+        const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
+        const filename = makeName(ext);
+        await fs.writeFile(path.join(UPLOADS_DIR, filename), buf);
+        hostedUrls.push(`${baseUrl}/uploads/${filename}`);
       }
 
-      try { console.log('🧾 Judge.me multipart response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
-      return res.json({ success: true, message: 'Review submitted successfully (multipart)', review_id: response.data?.review?.id, echoed_pictures_count: response.data?.review?.pictures?.length || 0 });
+      console.log(`🖼️ Stored ${hostedUrls.length} review image(s) locally; building picture_urls for Judge.me`);
+      const payload = {
+        api_token: judgemeToken,
+        shop_domain: shopDomain,
+        platform: 'general',
+        id: product_id,
+        email: customer_email,
+        name: customer_name,
+        rating: intRating,
+        title: title,
+        body: body,
+        picture_urls: hostedUrls.join(','),
+      };
+      const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      });
+      try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
+      return res.json({ success: true, message: 'Review submitted (picture_urls)', review_id: response.data?.review?.id, picture_urls_sent: payload.picture_urls });
     }
 
     // JSON fallback with picture_urls only if client provided URLs
@@ -3394,29 +3396,19 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
-      platform: 'shopify',
+      platform: 'general',
       id: product_id,
-      product_id: product_id,
       email: customer_email,
       name: customer_name,
       rating: intRating,
       title: title,
       body: body,
       picture_urls: pictureUrlsStr,
-      review: {
-        id: product_id,
-        email: customer_email,
-        name: customer_name,
-        rating: intRating,
-        title: title,
-        body: body,
-        picture_urls: pictureUrlsStr,
-      }
     };
 
     console.log(`📝 Forwarding review as JSON with picture_urls=${reviewData.picture_urls ? reviewData.picture_urls.split(',').length : 0}`);
     const response = await axios.post('https://judge.me/api/v1/reviews.json', reviewData, {
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     });
 
     console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
