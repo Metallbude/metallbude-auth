@@ -3339,103 +3339,57 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
 
     // Prefer STRICT MULTIPART forward to Judge.me when files or data URLs are present
     if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
-      const endpoints = [
-        'https://judge.me/api/v1/reviews',
-        'https://judge.me/api/v1/reviews.json',
-        'https://judge.me/reviews'
-      ];
-      const platforms = ['shopify', 'general'];
+      const url = 'https://judge.me/api/v1/reviews.json';
+      const intRating = Math.max(1, Math.min(5, parseInt(String(rating), 10) || 0));
+      const form = new FormDataLib();
+      form.append('api_token', judgemeToken);
+      form.append('shop_domain', shopDomain);
+      form.append('platform', 'shopify');
+      form.append('id', String(product_id));
+      form.append('email', String(customer_email));
+      form.append('name', String(customer_name));
+      form.append('rating', String(intRating));
+      form.append('title', String(title));
+      form.append('body', String(body));
 
-      const buildForm = (platform) => {
-        const f = new FormDataLib();
-        f.append('api_token', judgemeToken);
-        f.append('shop_domain', shopDomain);
-        f.append('platform', platform);
-        f.append('id', String(product_id));
-        f.append('product_id', String(product_id));
-        f.append('review[product_id]', String(product_id));
-        f.append('email', String(customer_email));
-        f.append('name', String(customer_name));
-        f.append('rating', String(rating));
-        f.append('title', String(title));
-        f.append('body', String(body));
-        f.append('review[email]', String(customer_email));
-        f.append('review[name]', String(customer_name));
-        f.append('review[rating]', String(rating));
-        f.append('review[title]', String(title));
-        f.append('review[body]', String(body));
+      (fileFields || []).forEach((file, idx) => {
+        const filename = file.originalname || `photo_${idx + 1}.jpg`;
+        const contentType = file.mimetype || 'image/jpeg';
+        form.append('pictures[]', file.buffer, { filename, contentType });
+      });
+      (dataUrlCandidates || []).forEach((uri, idx) => {
+        const m = uri.match(/^data:(.+?);base64,(.+)$/);
+        if (!m) return;
+        const mime = m[1] || 'image/jpeg';
+        try {
+          const buf = Buffer.from(m[2], 'base64');
+          const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
+          const filename = `photo_inline_${idx + 1}.${ext}`;
+          form.append('pictures[]', buf, { filename, contentType: mime });
+        } catch (_) {}
+      });
 
-        (fileFields || []).forEach((file, idx) => {
-          const filename = file.originalname || `photo_${idx + 1}.jpg`;
-          const contentType = file.mimetype || 'image/jpeg';
-          f.append('pictures[]', file.buffer, { filename, contentType });
-          f.append('review[pictures][]', file.buffer, { filename, contentType });
-          f.append('review[pictures_attributes][][image]', file.buffer, { filename, contentType });
+      console.log(`🖼️ Forwarding review as STRICT multipart (minimal): files=${fileFields?.length || 0}, dataUrls=${(dataUrlCandidates||[]).length}, shop_domain=${shopDomain}, rating=${intRating}`);
+      let response;
+      if (typeof form.getHeaders === 'function') {
+        response = await axios.post(url, form, {
+          headers: { ...form.getHeaders(), Accept: 'application/json', 'User-Agent': 'MetallbudeApp/1.0' },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
         });
-        (dataUrlCandidates || []).forEach((uri, idx) => {
-          const m = uri.match(/^data:(.+?);base64,(.+)$/);
-          if (!m) return;
-          const mime = m[1] || 'image/jpeg';
-          try {
-            const buf = Buffer.from(m[2], 'base64');
-            const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
-            const filename = `photo_inline_${idx + 1}.${ext}`;
-            f.append('pictures[]', buf, { filename, contentType: mime });
-            f.append('review[pictures][]', buf, { filename, contentType: mime });
-            f.append('review[pictures_attributes][][image]', buf, { filename, contentType: mime });
-          } catch (_) {}
-        });
-        return f;
-      };
-
-      console.log(`🖼️ Forwarding review as STRICT multipart: files=${fileFields?.length || 0}, dataUrls=${(dataUrlCandidates||[]).length}, shop_domain=${shopDomain}`);
-      let lastErr;
-      for (const platform of platforms) {
-        for (const url of endpoints) {
-          try {
-            const form = buildForm(platform);
-            if (typeof form.getHeaders === 'function') {
-              const resp = await axios.post(url, form, {
-                headers: { ...form.getHeaders(), Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
-                maxContentLength: Infinity,
-                maxBodyLength: Infinity,
-                validateStatus: () => true,
-              });
-              const ctype = resp.headers?.['content-type'] || '';
-              console.log(`🛰️ Attempt ${url} [${platform}] -> status=${resp.status} ctype=${ctype}`);
-              if (resp.status >= 200 && resp.status < 300 && ctype.includes('application/json')) {
-                try { console.log('🧾 Judge.me multipart response (trimmed):', JSON.stringify(resp.data).slice(0, 400)); } catch (_) {}
-                return res.json({ success: true, message: 'Review submitted successfully (multipart)', review_id: resp.data?.review?.id, echoed_pictures_count: resp.data?.review?.pictures?.length || 0 });
-              } else {
-                const snippet = typeof resp.data === 'string' ? resp.data.slice(0, 200) : JSON.stringify(resp.data || {}).slice(0, 200);
-                console.warn(`⚠️ Multipart attempt failed: ${url} [${platform}] -> ${resp.status} body=${snippet}`);
-                lastErr = snippet;
-              }
-            } else {
-              const fetch = global.fetch || (await import('node-fetch')).default;
-              const r = await fetch(url, { method: 'POST', body: form, headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' } });
-              const ctype = r.headers.get('content-type') || '';
-              console.log(`🛰️ Attempt ${url} [${platform}] -> status=${r.status} ctype=${ctype}`);
-              const data = ctype.includes('application/json') ? await r.json() : await r.text();
-              if (r.ok && typeof data === 'object') {
-                try { console.log('🧾 Judge.me multipart response (trimmed):', JSON.stringify(data).slice(0, 400)); } catch (_) {}
-                return res.json({ success: true, message: 'Review submitted successfully (multipart)', review_id: data?.review?.id, echoed_pictures_count: data?.review?.pictures?.length || 0 });
-              } else {
-                const snippet = typeof data === 'string' ? data.slice(0, 200) : JSON.stringify(data || {}).slice(0, 200);
-                console.warn(`⚠️ Multipart attempt failed: ${url} [${platform}] -> ${r.status} body=${snippet}`);
-                lastErr = snippet;
-              }
-            }
-          } catch (e) {
-            console.warn(`❌ Multipart attempt error for ${url} [${platform}]:`, e?.message || e);
-            lastErr = e?.message || String(e);
-          }
-        }
+      } else {
+        const fetch = global.fetch || (await import('node-fetch')).default;
+        const r = await fetch(url, { method: 'POST', body: form, headers: { Accept: 'application/json', 'User-Agent': 'MetallbudeApp/1.0' } });
+        const data = await r.json();
+        response = { data, status: r.status };
       }
-      return res.status(500).json({ success: false, error: 'Failed to submit review (multipart attempts)', details: lastErr || 'Unknown error' });
+
+      try { console.log('🧾 Judge.me multipart response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
+      return res.json({ success: true, message: 'Review submitted successfully (multipart)', review_id: response.data?.review?.id, echoed_pictures_count: response.data?.review?.pictures?.length || 0 });
     }
 
     // JSON fallback with picture_urls only if client provided URLs
+    const intRating = Math.max(1, Math.min(5, parseInt(String(rating), 10) || 0));
     const pictureUrlsStr = image_urls.join(',');
     const reviewData = {
       api_token: judgemeToken,
@@ -3445,7 +3399,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       product_id: product_id,
       email: customer_email,
       name: customer_name,
-      rating: rating,
+      rating: intRating,
       title: title,
       body: body,
       picture_urls: pictureUrlsStr,
@@ -3453,7 +3407,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         id: product_id,
         email: customer_email,
         name: customer_name,
-        rating: rating,
+        rating: intRating,
         title: title,
         body: body,
         picture_urls: pictureUrlsStr,
