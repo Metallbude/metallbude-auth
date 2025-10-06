@@ -3188,7 +3188,10 @@ app.get('/reviews', async (req, res) => {
       params.email = email;
     }
 
-    const response = await axios.get('https://judge.me/api/v1/reviews', { params });
+    const response = await axios.get('https://judge.me/api/v1/reviews.json', { 
+      params,
+      headers: { Accept: 'application/json' }
+    });
 
     res.json({
       success: true,
@@ -3202,11 +3205,14 @@ app.get('/reviews', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Reviews fetch error:', error.response?.data || error.message);
+    const errBody = typeof error?.response?.data === 'string' 
+      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
+      : (error?.response?.data || error.message);
+    console.error('❌ Reviews fetch error:', errBody);
     res.status(500).json({ 
       success: false, 
       error: 'Failed to fetch reviews',
-      details: error.response?.data || error.message
+      details: errBody
     });
   }
 });
@@ -3227,13 +3233,14 @@ app.get('/reviews/stats', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    const response = await axios.get('https://judge.me/api/v1/reviews', {
+    const response = await axios.get('https://judge.me/api/v1/reviews.json', {
       params: {
         api_token: judgemeToken,
         shop_domain: shopDomain,
         product_id: product,
         per_page: 1  // Just get stats, not all reviews
-      }
+      },
+      headers: { Accept: 'application/json' }
     });
 
     res.json({
@@ -3246,11 +3253,14 @@ app.get('/reviews/stats', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Review stats error:', error.response?.data || error.message);
+    const errBody = typeof error?.response?.data === 'string' 
+      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
+      : (error?.response?.data || error.message);
+    console.error('❌ Review stats error:', errBody);
     res.status(500).json({ 
       success: false, 
       error: 'Failed to fetch review stats',
-      details: error.response?.data || error.message
+      details: errBody
     });
   }
 });
@@ -3295,7 +3305,9 @@ app.post('/reviews/submit', async (req, res) => {
       picture_urls: image_urls.join(',')
     };
 
-    const response = await axios.post('https://judge.me/api/v1/reviews', reviewData);
+    const response = await axios.post('https://judge.me/api/v1/reviews.json', reviewData, {
+      headers: { Accept: 'application/json' }
+    });
 
     console.log(`✅ Review submitted for product ${product_id} by ${customer_email}`);
     res.json({ 
@@ -3305,11 +3317,14 @@ app.post('/reviews/submit', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Review submission error:', error.response?.data || error.message);
+    const errBody = typeof error?.response?.data === 'string' 
+      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
+      : (error?.response?.data || error.message);
+    console.error('❌ Review submission error:', errBody);
     res.status(500).json({ 
       success: false, 
       error: 'Failed to submit review',
-      details: error.response?.data || error.message
+      details: errBody
     });
   }
 });
@@ -3334,81 +3349,62 @@ app.delete('/reviews/:reviewId', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    console.log(`📝 Backend: Attempting to delete review ${reviewId}`);
+    console.log(`📝 Backend: Attempting to hide (delete) review ${reviewId} via curated=spam`);
 
-    // Try Judge.me's delete endpoint first
+    // Primary: Use Judge.me curation via PUT reviews/:id.json { curated: 'spam' }
     try {
-      const deleteResponse = await axios.delete(`https://judge.me/api/v1/reviews/${reviewId}`, {
-        params: {
+      const putResponse = await axios.put(
+        `https://judge.me/api/v1/reviews/${reviewId}.json`,
+        {
           api_token: judgemeToken,
-          shop_domain: shopDomain
-        }
-      });
-
-      console.log(`📝 Backend: Delete response status: ${deleteResponse.status}`);
-      console.log(`📝 Backend: Delete response data:`, deleteResponse.data);
-
-      res.json({ 
-        success: true, 
-        message: 'Review deleted successfully',
-        method: 'delete'
-      });
-      return;
-    } catch (deleteError) {
-      console.log(`📝 Backend: Delete failed, trying hide method. Error:`, deleteError.response?.data || deleteError.message);
+          shop_domain: shopDomain,
+          curated: 'spam'
+        },
+        { headers: { Accept: 'application/json' } }
+      );
+      console.log(`📝 Backend: PUT curated=spam status: ${putResponse.status}`);
+      return res.json({ success: true, message: 'Review hidden (curated=spam)', method: 'put_curated', data: putResponse.data });
+    } catch (putErr) {
+      const body = typeof putErr?.response?.data === 'string' ? putErr.response.data.slice(0, 400) + '…' : (putErr?.response?.data || putErr.message);
+      console.log('📝 Backend: PUT curated failed, trying fallbacks. Error:', body);
     }
 
-    // If delete fails, try hide endpoint
+    // Fallback 1: legacy hide endpoint (if available)
     try {
-      const hideResponse = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/hide`, {
-        api_token: judgemeToken,
-        shop_domain: shopDomain,
-        reason: 'duplicated_review'
-      });
-
-      console.log(`📝 Backend: Hide response status: ${hideResponse.status}`);
-      console.log(`📝 Backend: Hide response data:`, hideResponse.data);
-
-      res.json({ 
-        success: true, 
-        message: 'Review hidden successfully',
-        method: 'hide'
-      });
-      return;
-    } catch (hideError) {
-      console.log(`📝 Backend: Hide failed, trying moderate method. Error:`, hideError.response?.data || hideError.message);
+      const hideResponse = await axios.post(
+        `https://judge.me/api/v1/reviews/${reviewId}/hide.json`,
+        { api_token: judgemeToken, shop_domain: shopDomain, reason: 'duplicated_review' },
+        { headers: { Accept: 'application/json' } }
+      );
+      console.log(`📝 Backend: Legacy hide status: ${hideResponse.status}`);
+      return res.json({ success: true, message: 'Review hidden (legacy hide)', method: 'legacy_hide', data: hideResponse.data });
+    } catch (hideErr) {
+      const body = typeof hideErr?.response?.data === 'string' ? hideErr.response.data.slice(0, 400) + '…' : (hideErr?.response?.data || hideErr.message);
+      console.log('📝 Backend: Legacy hide failed, trying moderate. Error:', body);
     }
 
-    // Last resort: try moderate endpoint
+    // Fallback 2: moderate endpoint
     try {
-      const moderateResponse = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/moderate`, {
-        api_token: judgemeToken,
-        shop_domain: shopDomain,
-        action: 'hide',
-        reason: 'duplicated_review'
-      });
-
-      console.log(`📝 Backend: Moderate response status: ${moderateResponse.status}`);
-      console.log(`📝 Backend: Moderate response data:`, moderateResponse.data);
-
-      res.json({ 
-        success: true, 
-        message: 'Review moderated successfully',
-        method: 'moderate'
-      });
-      return;
-    } catch (moderateError) {
-      console.log(`📝 Backend: All methods failed. Moderate error:`, moderateError.response?.data || moderateError.message);
+      const moderateResponse = await axios.post(
+        `https://judge.me/api/v1/reviews/${reviewId}/moderate.json`,
+        { api_token: judgemeToken, shop_domain: shopDomain, action: 'hide', reason: 'duplicated_review' },
+        { headers: { Accept: 'application/json' } }
+      );
+      console.log(`📝 Backend: Moderate status: ${moderateResponse.status}`);
+      return res.json({ success: true, message: 'Review moderated', method: 'moderate', data: moderateResponse.data });
+    } catch (moderateErr) {
+      const body = typeof moderateErr?.response?.data === 'string' ? moderateErr.response.data.slice(0, 400) + '…' : (moderateErr?.response?.data || moderateErr.message);
+      console.log('📝 Backend: All methods failed. Moderate error:', body);
     }
 
     // If all methods fail
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to hide review using all available methods'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to hide review using all available methods' });
 
   } catch (error) {
-    console.error('❌ Review deletion error:', error.response?.data || error.message);
+    const errBody = typeof error?.response?.data === 'string' 
+      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
+      : (error?.response?.data || error.message);
+    console.error('❌ Review deletion error:', errBody);
     res.status(500).json({ 
       success: false, 
       error: 'Failed to delete review' 
@@ -3437,29 +3433,61 @@ app.post('/reviews/:reviewId/hide', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    console.log(`📝 Backend: Attempting to hide review ${reviewId} with reason: ${reason}`);
+    console.log(`📝 Backend: Attempting to hide review ${reviewId} with reason: ${reason} via curated=spam`);
 
-    const response = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/hide`, {
-      api_token: judgemeToken,
-      shop_domain: shopDomain,
-      reason: reason
-    });
+    // Primary: PUT curated=spam
+    try {
+      const response = await axios.put(
+        `https://judge.me/api/v1/reviews/${reviewId}.json`,
+        { api_token: judgemeToken, shop_domain: shopDomain, curated: 'spam' },
+        { headers: { Accept: 'application/json' } }
+      );
+      console.log(`📝 Backend: Hide (PUT curated) status: ${response.status}`);
+      return res.json({ success: true, message: 'Review hidden (curated=spam)', data: response.data, method: 'put_curated' });
+    } catch (putErr) {
+      const body = typeof putErr?.response?.data === 'string' ? putErr.response.data.slice(0, 400) + '…' : (putErr?.response?.data || putErr.message);
+      console.log('📝 Backend: PUT curated failed, trying legacy hide:', body);
+    }
 
-    console.log(`📝 Backend: Hide response status: ${response.status}`);
-    console.log(`📝 Backend: Hide response data:`, response.data);
+    // Fallback: legacy hide endpoint
+    try {
+      const response = await axios.post(
+        `https://judge.me/api/v1/reviews/${reviewId}/hide.json`,
+        { api_token: judgemeToken, shop_domain: shopDomain, reason },
+        { headers: { Accept: 'application/json' } }
+      );
+      console.log(`📝 Backend: Legacy hide status: ${response.status}`);
+      return res.json({ success: true, message: 'Review hidden (legacy hide)', data: response.data, method: 'legacy_hide' });
+    } catch (hideErr) {
+      const body = typeof hideErr?.response?.data === 'string' ? hideErr.response.data.slice(0, 400) + '…' : (hideErr?.response?.data || hideErr.message);
+      console.log('📝 Backend: Legacy hide failed, trying moderate:', body);
+    }
 
-    res.json({ 
-      success: true, 
-      message: 'Review hidden successfully',
-      data: response.data
-    });
+    // Fallback 2: moderate endpoint
+    try {
+      const response = await axios.post(
+        `https://judge.me/api/v1/reviews/${reviewId}/moderate.json`,
+        { api_token: judgemeToken, shop_domain: shopDomain, action: 'hide', reason },
+        { headers: { Accept: 'application/json' } }
+      );
+      console.log(`📝 Backend: Moderate status: ${response.status}`);
+      return res.json({ success: true, message: 'Review moderated', data: response.data, method: 'moderate' });
+    } catch (moderateErr) {
+      const body = typeof moderateErr?.response?.data === 'string' ? moderateErr.response.data.slice(0, 400) + '…' : (moderateErr?.response?.data || moderateErr.message);
+      console.log('📝 Backend: All hide methods failed:', body);
+    }
+
+    return res.status(500).json({ success: false, error: 'Failed to hide review' });
 
   } catch (error) {
-    console.error('❌ Review hide error:', error.response?.data || error.message);
+    const errBody = typeof error?.response?.data === 'string' 
+      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
+      : (error?.response?.data || error.message);
+    console.error('❌ Review hide error:', errBody);
     res.status(500).json({ 
       success: false, 
       error: 'Failed to hide review',
-      details: error.response?.data || error.message
+      details: errBody
     });
   }
 });
@@ -3485,30 +3513,43 @@ app.post('/reviews/:reviewId/moderate', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    console.log(`📝 Backend: Attempting to moderate review ${reviewId} with action: ${action}, reason: ${reason}`);
+    console.log(`📝 Backend: Attempting to moderate review ${reviewId} (preferring curated=spam)`);
 
-    const response = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/moderate`, {
-      api_token: judgemeToken,
-      shop_domain: shopDomain,
-      action: action,
-      reason: reason
-    });
+    // Prefer PUT curated when action implies hiding
+    if ((action || 'hide').toLowerCase() === 'hide') {
+      try {
+        const response = await axios.put(
+          `https://judge.me/api/v1/reviews/${reviewId}.json`,
+          { api_token: judgemeToken, shop_domain: shopDomain, curated: 'spam' },
+          { headers: { Accept: 'application/json' } }
+        );
+        console.log(`📝 Backend: Moderate via PUT curated status: ${response.status}`);
+        return res.json({ success: true, message: 'Review hidden (moderate via curated)', data: response.data, method: 'put_curated' });
+      } catch (putErr) {
+        const body = typeof putErr?.response?.data === 'string' ? putErr.response.data.slice(0, 400) + '…' : (putErr?.response?.data || putErr.message);
+        console.log('📝 Backend: PUT curated (moderate) failed, trying direct moderate:', body);
+      }
+    }
+
+    // Fallback to direct moderate endpoint
+    const response = await axios.post(
+      `https://judge.me/api/v1/reviews/${reviewId}/moderate.json`,
+      { api_token: judgemeToken, shop_domain: shopDomain, action, reason },
+      { headers: { Accept: 'application/json' } }
+    );
 
     console.log(`📝 Backend: Moderate response status: ${response.status}`);
-    console.log(`📝 Backend: Moderate response data:`, response.data);
-
-    res.json({ 
-      success: true, 
-      message: 'Review moderated successfully',
-      data: response.data
-    });
+    res.json({ success: true, message: 'Review moderated successfully', data: response.data, method: 'moderate' });
 
   } catch (error) {
-    console.error('❌ Review moderation error:', error.response?.data || error.message);
+    const errBody = typeof error?.response?.data === 'string' 
+      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
+      : (error?.response?.data || error.message);
+    console.error('❌ Review moderation error:', errBody);
     res.status(500).json({ 
       success: false, 
       error: 'Failed to moderate review',
-      details: error.response?.data || error.message
+      details: errBody
     });
   }
 });
