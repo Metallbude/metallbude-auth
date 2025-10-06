@@ -3338,20 +3338,34 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     // Prefer multipart with files or data URLs converted to files
     if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
   const form = new FormDataLib();
-      form.append('api_token', judgemeToken);
-      form.append('shop_domain', shopDomain);
-      form.append('platform', 'general');
-      form.append('id', String(product_id));
-      form.append('email', String(customer_email));
-      form.append('name', String(customer_name));
-      form.append('rating', String(rating));
-      form.append('title', String(title));
-      form.append('body', String(body));
+  form.append('api_token', judgemeToken);
+  form.append('shop_domain', shopDomain);
+  form.append('platform', 'shopify');
+  // Provide both variants that Judge.me may accept
+  form.append('id', String(product_id));
+  form.append('product_id', String(product_id));
+  form.append('email', String(customer_email));
+  form.append('name', String(customer_name));
+  form.append('rating', String(rating));
+  form.append('title', String(title));
+  form.append('body', String(body));
+  // Duplicate as nested review[...] keys as used by their web form
+  form.append('review[id]', String(product_id));
+  form.append('review[email]', String(customer_email));
+  form.append('review[name]', String(customer_name));
+  form.append('review[rating]', String(rating));
+  form.append('review[title]', String(title));
+  form.append('review[body]', String(body));
 
       // Append uploaded files
       (fileFields || []).forEach((f, idx) => {
         const filename = f.originalname || `photo_${idx + 1}.jpg`;
         form.append('pictures[]', f.buffer, {
+          filename,
+          contentType: f.mimetype || 'image/jpeg',
+        });
+        // Also append under nested review[pictures][]
+        form.append('review[pictures][]', f.buffer, {
           filename,
           contentType: f.mimetype || 'image/jpeg',
         });
@@ -3375,6 +3389,10 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
             filename: `photo_inline_${idx + 1}.${ext}`,
             contentType: mime,
           });
+          form.append('review[pictures][]', buf, {
+            filename: `photo_inline_${idx + 1}.${ext}`,
+            contentType: mime,
+          });
         } catch (_) {}
       });
 
@@ -3386,7 +3404,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       let response;
       if (hasFormDataGetHeaders && typeof form.getHeaders === 'function') {
         response = await axios.post('https://judge.me/api/v1/reviews.json', form, {
-          headers: { ...form.getHeaders(), Accept: 'application/json' },
+          headers: { ...form.getHeaders(), Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
           maxContentLength: Infinity,
           maxBodyLength: Infinity,
         });
@@ -3396,7 +3414,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         const r = await fetch('https://judge.me/api/v1/reviews.json', {
           method: 'POST',
           body: form,
-          headers: { Accept: 'application/json' },
+          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
         });
         const data = await r.json();
         response = { data, status: r.status };
