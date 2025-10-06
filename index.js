@@ -3254,6 +3254,40 @@ app.get('/reviews/debug/recent', async (req, res) => {
   }
 });
 
+// Debug: echo effective Judge.me config and run a minimal connectivity check
+app.get('/reviews/debug/config', async (req, res) => {
+  try {
+    const shopDomain = process.env.JUDGEME_SHOP_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+    const hasToken = !!process.env.JUDGEME_API_TOKEN;
+    const issuer = process.env.SERVER_URL || config.issuer;
+    let connectivity = null;
+    if (hasToken) {
+      try {
+        const ping = await axios.get('https://judge.me/api/v1/reviews.json', {
+          params: {
+            api_token: process.env.JUDGEME_API_TOKEN,
+            shop_domain: shopDomain,
+            per_page: 1,
+            page: 1,
+            published: 'true'
+          },
+          headers: { Accept: 'application/json' }
+        });
+        connectivity = {
+          ok: true,
+          status: ping.status,
+          total: ping.data?.total_count ?? ping.data?.total ?? null,
+        };
+      } catch (e) {
+        connectivity = { ok: false, error: e?.response?.data || e?.message || String(e) };
+      }
+    }
+    return res.json({ success: true, shop_domain: shopDomain, has_token: hasToken, server_url: issuer, connectivity });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e?.message || String(e) });
+  }
+});
+
 app.get('/reviews/stats', async (req, res) => {
   try {
     const { product } = req.query;
@@ -3262,8 +3296,8 @@ app.get('/reviews/stats', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Product ID required' });
     }
 
-    const judgemeToken = process.env.JUDGEME_API_TOKEN;
-    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+  const judgemeToken = process.env.JUDGEME_API_TOKEN;
+  const shopDomain = process.env.JUDGEME_SHOP_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
 
     if (!judgemeToken) {
       console.error('❌ JUDGEME_API_TOKEN not configured');
@@ -3389,27 +3423,47 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       }
 
       console.log(`🖼️ Stored ${hostedUrls.length} review image(s) locally; building picture_urls for Judge.me`);
+      const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+      const userAgent = req.headers['user-agent'] || 'MetallbudeApp/1.0';
+      const nowIso = new Date().toISOString();
+      console.log(`🧭 Judge.me submit (picture_urls) shop_domain=${shopDomain}, product_id=${product_id}`);
       const payload = {
         api_token: judgemeToken,
         shop_domain: shopDomain,
         platform: 'shopify',
         id: product_id,
         product_id: product_id,
+        product_external_id: product_id,
+        external_id: product_id,
         email: customer_email,
         name: customer_name,
         rating: intRating,
         title: title,
         body: body,
         picture_urls: hostedUrls.join(','),
+        pictures: hostedUrls,
+        photos: hostedUrls,
+        pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
+        reviewed_at: nowIso,
+        ip_address: clientIp,
+        user_agent: userAgent,
         review: {
           id: product_id,
           product_id: product_id,
+          product_external_id: product_id,
+          external_id: product_id,
           email: customer_email,
           name: customer_name,
           rating: intRating,
           title: title,
           body: body,
           picture_urls: hostedUrls.join(','),
+          pictures: hostedUrls,
+          photos: hostedUrls,
+          pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
+          reviewed_at: nowIso,
+          ip_address: clientIp,
+          user_agent: userAgent,
         }
       };
       const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
@@ -3423,27 +3477,47 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     // JSON fallback with picture_urls only if client provided URLs
     const intRating = Math.max(1, Math.min(5, parseInt(String(rating), 10) || 0));
     const pictureUrlsStr = image_urls.join(',');
+    const clientIp2 = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+    const userAgent2 = req.headers['user-agent'] || 'MetallbudeApp/1.0';
+    const nowIso2 = new Date().toISOString();
+    console.log(`🧭 Judge.me submit (json_no_files) shop_domain=${shopDomain}, product_id=${product_id}`);
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
       platform: 'shopify',
       id: product_id,
       product_id: product_id,
+      product_external_id: product_id,
+      external_id: product_id,
       email: customer_email,
       name: customer_name,
       rating: intRating,
       title: title,
       body: body,
       picture_urls: pictureUrlsStr,
+      pictures: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
+      photos: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
+      pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
+      reviewed_at: nowIso2,
+      ip_address: clientIp2,
+      user_agent: userAgent2,
       review: {
         id: product_id,
         product_id: product_id,
+        product_external_id: product_id,
+        external_id: product_id,
         email: customer_email,
         name: customer_name,
         rating: intRating,
         title: title,
         body: body,
         picture_urls: pictureUrlsStr,
+        pictures: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
+        photos: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
+        pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
+        reviewed_at: nowIso2,
+        ip_address: clientIp2,
+        user_agent: userAgent2,
       }
     };
 
