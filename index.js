@@ -6,7 +6,17 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const axios = require('axios');
 const multer = require('multer');
-const FormData = require('form-data');
+// Prefer 'form-data' (works with axios). If not available, fall back to Node's global FormData and use fetch.
+let FormDataLib;
+let hasFormDataGetHeaders = false;
+try {
+  // eslint-disable-next-line import/no-extraneous-dependencies
+  FormDataLib = require('form-data');
+  hasFormDataGetHeaders = true;
+} catch (_) {
+  FormDataLib = global.FormData;
+  hasFormDataGetHeaders = false;
+}
 const path = require('path');
 
 // Firebase services (optional)
@@ -3327,7 +3337,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
 
     // Prefer multipart with files or data URLs converted to files
     if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
-      const form = new FormData();
+  const form = new FormDataLib();
       form.append('api_token', judgemeToken);
       form.append('shop_domain', shopDomain);
       form.append('platform', 'general');
@@ -3373,11 +3383,24 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
           (dataUrlCandidates || []).length
         }`
       );
-      const response = await axios.post('https://judge.me/api/v1/reviews.json', form, {
-        headers: { ...form.getHeaders(), Accept: 'application/json' },
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-      });
+      let response;
+      if (hasFormDataGetHeaders && typeof form.getHeaders === 'function') {
+        response = await axios.post('https://judge.me/api/v1/reviews.json', form, {
+          headers: { ...form.getHeaders(), Accept: 'application/json' },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+        });
+      } else {
+        // Fall back to fetch if form-data is not available in this runtime
+        const fetch = global.fetch || (await import('node-fetch')).default;
+        const r = await fetch('https://judge.me/api/v1/reviews.json', {
+          method: 'POST',
+          body: form,
+          headers: { Accept: 'application/json' },
+        });
+        const data = await r.json();
+        response = { data, status: r.status };
+      }
 
       console.log(
         `✅ Review submitted (multipart) for product ${product_id} by ${customer_email}, pictures=${
