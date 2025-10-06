@@ -6,6 +6,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const axios = require('axios');
 const multer = require('multer');
+const FormData = require('form-data');
 const path = require('path');
 
 // Firebase services (optional)
@@ -162,6 +163,12 @@ const upload = multer({
     if (!ok) return cb(new Error('Only PDF/PNG/JPG allowed'));
     cb(null, true);
   },
+});
+
+// In-memory multer specifically for review photos (do not persist on disk)
+const uploadReviews = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 6 },
 });
 
 // Generate RSA key pair for signing tokens
@@ -3265,22 +3272,33 @@ app.get('/reviews/stats', async (req, res) => {
   }
 });
 
-app.post('/reviews/submit', async (req, res) => {
+app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
   try {
-    const { 
-      product_id, 
-      customer_email, 
-      customer_name, 
-      rating, 
-      title, 
-      body, 
-      image_urls = [] 
-    } = req.body;
+    // Normalize possibly stringified arrays
+    const parseMaybeArray = (v) => {
+      if (v == null) return [];
+      if (Array.isArray(v)) return v;
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (_) {}
+      return String(v)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    };
+
+    const product_id = req.body?.product_id || req.body?.id || req.body?.productId;
+    const customer_email = req.body?.customer_email || req.body?.email;
+    const customer_name = req.body?.customer_name || req.body?.name;
+    const rating = req.body?.rating;
+    const title = req.body?.title;
+    const body = req.body?.body;
 
     if (!product_id || !customer_email || !customer_name || !rating || !title || !body) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing required fields: product_id, customer_email, customer_name, rating, title, body' 
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: product_id, customer_email, customer_name, rating, title, body',
       });
     }
 
@@ -3292,6 +3310,89 @@ app.post('/reviews/submit', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
+    // Files from multipart (various common fieldnames)
+    const fileFields = (req.files || []).filter((f) =>
+      ['pictures[]', 'review[pictures][]', 'pictures', 'photos[]', 'photos'].includes(f.fieldname)
+    );
+
+    // Optional picture URLs (for JSON fallback)
+    const image_urls = parseMaybeArray(
+      req.body?.image_urls || req.body?.picture_urls || req.body?.pictures || req.body?.photos
+    );
+
+    // Optional base64 data URLs in JSON body
+    const dataUrlCandidates = parseMaybeArray(
+      req.body?.photos || req.body?.pictures || req.body?.images
+    ).filter((u) => typeof u === 'string' && u.startsWith('data:'));
+
+    // Prefer multipart with files or data URLs converted to files
+    if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
+      const form = new FormData();
+      form.append('api_token', judgemeToken);
+      form.append('shop_domain', shopDomain);
+      form.append('platform', 'general');
+      form.append('id', String(product_id));
+      form.append('email', String(customer_email));
+      form.append('name', String(customer_name));
+      form.append('rating', String(rating));
+      form.append('title', String(title));
+      form.append('body', String(body));
+
+      // Append uploaded files
+      (fileFields || []).forEach((f, idx) => {
+        const filename = f.originalname || `photo_${idx + 1}.jpg`;
+        form.append('pictures[]', f.buffer, {
+          filename,
+          contentType: f.mimetype || 'image/jpeg',
+        });
+      });
+
+      // Append data URLs as files
+      (dataUrlCandidates || []).forEach((uri, idx) => {
+        const m = uri.match(/^data:(.+?);base64,(.+)$/);
+        if (!m) return;
+        const mime = m[1] || 'image/jpeg';
+        try {
+          const buf = Buffer.from(m[2], 'base64');
+          const ext = mime.includes('png')
+            ? 'png'
+            : mime.includes('webp')
+            ? 'webp'
+            : mime.includes('heic')
+            ? 'heic'
+            : 'jpg';
+          form.append('pictures[]', buf, {
+            filename: `photo_inline_${idx + 1}.${ext}`,
+            contentType: mime,
+          });
+        } catch (_) {}
+      });
+
+      console.log(
+        `🖼️ Forwarding review as multipart: files=${fileFields?.length || 0}, dataUrls=${
+          (dataUrlCandidates || []).length
+        }`
+      );
+      const response = await axios.post('https://judge.me/api/v1/reviews.json', form, {
+        headers: { ...form.getHeaders(), Accept: 'application/json' },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      });
+
+      console.log(
+        `✅ Review submitted (multipart) for product ${product_id} by ${customer_email}, pictures=${
+          response.data?.review?.pictures?.length || 0
+        }`
+      );
+      return res.json({
+        success: true,
+        message: 'Review submitted successfully',
+        review_id: response.data.review?.id,
+        echoed_pictures_count: response.data?.review?.pictures?.length || 0,
+      });
+    }
+
+    // Fallback: JSON with picture_urls (requires public URLs)
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
@@ -3302,29 +3403,31 @@ app.post('/reviews/submit', async (req, res) => {
       rating: rating,
       title: title,
       body: body,
-      picture_urls: image_urls.join(',')
+      picture_urls: image_urls.join(','),
     };
 
+    console.log(`📝 Forwarding review as JSON with picture_urls count=${image_urls.length}`);
     const response = await axios.post('https://judge.me/api/v1/reviews.json', reviewData, {
-      headers: { Accept: 'application/json' }
+      headers: { Accept: 'application/json' },
     });
 
-    console.log(`✅ Review submitted for product ${product_id} by ${customer_email}`);
-    res.json({ 
-      success: true, 
+    console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
+    return res.json({
+      success: true,
       message: 'Review submitted successfully',
-      review_id: response.data.review?.id
+      review_id: response.data.review?.id,
+      echoed_pictures_count: response.data?.review?.pictures?.length || 0,
     });
-
   } catch (error) {
-    const errBody = typeof error?.response?.data === 'string' 
-      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
-      : (error?.response?.data || error.message);
+    const errBody =
+      typeof error?.response?.data === 'string'
+        ? error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : '')
+        : error?.response?.data || error.message;
     console.error('❌ Review submission error:', errBody);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       error: 'Failed to submit review',
-      details: errBody
+      details: errBody,
     });
   }
 });
