@@ -3204,7 +3204,8 @@ app.get('/reviews', async (req, res) => {
       per_page: per_page,
       sort_by: sort_by,
       order: order,
-      published: 'true'
+      // Only force published when not filtering by email. For a user's own reviews, include pending/unpublished.
+      ...(email ? {} : { published: 'true' })
     };
 
     // Add the appropriate filter
@@ -3233,14 +3234,16 @@ app.get('/reviews', async (req, res) => {
     });
 
   } catch (error) {
+    const status = error?.response?.status;
     const errBody = typeof error?.response?.data === 'string' 
-      ? (error.response.data.slice(0, 400) + (error.response.data.length > 400 ? '…' : ''))
+      ? (error.response.data.slice(0, 800) + (error.response.data.length > 800 ? '…' : ''))
       : (error?.response?.data || error.message);
-    console.error('❌ Reviews fetch error:', errBody);
+    console.error('❌ Reviews fetch error:', { status, err: errBody });
     res.status(500).json({ 
       success: false, 
       error: 'Failed to fetch reviews',
-      details: errBody
+      details: errBody,
+      status
     });
   }
 });
@@ -3249,6 +3252,27 @@ app.get('/reviews', async (req, res) => {
 app.get('/reviews/debug/recent', async (req, res) => {
   try {
     return res.json({ success: true, recent: recentReviewSubmits.slice(-10) });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e?.message || String(e) });
+  }
+});
+
+// Debug: HEAD-check the last submitted image URLs to verify public reachability (status + content-type)
+app.get('/reviews/debug/check-last-image', async (req, res) => {
+  try {
+    const last = [...recentReviewSubmits].reverse().find(r => (r.urls || '').length);
+    if (!last) return res.status(404).json({ success: false, error: 'No recent picture_urls to check' });
+    const urls = String(last.urls).split(',').map(s => s.trim()).filter(Boolean);
+    const results = [];
+    for (const u of urls) {
+      try {
+        const head = await axios.head(u, { timeout: 8000, validateStatus: () => true });
+        results.push({ url: u, status: head.status, contentType: head.headers['content-type'] || null, cacheControl: head.headers['cache-control'] || null });
+      } catch (e) {
+        results.push({ url: u, error: e?.message || String(e) });
+      }
+    }
+    return res.json({ success: true, checked: results });
   } catch (e) {
     return res.status(500).json({ success: false, error: e?.message || String(e) });
   }
@@ -3443,7 +3467,8 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         picture_urls: hostedUrls.join(','),
         pictures: hostedUrls,
         photos: hostedUrls,
-        pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
+  pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
+  review_pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
         reviewed_at: nowIso,
         ip_address: clientIp,
         user_agent: userAgent,
@@ -3461,6 +3486,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
           pictures: hostedUrls,
           photos: hostedUrls,
           pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
+          review_pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
           reviewed_at: nowIso,
           ip_address: clientIp,
           user_agent: userAgent,
@@ -3497,7 +3523,8 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       picture_urls: pictureUrlsStr,
       pictures: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
       photos: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
-      pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
+  pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
+  review_pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
       reviewed_at: nowIso2,
       ip_address: clientIp2,
       user_agent: userAgent2,
@@ -3514,7 +3541,8 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         picture_urls: pictureUrlsStr,
         pictures: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
         photos: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
-        pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
+  pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
+  review_pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
         reviewed_at: nowIso2,
         ip_address: clientIp2,
         user_agent: userAgent2,
