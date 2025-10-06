@@ -744,7 +744,7 @@ async function adminGraphQL(query, variables) {
     { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
   );
   if (res.data?.errors) {
-    throw new Error(JSON.stringify(res.data.errors));
+    throw new Error(JSON.stringify(res.data.errors)); // Handle GraphQL errors
   }
   return res.data;
 }
@@ -3179,8 +3179,8 @@ app.get('/reviews', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Product ID, handle, or email required' });
     }
 
-    const judgemeToken = process.env.JUDGEME_API_TOKEN;
-    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+  const judgemeToken = process.env.JUDGEME_API_TOKEN;
+  const shopDomain = process.env.JUDGEME_SHOP_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
 
     if (!judgemeToken) {
       console.error('❌ JUDGEME_API_TOKEN not configured');
@@ -3337,40 +3337,75 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       req.body?.photos || req.body?.pictures || req.body?.images
     ).filter((u) => typeof u === 'string' && u.startsWith('data:'));
 
-    // Host files (and base64 images) locally and send JSON picture_urls to Judge.me
-    let hostedUrls = [];
+    // Prefer STRICT MULTIPART forward to Judge.me when files or data URLs are present
     if ((fileFields && fileFields.length) || (dataUrlCandidates && dataUrlCandidates.length)) {
-      await ensureUploadsDir();
-      const makeName = (ext) => `review_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
-      const baseUrl = (process.env.SERVER_URL && process.env.SERVER_URL.startsWith('http'))
-        ? process.env.SERVER_URL.replace(/\/$/, '')
-        : `${req.protocol}://${req.get('host')}`;
-      // Save uploaded files
-      for (let i = 0; i < (fileFields || []).length; i++) {
-        const f = fileFields[i];
-        const mime = (f.mimetype || '').toLowerCase();
-        const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
-        const filename = makeName(ext);
-        await fs.writeFile(path.join(UPLOADS_DIR, filename), f.buffer);
-        hostedUrls.push(`${baseUrl}/uploads/${filename}`);
-      }
-      // Save base64 data URLs
-      for (let i = 0; i < (dataUrlCandidates || []).length; i++) {
-        const uri = dataUrlCandidates[i];
+      const form = new FormDataLib();
+      // Required API fields
+      form.append('api_token', judgemeToken);
+      form.append('shop_domain', shopDomain);
+      form.append('platform', 'shopify');
+      // IDs (provide multiple variants to satisfy server expectations)
+      form.append('id', String(product_id));
+      form.append('product_id', String(product_id));
+      // Duplicated nested review fields (Rails-style params)
+      form.append('review[product_id]', String(product_id));
+      form.append('email', String(customer_email));
+      form.append('name', String(customer_name));
+      form.append('rating', String(rating));
+      form.append('title', String(title));
+      form.append('body', String(body));
+      form.append('review[email]', String(customer_email));
+      form.append('review[name]', String(customer_name));
+      form.append('review[rating]', String(rating));
+      form.append('review[title]', String(title));
+      form.append('review[body]', String(body));
+
+      // Attach uploaded files under multiple known keys
+      (fileFields || []).forEach((f, idx) => {
+        const filename = f.originalname || `photo_${idx + 1}.jpg`;
+        const contentType = f.mimetype || 'image/jpeg';
+        form.append('pictures[]', f.buffer, { filename, contentType });
+        form.append('review[pictures][]', f.buffer, { filename, contentType });
+        // pictures_attributes variant
+        form.append('review[pictures_attributes][][image]', f.buffer, { filename, contentType });
+      });
+
+      // Convert base64 data URLs to buffers and attach
+      (dataUrlCandidates || []).forEach((uri, idx) => {
         const m = uri.match(/^data:(.+?);base64,(.+)$/);
-        if (!m) continue;
-        const mime = (m[1] || 'image/jpeg').toLowerCase();
-        const buf = Buffer.from(m[2], 'base64');
-        const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
-        const filename = makeName(ext);
-        await fs.writeFile(path.join(UPLOADS_DIR, filename), buf);
-        hostedUrls.push(`${baseUrl}/uploads/${filename}`);
+        if (!m) return;
+        const mime = m[1] || 'image/jpeg';
+        try {
+          const buf = Buffer.from(m[2], 'base64');
+          const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('heic') ? 'heic' : 'jpg';
+          const filename = `photo_inline_${idx + 1}.${ext}`;
+          form.append('pictures[]', buf, { filename, contentType: mime });
+          form.append('review[pictures][]', buf, { filename, contentType: mime });
+          form.append('review[pictures_attributes][][image]', buf, { filename, contentType: mime });
+        } catch (_) {}
+      });
+
+      console.log(`🖼️ Forwarding review as STRICT multipart: files=${fileFields?.length || 0}, dataUrls=${(dataUrlCandidates||[]).length}`);
+      let response;
+      if (typeof form.getHeaders === 'function') {
+        response = await axios.post('https://judge.me/api/v1/reviews.json', form, {
+          headers: { ...form.getHeaders(), Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+        });
+      } else {
+        const fetch = global.fetch || (await import('node-fetch')).default;
+        const r = await fetch('https://judge.me/api/v1/reviews.json', { method: 'POST', body: form, headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' } });
+        const data = await r.json();
+        response = { data, status: r.status };
       }
-      console.log(`🖼️ Stored ${hostedUrls.length} review image(s) locally for Judge.me ingestion`);
+
+      try { console.log('🧾 Judge.me multipart response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
+      return res.json({ success: true, message: 'Review submitted successfully (multipart)', review_id: response.data?.review?.id, echoed_pictures_count: response.data?.review?.pictures?.length || 0 });
     }
 
-    // JSON with picture_urls (Judge.me documented way)
-    const pictureUrlsStr = [...hostedUrls, ...image_urls].join(',');
+    // JSON fallback with picture_urls only if client provided URLs
+    const pictureUrlsStr = image_urls.join(',');
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
