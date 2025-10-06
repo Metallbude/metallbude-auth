@@ -454,6 +454,15 @@ const RETURN_SHIPPING_FILE = path.join(__dirname, 'data', 'return_shipping.json'
 // val: { url, mime, name, trackingNumber, carrierName, noShippingRequired, updatedAt }
 const returnShipping = new Map();
 
+// In-memory ring buffer of recent review submissions for debugging
+const recentReviewSubmits = [];
+function addRecentReviewSubmit(entry) {
+  try {
+    recentReviewSubmits.push({ ts: new Date().toISOString(), ...entry });
+    if (recentReviewSubmits.length > 10) recentReviewSubmits.shift();
+  } catch (_) {}
+}
+
 async function loadStoreCreditLedger() {
   try {
     const raw = await fs.readFile(STORE_CREDIT_FILE, 'utf8');
@@ -3236,6 +3245,15 @@ app.get('/reviews', async (req, res) => {
   }
 });
 
+// Debug: get the last 10 review submissions (shows picture_urls_sent)
+app.get('/reviews/debug/recent', async (req, res) => {
+  try {
+    return res.json({ success: true, recent: recentReviewSubmits.slice(-10) });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e?.message || String(e) });
+  }
+});
+
 app.get('/reviews/stats', async (req, res) => {
   try {
     const { product } = req.query;
@@ -3387,6 +3405,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       });
       try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
+      addRecentReviewSubmit({ kind: 'picture_urls', product_id, email: customer_email, name: customer_name, rating: intRating, urls: payload.picture_urls, judgeMeMessage: response.data?.message });
       return res.json({ success: true, message: 'Review submitted (picture_urls)', review_id: response.data?.review?.id, picture_urls_sent: payload.picture_urls });
     }
 
@@ -3413,6 +3432,7 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
 
     console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
     try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
+    addRecentReviewSubmit({ kind: 'json_no_files', product_id, email: customer_email, name: customer_name, rating: intRating, urls: pictureUrlsStr, judgeMeMessage: response.data?.message });
     return res.json({
       success: true,
       message: 'Review submitted successfully',
