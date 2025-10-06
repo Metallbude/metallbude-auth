@@ -3212,7 +3212,8 @@ app.get('/reviews', async (req, res) => {
     if (product) {
       params.product_id = product;
     } else if (handle) {
-      params.product_handle = handle;
+      // Judge.me expects 'handle' as the parameter name (not 'product_handle')
+      params.handle = handle;
     } else if (email) {
       params.email = email;
     }
@@ -3267,7 +3268,7 @@ app.get('/reviews/debug/check-last-image', async (req, res) => {
     for (const u of urls) {
       try {
         const head = await axios.head(u, { timeout: 8000, validateStatus: () => true });
-        results.push({ url: u, status: head.status, contentType: head.headers['content-type'] || null, cacheControl: head.headers['cache-control'] || null });
+        results.push({ url: u, status: head.status, contentType: head.headers['content-type'] || null, contentLength: head.headers['content-length'] || null, cacheControl: head.headers['cache-control'] || null });
       } catch (e) {
         results.push({ url: u, error: e?.message || String(e) });
       }
