@@ -3365,25 +3365,37 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     }
 
     // JSON with picture_urls (Judge.me documented way)
+    const pictureUrlsStr = [...hostedUrls, ...image_urls].join(',');
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
       platform: 'shopify',
       id: product_id,
+      product_id: product_id,
       email: customer_email,
       name: customer_name,
       rating: rating,
       title: title,
       body: body,
-      picture_urls: [...hostedUrls, ...image_urls].join(','),
+      picture_urls: pictureUrlsStr,
+      review: {
+        id: product_id,
+        email: customer_email,
+        name: customer_name,
+        rating: rating,
+        title: title,
+        body: body,
+        picture_urls: pictureUrlsStr,
+      }
     };
 
     console.log(`📝 Forwarding review as JSON with picture_urls=${reviewData.picture_urls ? reviewData.picture_urls.split(',').length : 0}`);
     const response = await axios.post('https://judge.me/api/v1/reviews.json', reviewData, {
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': 'MetallbudeApp/1.0' },
     });
 
     console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
+    try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
     return res.json({
       success: true,
       message: 'Review submitted successfully',
@@ -3564,6 +3576,50 @@ app.post('/reviews/:reviewId/hide', async (req, res) => {
       error: 'Failed to hide review',
       details: errBody
     });
+  }
+});
+
+// DEBUG: Post a test review with known public picture_urls to Judge.me to verify ingestion
+// Body: { product_id, email, name, rating, title, body, urls?: ["https://…"] }
+app.post('/reviews/debug/test-picture-urls', async (req, res) => {
+  try {
+    const judgemeToken = process.env.JUDGEME_API_TOKEN;
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+    if (!judgemeToken) return res.status(500).json({ success: false, error: 'JUDGEME_API_TOKEN missing' });
+
+    const { product_id, email, name, rating = 5, title = 'Debug Review', body = 'Debug body', urls } = req.body || {};
+    if (!product_id || !email || !name) return res.status(400).json({ success: false, error: 'Missing product_id, email, name' });
+
+    const fallbackUrls = [
+      'https://images.unsplash.com/photo-1542291026-7eec264c27ff?q=80&w=600',
+      'https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?q=80&w=600'
+    ];
+    const picture_urls = (Array.isArray(urls) ? urls : fallbackUrls).join(',');
+
+    const payload = {
+      api_token: judgemeToken,
+      shop_domain: shopDomain,
+      platform: 'general',
+      id: product_id,
+      email,
+      name,
+      rating,
+      title,
+      body,
+      picture_urls,
+    };
+    console.log('🧪 DEBUG posting review with picture_urls:', picture_urls);
+    const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    });
+    console.log('🧪 DEBUG Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400));
+    return res.json({ success: true, data: response.data });
+  } catch (error) {
+    const errBody = typeof error?.response?.data === 'string'
+      ? error.response.data.slice(0, 800)
+      : (error?.response?.data || error.message);
+    console.error('🧪 DEBUG error posting to Judge.me:', errBody);
+    return res.status(500).json({ success: false, error: 'Failed to post to Judge.me', details: errBody });
   }
 });
 
