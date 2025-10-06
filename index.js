@@ -3348,15 +3348,34 @@ app.get('/reviews/stats', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    const response = await axios.get('https://judge.me/api/v1/reviews.json', {
-      params: {
-        api_token: judgemeToken,
-        shop_domain: shopDomain,
-        product_id: product,
-        per_page: 1  // Just get stats, not all reviews
-      },
-      headers: { Accept: 'application/json' }
-    });
+    // Fallback to handle for long Shopify product IDs (Judge.me may 422 on product_id)
+    let params = {
+      api_token: judgemeToken,
+      shop_domain: shopDomain,
+      per_page: 1,
+      published: 'true'
+    };
+
+    const prodStr = String(product);
+    const looksLikeLongShopifyId = /^\d{11,}$/.test(prodStr);
+    let usedHandle = null;
+    if (looksLikeLongShopifyId && config.adminToken) {
+      try {
+        const gid = prodStr.startsWith('gid://') ? prodStr : `gid://shopify/Product/${prodStr}`;
+        const q = `query GetProductHandle($id: ID!) { product(id: $id) { id handle } }`;
+        const r = await adminGraphQL(q, { id: gid });
+        usedHandle = r?.data?.product?.handle || null;
+      } catch (e) {
+        console.warn('⚠️ Could not resolve product handle for stats fallback:', e?.message || e);
+      }
+    }
+    if (usedHandle) {
+      params.handle = usedHandle;
+    } else {
+      params.product_id = product;
+    }
+
+    const response = await axios.get('https://judge.me/api/v1/reviews.json', { params, headers: { Accept: 'application/json' } });
 
     res.json({
       success: true,
