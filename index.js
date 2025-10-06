@@ -3210,7 +3210,26 @@ app.get('/reviews', async (req, res) => {
 
     // Add the appropriate filter
     if (product) {
-      params.product_id = product;
+      // Judge.me sometimes rejects long Shopify product IDs with 422 (expects internal Judge.me product_id)
+      // Fallback: resolve Shopify handle and query by handle instead
+      let usedHandle = null;
+      const prodStr = String(product);
+      const looksLikeLongShopifyId = /^\d{11,}$/.test(prodStr);
+      if (looksLikeLongShopifyId && config.adminToken) {
+        try {
+          const gid = prodStr.startsWith('gid://') ? prodStr : `gid://shopify/Product/${prodStr}`;
+          const q = `query GetProductHandle($id: ID!) { product(id: $id) { id handle } }`;
+          const r = await adminGraphQL(q, { id: gid });
+          usedHandle = r?.data?.product?.handle || null;
+        } catch (e) {
+          console.warn('⚠️ Could not resolve product handle for Judge.me reviews fallback:', e?.message || e);
+        }
+      }
+      if (usedHandle) {
+        params.handle = usedHandle;
+      } else {
+        params.product_id = product;
+      }
     } else if (handle) {
       // Judge.me expects 'handle' as the parameter name (not 'product_handle')
       params.handle = handle;
