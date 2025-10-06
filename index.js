@@ -3314,6 +3314,205 @@ app.post('/reviews/submit', async (req, res) => {
   }
 });
 
+// DELETE /reviews/:reviewId - Hide/delete review via Judge.me API
+app.delete('/reviews/:reviewId', async (req, res) => {
+  try {
+    const { reviewId } = req.params;
+    
+    if (!reviewId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Review ID is required' 
+      });
+    }
+
+    const judgemeToken = process.env.JUDGEME_API_TOKEN;
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+
+    if (!judgemeToken) {
+      console.error('❌ JUDGEME_API_TOKEN not configured');
+      return res.status(500).json({ success: false, error: 'Reviews service not configured' });
+    }
+
+    console.log(`📝 Backend: Attempting to delete review ${reviewId}`);
+
+    // Try Judge.me's delete endpoint first
+    try {
+      const deleteResponse = await axios.delete(`https://judge.me/api/v1/reviews/${reviewId}`, {
+        params: {
+          api_token: judgemeToken,
+          shop_domain: shopDomain
+        }
+      });
+
+      console.log(`📝 Backend: Delete response status: ${deleteResponse.status}`);
+      console.log(`📝 Backend: Delete response data:`, deleteResponse.data);
+
+      res.json({ 
+        success: true, 
+        message: 'Review deleted successfully',
+        method: 'delete'
+      });
+      return;
+    } catch (deleteError) {
+      console.log(`📝 Backend: Delete failed, trying hide method. Error:`, deleteError.response?.data || deleteError.message);
+    }
+
+    // If delete fails, try hide endpoint
+    try {
+      const hideResponse = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/hide`, {
+        api_token: judgemeToken,
+        shop_domain: shopDomain,
+        reason: 'duplicated_review'
+      });
+
+      console.log(`📝 Backend: Hide response status: ${hideResponse.status}`);
+      console.log(`📝 Backend: Hide response data:`, hideResponse.data);
+
+      res.json({ 
+        success: true, 
+        message: 'Review hidden successfully',
+        method: 'hide'
+      });
+      return;
+    } catch (hideError) {
+      console.log(`📝 Backend: Hide failed, trying moderate method. Error:`, hideError.response?.data || hideError.message);
+    }
+
+    // Last resort: try moderate endpoint
+    try {
+      const moderateResponse = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/moderate`, {
+        api_token: judgemeToken,
+        shop_domain: shopDomain,
+        action: 'hide',
+        reason: 'duplicated_review'
+      });
+
+      console.log(`📝 Backend: Moderate response status: ${moderateResponse.status}`);
+      console.log(`📝 Backend: Moderate response data:`, moderateResponse.data);
+
+      res.json({ 
+        success: true, 
+        message: 'Review moderated successfully',
+        method: 'moderate'
+      });
+      return;
+    } catch (moderateError) {
+      console.log(`📝 Backend: All methods failed. Moderate error:`, moderateError.response?.data || moderateError.message);
+    }
+
+    // If all methods fail
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to hide review using all available methods'
+    });
+
+  } catch (error) {
+    console.error('❌ Review deletion error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to delete review' 
+    });
+  }
+});
+
+// POST /reviews/:reviewId/hide - Hide review via Judge.me API
+app.post('/reviews/:reviewId/hide', async (req, res) => {
+  try {
+    const { reviewId } = req.params;
+    const { reason = 'duplicated_review' } = req.body;
+    
+    if (!reviewId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Review ID is required' 
+      });
+    }
+
+    const judgemeToken = process.env.JUDGEME_API_TOKEN;
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+
+    if (!judgemeToken) {
+      console.error('❌ JUDGEME_API_TOKEN not configured');
+      return res.status(500).json({ success: false, error: 'Reviews service not configured' });
+    }
+
+    console.log(`📝 Backend: Attempting to hide review ${reviewId} with reason: ${reason}`);
+
+    const response = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/hide`, {
+      api_token: judgemeToken,
+      shop_domain: shopDomain,
+      reason: reason
+    });
+
+    console.log(`📝 Backend: Hide response status: ${response.status}`);
+    console.log(`📝 Backend: Hide response data:`, response.data);
+
+    res.json({ 
+      success: true, 
+      message: 'Review hidden successfully',
+      data: response.data
+    });
+
+  } catch (error) {
+    console.error('❌ Review hide error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to hide review',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// POST /reviews/:reviewId/moderate - Moderate review via Judge.me API
+app.post('/reviews/:reviewId/moderate', async (req, res) => {
+  try {
+    const { reviewId } = req.params;
+    const { action = 'hide', reason = 'duplicated_review' } = req.body;
+    
+    if (!reviewId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Review ID is required' 
+      });
+    }
+
+    const judgemeToken = process.env.JUDGEME_API_TOKEN;
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+
+    if (!judgemeToken) {
+      console.error('❌ JUDGEME_API_TOKEN not configured');
+      return res.status(500).json({ success: false, error: 'Reviews service not configured' });
+    }
+
+    console.log(`📝 Backend: Attempting to moderate review ${reviewId} with action: ${action}, reason: ${reason}`);
+
+    const response = await axios.post(`https://judge.me/api/v1/reviews/${reviewId}/moderate`, {
+      api_token: judgemeToken,
+      shop_domain: shopDomain,
+      action: action,
+      reason: reason
+    });
+
+    console.log(`📝 Backend: Moderate response status: ${response.status}`);
+    console.log(`📝 Backend: Moderate response data:`, response.data);
+
+    res.json({ 
+      success: true, 
+      message: 'Review moderated successfully',
+      data: response.data
+    });
+
+  } catch (error) {
+    console.error('❌ Review moderation error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to moderate review',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
 // Email endpoints (MailerSend proxy)
 app.post('/email/send-code', async (req, res) => {
   try {
