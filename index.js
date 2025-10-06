@@ -3392,14 +3392,25 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       const payload = {
         api_token: judgemeToken,
         shop_domain: shopDomain,
-        platform: 'general',
+        platform: 'shopify',
         id: product_id,
+        product_id: product_id,
         email: customer_email,
         name: customer_name,
         rating: intRating,
         title: title,
         body: body,
         picture_urls: hostedUrls.join(','),
+        review: {
+          id: product_id,
+          product_id: product_id,
+          email: customer_email,
+          name: customer_name,
+          rating: intRating,
+          title: title,
+          body: body,
+          picture_urls: hostedUrls.join(','),
+        }
       };
       const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -3415,14 +3426,25 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
-      platform: 'general',
+      platform: 'shopify',
       id: product_id,
+      product_id: product_id,
       email: customer_email,
       name: customer_name,
       rating: intRating,
       title: title,
       body: body,
       picture_urls: pictureUrlsStr,
+      review: {
+        id: product_id,
+        product_id: product_id,
+        email: customer_email,
+        name: customer_name,
+        rating: intRating,
+        title: title,
+        body: body,
+        picture_urls: pictureUrlsStr,
+      }
     };
 
     console.log(`📝 Forwarding review as JSON with picture_urls=${reviewData.picture_urls ? reviewData.picture_urls.split(',').length : 0}`);
