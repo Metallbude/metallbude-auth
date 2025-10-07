@@ -463,6 +463,125 @@ function addRecentReviewSubmit(entry) {
   } catch (_) {}
 }
 
+// ===== In-memory cache for Judge.me reviews and stats =====
+// Configurable TTL and refresh cadence via env
+const REVIEWS_CACHE_ENABLED = (process.env.REVIEWS_CACHE_ENABLED || 'true').toLowerCase() !== 'false';
+const REVIEWS_CACHE_TTL_MS = Number(process.env.REVIEWS_CACHE_TTL_MS || 30 * 60 * 1000); // default 30m
+const REVIEWS_CACHE_SWEEP_MS = Number(process.env.REVIEWS_CACHE_SWEEP_MS || 5 * 60 * 1000); // sweep every 5m
+const REVIEWS_CACHE_REFRESH_LEEWAY_MS = Number(process.env.REVIEWS_CACHE_REFRESH_LEEWAY_MS || 5 * 60 * 1000); // refresh when <5m left
+
+// Cache entry: { key, type, args, finalParams, data, fetchedAt, expiresAt, fetching, lastError }
+const reviewsCache = new Map();
+let reviewsCacheStats = { hits: 0, misses: 0, refreshes: 0, invalidations: 0 };
+
+function buildReviewsCacheKey(type, args = {}) {
+  const parts = [
+    `type=${type}`,
+    args.product ? `product=${args.product}` : null,
+    args.handle ? `handle=${args.handle}` : null,
+    args.email ? `email=${args.email}` : null,
+    args.page ? `page=${args.page}` : null,
+    args.per_page ? `per_page=${args.per_page}` : null,
+    args.sort_by ? `sort=${args.sort_by}` : null,
+    args.order ? `order=${args.order}` : null,
+  ].filter(Boolean);
+  return parts.join('|');
+}
+
+function getFreshCacheEntry(key) {
+  const ent = reviewsCache.get(key);
+  if (!ent) return null;
+  if (Date.now() < ent.expiresAt && ent.data) return ent;
+  return null;
+}
+
+function setCacheEntry(type, args, finalParams, data, ttl = REVIEWS_CACHE_TTL_MS) {
+  const key = buildReviewsCacheKey(type, args);
+  const now = Date.now();
+  const entry = {
+    key,
+    type,
+    args,
+    finalParams,
+    data,
+    fetchedAt: now,
+    expiresAt: now + ttl,
+    fetching: false,
+    lastError: null,
+  };
+  reviewsCache.set(key, entry);
+  return entry;
+}
+
+function invalidateCacheForReview({ product, handle, email }) {
+  let removed = 0;
+  for (const [key, ent] of reviewsCache.entries()) {
+    const a = ent.args || {};
+    if ((product && a.product && String(a.product) === String(product)) ||
+        (handle && a.handle && String(a.handle) === String(handle)) ||
+        (email && a.email && String(a.email).toLowerCase() === String(email).toLowerCase())) {
+      reviewsCache.delete(key);
+      removed++;
+    }
+  }
+  if (removed) reviewsCacheStats.invalidations += removed;
+  return removed;
+}
+
+async function refreshCacheEntry(ent) {
+  if (!ent || ent.fetching) return;
+  ent.fetching = true;
+  const headers = { Accept: 'application/json' };
+  try {
+    if (ent.type === 'list') {
+      const r = await axios.get('https://judge.me/api/v1/reviews.json', { params: ent.finalParams, headers });
+      ent.data = {
+        success: true,
+        reviews: r.data.reviews,
+        pagination: {
+          current_page: r.data.current_page,
+          per_page: r.data.per_page,
+          total_pages: r.data.total_pages,
+          total_count: r.data.total_count,
+        }
+      };
+    } else if (ent.type === 'stats') {
+      const r = await axios.get('https://judge.me/api/v1/reviews.json', { params: ent.finalParams, headers });
+      ent.data = {
+        success: true,
+        stats: {
+          total_reviews: r.data.total_count,
+          average_rating: r.data.average_rating,
+          rating_distribution: r.data.rating_distribution,
+        }
+      };
+    }
+    const now = Date.now();
+    ent.fetchedAt = now;
+    ent.expiresAt = now + REVIEWS_CACHE_TTL_MS;
+    ent.lastError = null;
+    reviewsCacheStats.refreshes++;
+  } catch (e) {
+    ent.lastError = typeof e?.response?.data === 'string' ? e.response.data.slice(0, 400) : (e?.response?.data || e.message);
+  } finally {
+    ent.fetching = false;
+  }
+}
+
+// Background sweeper to refresh near-expiry entries
+if (REVIEWS_CACHE_ENABLED) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const ent of reviewsCache.values()) {
+      if (ent.fetching) continue;
+      const timeLeft = ent.expiresAt - now;
+      if (timeLeft <= REVIEWS_CACHE_REFRESH_LEEWAY_MS) {
+        refreshCacheEntry(ent).catch(() => {});
+      }
+    }
+  }, Math.max(30_000, REVIEWS_CACHE_SWEEP_MS));
+}
+
 async function loadStoreCreditLedger() {
   try {
     const raw = await fs.readFile(STORE_CREDIT_FILE, 'utf8');
@@ -3237,12 +3356,25 @@ app.get('/reviews', async (req, res) => {
       params.email = email;
     }
 
+    // Optionally serve from cache
+    const cacheArgs = { product, handle, email, page, per_page, sort_by, order };
+    const cacheKey = buildReviewsCacheKey('list', cacheArgs);
+    if (REVIEWS_CACHE_ENABLED) {
+      const fresh = getFreshCacheEntry(cacheKey);
+      if (fresh) {
+        reviewsCacheStats.hits++;
+        res.setHeader('X-Cache', 'HIT');
+        res.setHeader('Cache-Control', `public, max-age=${Math.floor((fresh.expiresAt - Date.now())/1000)}`);
+        return res.json(fresh.data);
+      }
+    }
+
     const response = await axios.get('https://judge.me/api/v1/reviews.json', { 
       params,
       headers: { Accept: 'application/json' }
     });
 
-    res.json({
+    const payload = {
       success: true,
       reviews: response.data.reviews,
       pagination: {
@@ -3251,7 +3383,16 @@ app.get('/reviews', async (req, res) => {
         total_pages: response.data.total_pages,
         total_count: response.data.total_count
       }
-    });
+    };
+
+    if (REVIEWS_CACHE_ENABLED) {
+      reviewsCacheStats.misses++;
+      setCacheEntry('list', cacheArgs, params, payload);
+      res.setHeader('X-Cache', 'MISS');
+      res.setHeader('Cache-Control', `public, max-age=${Math.floor(REVIEWS_CACHE_TTL_MS/1000)}`);
+    }
+
+    res.json(payload);
 
   } catch (error) {
     const status = error?.response?.status;
@@ -3272,6 +3413,56 @@ app.get('/reviews', async (req, res) => {
 app.get('/reviews/debug/recent', async (req, res) => {
   try {
     return res.json({ success: true, recent: recentReviewSubmits.slice(-10) });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e?.message || String(e) });
+  }
+});
+
+// Debug: cache status and controls
+app.get('/reviews/cache/status', async (req, res) => {
+  try {
+    const now = Date.now();
+    const entries = Array.from(reviewsCache.values()).map((e) => ({
+      key: e.key,
+      type: e.type,
+      args: e.args,
+      fetchedAt: e.fetchedAt,
+      expiresAt: e.expiresAt,
+      msLeft: Math.max(0, e.expiresAt - now),
+      fetching: !!e.fetching,
+      lastError: e.lastError ? String(e.lastError).slice(0, 200) : null,
+    }));
+    return res.json({
+      success: true,
+      enabled: REVIEWS_CACHE_ENABLED,
+      ttl_ms: REVIEWS_CACHE_TTL_MS,
+      size: reviewsCache.size,
+      stats: reviewsCacheStats,
+      entries,
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e?.message || String(e) });
+  }
+});
+
+app.post('/reviews/cache/clear', async (req, res) => {
+  try {
+    const before = reviewsCache.size;
+    reviewsCache.clear();
+    return res.json({ success: true, cleared: before });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e?.message || String(e) });
+  }
+});
+
+app.post('/reviews/cache/refresh', async (req, res) => {
+  try {
+    const { key } = req.body || {};
+    if (!key) return res.status(400).json({ success: false, error: 'key required' });
+    const ent = reviewsCache.get(key);
+    if (!ent) return res.status(404).json({ success: false, error: 'not found' });
+    await refreshCacheEntry(ent);
+    return res.json({ success: true, key, refreshedAt: ent.fetchedAt, expiresAt: ent.expiresAt });
   } catch (e) {
     return res.status(500).json({ success: false, error: e?.message || String(e) });
   }
@@ -3398,16 +3589,38 @@ app.get('/reviews/stats', async (req, res) => {
       params.product_id = product;
     }
 
+    // Optionally serve from cache
+    const cacheArgs = { product, handle: params.handle || null };
+    const cacheKey = buildReviewsCacheKey('stats', cacheArgs);
+    if (REVIEWS_CACHE_ENABLED) {
+      const fresh = getFreshCacheEntry(cacheKey);
+      if (fresh) {
+        reviewsCacheStats.hits++;
+        res.setHeader('X-Cache', 'HIT');
+        res.setHeader('Cache-Control', `public, max-age=${Math.floor((fresh.expiresAt - Date.now())/1000)}`);
+        return res.json(fresh.data);
+      }
+    }
+
     const response = await axios.get('https://judge.me/api/v1/reviews.json', { params, headers: { Accept: 'application/json' } });
 
-    res.json({
+    const payload = {
       success: true,
       stats: {
         total_reviews: response.data.total_count,
         average_rating: response.data.average_rating,
         rating_distribution: response.data.rating_distribution
       }
-    });
+    };
+
+    if (REVIEWS_CACHE_ENABLED) {
+      reviewsCacheStats.misses++;
+      setCacheEntry('stats', cacheArgs, params, payload);
+      res.setHeader('X-Cache', 'MISS');
+      res.setHeader('Cache-Control', `public, max-age=${Math.floor(REVIEWS_CACHE_TTL_MS/1000)}`);
+    }
+
+    res.json(payload);
 
   } catch (error) {
     const errBody = typeof error?.response?.data === 'string' 
@@ -3531,9 +3744,12 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       });
-      try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
-      addRecentReviewSubmit({ kind: 'picture_urls', product_id, email: customer_email, name: customer_name, rating: intRating, urls: payload.picture_urls, judgeMeMessage: response.data?.message });
-      return res.json({ success: true, message: 'Review submitted (picture_urls)', review_id: response.data?.review?.id, picture_urls_sent: payload.picture_urls });
+  try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
+  addRecentReviewSubmit({ kind: 'picture_urls', product_id, email: customer_email, name: customer_name, rating: intRating, urls: payload.picture_urls, judgeMeMessage: response.data?.message });
+  // Invalidate caches for this product/email so new review appears sooner
+  try { invalidateCacheForReview({ product: product_id, email: customer_email }); } catch (_) {}
+  res.setHeader('X-Cache-Invalidate', 'reviews');
+  return res.json({ success: true, message: 'Review submitted (picture_urls)', review_id: response.data?.review?.id, picture_urls_sent: payload.picture_urls });
     }
 
     // JSON fallback with picture_urls only if client provided URLs
@@ -3567,6 +3783,9 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
     try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
     addRecentReviewSubmit({ kind: 'json_no_files', product_id, email: customer_email, name: customer_name, rating: intRating, urls: reviewData.picture_urls, judgeMeMessage: response.data?.message });
+    // Invalidate caches for this product/email
+    try { invalidateCacheForReview({ product: product_id, email: customer_email }); } catch (_) {}
+    res.setHeader('X-Cache-Invalidate', 'reviews');
     return res.json({
       success: true,
       message: 'Review submitted successfully',
