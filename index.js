@@ -3359,7 +3359,8 @@ app.get('/reviews', async (req, res) => {
     // Optionally serve from cache
     const cacheArgs = { product, handle, email, page, per_page, sort_by, order };
     const cacheKey = buildReviewsCacheKey('list', cacheArgs);
-    if (REVIEWS_CACHE_ENABLED) {
+    const noCache = (String(req.query.no_cache || '') === '1') || (req.get('x-no-cache') === '1');
+    if (REVIEWS_CACHE_ENABLED && !noCache) {
       const fresh = getFreshCacheEntry(cacheKey);
       if (fresh) {
         reviewsCacheStats.hits++;
@@ -3388,7 +3389,7 @@ app.get('/reviews', async (req, res) => {
     if (REVIEWS_CACHE_ENABLED) {
       reviewsCacheStats.misses++;
       setCacheEntry('list', cacheArgs, params, payload);
-      res.setHeader('X-Cache', 'MISS');
+      res.setHeader('X-Cache', noCache ? 'BYPASS' : 'MISS');
       res.setHeader('Cache-Control', `public, max-age=${Math.floor(REVIEWS_CACHE_TTL_MS/1000)}`);
     }
 
@@ -3592,7 +3593,8 @@ app.get('/reviews/stats', async (req, res) => {
     // Optionally serve from cache
     const cacheArgs = { product, handle: params.handle || null };
     const cacheKey = buildReviewsCacheKey('stats', cacheArgs);
-    if (REVIEWS_CACHE_ENABLED) {
+    const noCache = (String(req.query.no_cache || '') === '1') || (req.get('x-no-cache') === '1');
+    if (REVIEWS_CACHE_ENABLED && !noCache) {
       const fresh = getFreshCacheEntry(cacheKey);
       if (fresh) {
         reviewsCacheStats.hits++;
@@ -3616,7 +3618,7 @@ app.get('/reviews/stats', async (req, res) => {
     if (REVIEWS_CACHE_ENABLED) {
       reviewsCacheStats.misses++;
       setCacheEntry('stats', cacheArgs, params, payload);
-      res.setHeader('X-Cache', 'MISS');
+      res.setHeader('X-Cache', noCache ? 'BYPASS' : 'MISS');
       res.setHeader('Cache-Control', `public, max-age=${Math.floor(REVIEWS_CACHE_TTL_MS/1000)}`);
     }
 
