@@ -3277,6 +3277,29 @@ app.get('/reviews/debug/recent', async (req, res) => {
   }
 });
 
+// Debug: fetch Judge.me settings to verify picture and web-review configurations
+app.get('/reviews/debug/settings', async (req, res) => {
+  try {
+    const shopDomain = process.env.JUDGEME_SHOP_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+    const apiToken = process.env.JUDGEME_API_TOKEN;
+    if (!apiToken) return res.status(500).json({ success: false, error: 'JUDGEME_API_TOKEN missing' });
+    const params = {
+      api_token: apiToken,
+      shop_domain: shopDomain,
+      'setting_keys[]': [
+        'enable_review_pictures',
+        'autopublish',
+        'web_reviews_enabled'
+      ]
+    };
+    const r = await axios.get('https://judge.me/api/v1/settings.json', { params, headers: { Accept: 'application/json' } });
+    return res.json({ success: true, settings: r.data?.settings || r.data || {} });
+  } catch (e) {
+    const errBody = typeof e?.response?.data === 'string' ? e.response.data.slice(0, 400) + '…' : (e?.response?.data || e.message);
+    return res.status(500).json({ success: false, error: 'Failed to fetch settings', details: errBody });
+  }
+});
+
 // Debug: HEAD-check the last submitted image URLs to verify public reachability (status + content-type)
 app.get('/reviews/debug/check-last-image', async (req, res) => {
   try {
@@ -3429,8 +3452,8 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       });
     }
 
-    const judgemeToken = process.env.JUDGEME_API_TOKEN;
-    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+  const judgemeToken = process.env.JUDGEME_API_TOKEN;
+  const shopDomain = process.env.JUDGEME_SHOP_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
 
     if (!judgemeToken) {
       console.error('❌ JUDGEME_API_TOKEN not configured');
@@ -3495,41 +3518,15 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         shop_domain: shopDomain,
         platform: 'shopify',
         id: product_id,
-        product_id: product_id,
-        product_external_id: product_id,
-        external_id: product_id,
         email: customer_email,
         name: customer_name,
         rating: intRating,
         title: title,
         body: body,
-        picture_urls: hostedUrls.join(','),
-        pictures: hostedUrls,
-        photos: hostedUrls,
-  pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
-  review_pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
+        picture_urls: hostedUrls, // per docs: array of strings
         reviewed_at: nowIso,
-        ip_address: clientIp,
+        ip_addr: clientIp,
         user_agent: userAgent,
-        review: {
-          id: product_id,
-          product_id: product_id,
-          product_external_id: product_id,
-          external_id: product_id,
-          email: customer_email,
-          name: customer_name,
-          rating: intRating,
-          title: title,
-          body: body,
-          picture_urls: hostedUrls.join(','),
-          pictures: hostedUrls,
-          photos: hostedUrls,
-          pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
-          review_pictures_attributes: hostedUrls.map(u => ({ remote_image_url: u })),
-          reviewed_at: nowIso,
-          ip_address: clientIp,
-          user_agent: userAgent,
-        }
       };
       const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -3540,8 +3537,8 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     }
 
     // JSON fallback with picture_urls only if client provided URLs
-    const intRating = Math.max(1, Math.min(5, parseInt(String(rating), 10) || 0));
-    const pictureUrlsStr = image_urls.join(',');
+  const intRating = Math.max(1, Math.min(5, parseInt(String(rating), 10) || 0));
+  const sanitizedUrls = (image_urls || []).filter(u => typeof u === 'string' && /^https?:\/\//.test(u));
     const clientIp2 = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
     const userAgent2 = req.headers['user-agent'] || 'MetallbudeApp/1.0';
     const nowIso2 = new Date().toISOString();
@@ -3551,57 +3548,31 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       shop_domain: shopDomain,
       platform: 'shopify',
       id: product_id,
-      product_id: product_id,
-      product_external_id: product_id,
-      external_id: product_id,
       email: customer_email,
       name: customer_name,
       rating: intRating,
       title: title,
       body: body,
-      picture_urls: pictureUrlsStr,
-      pictures: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
-      photos: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
-  pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
-  review_pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
+      picture_urls: sanitizedUrls,
       reviewed_at: nowIso2,
-      ip_address: clientIp2,
+      ip_addr: clientIp2,
       user_agent: userAgent2,
-      review: {
-        id: product_id,
-        product_id: product_id,
-        product_external_id: product_id,
-        external_id: product_id,
-        email: customer_email,
-        name: customer_name,
-        rating: intRating,
-        title: title,
-        body: body,
-        picture_urls: pictureUrlsStr,
-        pictures: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
-        photos: pictureUrlsStr ? pictureUrlsStr.split(',') : [],
-  pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
-  review_pictures_attributes: pictureUrlsStr ? pictureUrlsStr.split(',').map(u => ({ remote_image_url: u })) : [],
-        reviewed_at: nowIso2,
-        ip_address: clientIp2,
-        user_agent: userAgent2,
-      }
     };
 
-    console.log(`📝 Forwarding review as JSON with picture_urls=${reviewData.picture_urls ? reviewData.picture_urls.split(',').length : 0}`);
+    console.log(`📝 Forwarding review as JSON with picture_urls=${Array.isArray(reviewData.picture_urls) ? reviewData.picture_urls.length : 0}`);
     const response = await axios.post('https://judge.me/api/v1/reviews.json', reviewData, {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     });
 
     console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
     try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
-    addRecentReviewSubmit({ kind: 'json_no_files', product_id, email: customer_email, name: customer_name, rating: intRating, urls: pictureUrlsStr, judgeMeMessage: response.data?.message });
+    addRecentReviewSubmit({ kind: 'json_no_files', product_id, email: customer_email, name: customer_name, rating: intRating, urls: reviewData.picture_urls, judgeMeMessage: response.data?.message });
     return res.json({
       success: true,
       message: 'Review submitted successfully',
       review_id: response.data.review?.id,
       echoed_pictures_count: response.data?.review?.pictures?.length || 0,
-      picture_urls_sent: pictureUrlsStr,
+      picture_urls_sent: reviewData.picture_urls,
     });
   } catch (error) {
     const errBody =
