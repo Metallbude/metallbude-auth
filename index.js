@@ -458,6 +458,7 @@ const returnShipping = new Map();
 const CLEVERPUSH_SUBSCRIPTIONS_FILE = path.join(__dirname, 'data', 'cleverpush_subscriptions.json');
 // key: email (lowercased) -> { subscriptionId, subscribedAt, platform, appVersion, country, language }
 const cleverPushSubscriptions = new Map();
+const raffleSubscriptions = new Set();
 
 // In-memory ring buffer of recent review submissions for debugging
 const recentReviewSubmits = [];
@@ -1835,6 +1836,70 @@ app.get('/cleverpush/subscriptions', (req, res) => {
   });
 });
 
+// POST /raffle/signup - Register user for weekly raffle
+app.post('/raffle/signup', express.json(), async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required'
+      });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+    
+    // Store in memory
+    raffleSubscriptions.add(emailLower);
+    
+    console.log(`📧 User ${emailLower} signed up for weekly raffle`);
+    
+    res.json({
+      success: true,
+      message: 'Successfully signed up for weekly raffle'
+    });
+    
+  } catch (error) {
+    console.error('❌ Raffle signup error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to sign up for raffle'
+    });
+  }
+});
+
+// POST /raffle/unsubscribe - Unsubscribe user from weekly raffle
+app.post('/raffle/unsubscribe', express.json(), async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required'
+      });
+    }
+
+    const emailLower = email.toLowerCase().trim();
+    
+    raffleSubscriptions.delete(emailLower);
+    
+    console.log(`📧 User ${emailLower} unsubscribed from weekly raffle`);
+    
+    res.json({
+      success: true,
+      message: 'Successfully unsubscribed from weekly raffle'
+    });
+    
+  } catch (error) {
+    console.error('❌ Raffle unsubscribe error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to unsubscribe from raffle'
+    });
+  }
+});
 
 // 🔥 FIXED: Customer Account API URL (correct format for 2024-10 API)
 const CUSTOMER_ACCOUNT_API_URL = `https://shopify.com/${config.shopDomain}/account/customer/api/2024-10/graphql`;
