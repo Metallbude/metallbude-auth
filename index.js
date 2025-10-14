@@ -12639,7 +12639,8 @@ app.post('/api/send-notification', async (req, res) => {
       title,
       message,
       segment = 'all',
-      campaign = 'manual'
+      campaign = 'manual',
+      customData // Custom data from request body
     } = req.body;
 
     if (!config.cleverpushApiKey) {
@@ -12656,8 +12657,12 @@ app.post('/api/send-notification', async (req, res) => {
       url: 'https://metallbude.com',
     };
 
+    // Priority: Use custom data from request body if provided
+    if (customData) {
+      notificationData.customData = customData;
+    }
     // If single product, add deep link
-    if (productHandles && productHandles.length === 1) {
+    else if (productHandles && productHandles.length === 1) {
       notificationData.customData = {
         type: 'product',
         id: productHandles[0],
