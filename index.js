@@ -454,6 +454,11 @@ const RETURN_SHIPPING_FILE = path.join(__dirname, 'data', 'return_shipping.json'
 // val: { url, mime, name, trackingNumber, carrierName, noShippingRequired, updatedAt }
 const returnShipping = new Map();
 
+// ===== CLEVERPUSH SUBSCRIPTION MANAGEMENT =====
+const CLEVERPUSH_SUBSCRIPTIONS_FILE = path.join(__dirname, 'data', 'cleverpush_subscriptions.json');
+// key: email (lowercased) -> { subscriptionId, subscribedAt, platform, appVersion, country, language }
+const cleverPushSubscriptions = new Map();
+
 // In-memory ring buffer of recent review submissions for debugging
 const recentReviewSubmits = [];
 function addRecentReviewSubmit(entry) {
@@ -673,15 +678,41 @@ async function persistReturnShipping() {
   } catch (e) { console.error('❌ persist return shipping', e?.message || e); }
 }
 
+async function loadCleverPushSubscriptions() {
+  try {
+    const data = await fs.readFile(CLEVERPUSH_SUBSCRIPTIONS_FILE, 'utf8');
+    const obj = JSON.parse(data);
+    cleverPushSubscriptions.clear();
+    for (const [email, subscription] of Object.entries(obj)) {
+      cleverPushSubscriptions.set(email, subscription);
+    }
+    console.log(`✅ Loaded ${cleverPushSubscriptions.size} CleverPush subscriptions`);
+  } catch (e) {
+    console.log('⚠️ No existing CleverPush subscriptions file found, starting fresh');
+  }
+}
+
+async function persistCleverPushSubscriptions() {
+  try {
+    await fs.mkdir(path.dirname(CLEVERPUSH_SUBSCRIPTIONS_FILE), { recursive: true });
+    const obj = Object.fromEntries(cleverPushSubscriptions);
+    await fs.writeFile(CLEVERPUSH_SUBSCRIPTIONS_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.warn('Could not persist CleverPush subscriptions:', e);
+  }
+}
+
 // Load at startup
 loadStoreCreditLedger().catch((e) => console.warn('Could not load store credit ledger at startup', e));
 loadStoreCreditReservations().catch((e) => console.warn('Could not load store credit reservations at startup', e));
 loadReturnShipping().catch(() => {});
+loadCleverPushSubscriptions().catch(() => {});
 
 // Periodic flush (every 60s)
 setInterval(() => {
   persistStoreCreditLedger().catch(() => {});
   persistReturnShipping().catch(() => {});
+  persistCleverPushSubscriptions().catch(() => {});
 }, 60 * 1000);
 
 // Cleanup expired reservations (every 5 minutes)
@@ -1619,6 +1650,189 @@ app.post('/raffle/pick-winner', async (req, res) => {
     console.error('❌ /raffle/pick-winner error', err?.message || err);
     return res.status(500).json({ success: false, error: 'Internal error', details: safeStringify(err) });
   }
+});
+
+// ===== CLEVERPUSH API ENDPOINTS =====
+
+// POST /cleverpush/store-subscription - Store user's CleverPush subscription ID
+app.post('/cleverpush/store-subscription', express.json(), async (req, res) => {
+  try {
+    const { email, subscriptionId, platform, appVersion, country, language } = req.body;
+    
+    if (!email || !subscriptionId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Email and subscriptionId are required' 
+      });
+    }
+
+    const emailLower = email.toLowerCase();
+    
+    // Store the subscription mapping
+    cleverPushSubscriptions.set(emailLower, {
+      subscriptionId,
+      subscribedAt: new Date().toISOString(),
+      platform: platform || 'unknown',
+      appVersion: appVersion || 'unknown',
+      country: country || 'unknown',
+      language: language || 'de'
+    });
+
+    // Persist to disk
+    await persistCleverPushSubscriptions();
+
+    console.log(`✅ CleverPush: Stored subscription for ${emailLower} -> ${subscriptionId}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Subscription stored successfully',
+      subscriptionId 
+    });
+
+  } catch (error) {
+    console.error('❌ CleverPush store subscription error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to store subscription' 
+    });
+  }
+});
+
+// POST /cleverpush/send-notification - Send CleverPush notification to specific user
+app.post('/cleverpush/send-notification', express.json(), async (req, res) => {
+  try {
+    const { email, title, message, customData, url } = req.body;
+    
+    if (!email || !title || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Email, title, and message are required' 
+      });
+    }
+
+    const emailLower = email.toLowerCase();
+    const subscription = cleverPushSubscriptions.get(emailLower);
+    
+    if (!subscription) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'User not subscribed to notifications' 
+      });
+    }
+
+    const { subscriptionId } = subscription;
+
+    // CleverPush notification payload
+    const notification = {
+      title,
+      text: message,
+      subscriptionIds: [subscriptionId],
+      customData: customData || {},
+      ...(url && { url })
+    };
+
+    // Send to CleverPush REST API
+    const cleverPushResponse = await axios.post(
+      `https://api.cleverpush.com/channel/${config.cleverpushChannelId}/notifications`,
+      notification,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.cleverpushApiKey}`
+        }
+      }
+    );
+
+    console.log(`✅ CleverPush: Sent notification to ${emailLower}:`, title);
+    
+    res.json({ 
+      success: true, 
+      message: 'Notification sent successfully',
+      cleverPushResponse: cleverPushResponse.data 
+    });
+
+  } catch (error) {
+    console.error('❌ CleverPush send notification error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to send notification',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// POST /send-giveaway-winner-notification - Send giveaway winner notification
+app.post('/send-giveaway-winner-notification', express.json(), async (req, res) => {
+  try {
+    const { email, name, prize } = req.body;
+    
+    if (!email || !name || !prize) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Email, name, and prize are required' 
+      });
+    }
+
+    const emailLower = email.toLowerCase();
+    const subscription = cleverPushSubscriptions.get(emailLower);
+    
+    if (!subscription) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'User not subscribed to notifications' 
+      });
+    }
+
+    // Send the notification
+    const notificationData = {
+      email: emailLower,
+      title: '🎉 Herzlichen Glückwunsch!',
+      message: `Du hast das wöchentliche Gewinnspiel gewonnen! ${prize}€ Store Credit wurden deinem Konto gutgeschrieben.`,
+      customData: {
+        type: 'giveaway_winner',
+        prize_amount: prize,
+        winner_email: emailLower,
+        winner_name: name
+      },
+      url: 'metallbude://giveaway-winner'
+    };
+
+    // Use the existing send notification endpoint
+    const response = await axios.post(
+      `${req.protocol}://${req.get('host')}/cleverpush/send-notification`,
+      notificationData,
+      {
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+
+    console.log(`🎉 Giveaway winner notification sent to ${name} (${emailLower})`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Giveaway winner notification sent successfully',
+      recipient: { email: emailLower, name },
+      prize
+    });
+
+  } catch (error) {
+    console.error('❌ Giveaway winner notification error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to send giveaway winner notification',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// GET /cleverpush/subscriptions - Debug endpoint to view all subscriptions
+app.get('/cleverpush/subscriptions', (req, res) => {
+  const subscriptions = Object.fromEntries(cleverPushSubscriptions);
+  res.json({
+    success: true,
+    count: cleverPushSubscriptions.size,
+    subscriptions
+  });
 });
 
 
