@@ -310,6 +310,10 @@ const shopifyCustomerTokens = new Map();
 // In-memory orders cache: customerId -> { orders: [...], fetchedAt: timestamp }
 const ordersCache = new Map();
 
+// Orders cache configuration
+const ORDERS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const ORDERS_CACHE_MAX_SIZE = 1000; // Max 1000 cached entries
+
 // Load sessions on startup
 async function loadPersistedSessionsWithLogging() {
   try {
@@ -434,6 +438,96 @@ process.on('SIGINT', async () => {
   await persistSessions();
   process.exit(0);
 });
+
+// 🧹 MEMORY CLEANUP: Orders cache cleanup
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  for (const [customerId, cached] of ordersCache.entries()) {
+    // Remove entries older than TTL
+    if (cached.fetchedAt < now - ORDERS_CACHE_TTL_MS) {
+      ordersCache.delete(customerId);
+      cleaned++;
+    }
+  }
+  
+  // If still too large, remove oldest entries
+  if (ordersCache.size > ORDERS_CACHE_MAX_SIZE) {
+    const entries = Array.from(ordersCache.entries())
+      .sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+    const toRemove = ordersCache.size - ORDERS_CACHE_MAX_SIZE;
+    
+    for (let i = 0; i < toRemove; i++) {
+      ordersCache.delete(entries[i][0]);
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) {
+    console.log(`🧹 Orders cache cleanup: removed ${cleaned} entries, ${ordersCache.size} remaining`);
+  }
+}, 60 * 1000); // Every minute
+
+// 🧹 MEMORY CLEANUP: Session and token cleanup
+setInterval(() => {
+  const now = Date.now();
+  let expiredSessions = 0;
+  let expiredRefreshTokens = 0;
+  let expiredVerificationCodes = 0;
+  let expiredAuthCodes = 0;
+  
+  // Clean expired sessions
+  for (const [token, session] of sessions.entries()) {
+    if (session.expiresAt && session.expiresAt < now) {
+      sessions.delete(token);
+      expiredSessions++;
+    }
+  }
+  
+  // Clean expired refresh tokens
+  for (const [token, data] of appRefreshTokens.entries()) {
+    if (data.expiresAt && data.expiresAt < now) {
+      appRefreshTokens.delete(token);
+      expiredRefreshTokens++;
+    }
+  }
+  
+  // Clean expired verification codes
+  for (const [sessionId, data] of config.verificationCodes.entries()) {
+    if (data.expiresAt < now) {
+      config.verificationCodes.delete(sessionId);
+      expiredVerificationCodes++;
+    }
+  }
+  
+  // Clean expired authorization codes (older than 10 minutes)
+  for (const [code, data] of config.authorizationCodes.entries()) {
+    if (data.createdAt < now - 10 * 60 * 1000) {
+      config.authorizationCodes.delete(code);
+      expiredAuthCodes++;
+    }
+  }
+  
+  // Clean expired access tokens (OAuth)
+  for (const [token, data] of config.accessTokens.entries()) {
+    if (data.expires_at < now) {
+      config.accessTokens.delete(token);
+    }
+  }
+  
+  // Clean expired refresh tokens (OAuth)
+  for (const [token, data] of config.refreshTokens.entries()) {
+    if (data.expires_at && data.expires_at < now) {
+      config.refreshTokens.delete(token);
+    }
+  }
+  
+  if (expiredSessions > 0 || expiredRefreshTokens > 0 || expiredVerificationCodes > 0 || expiredAuthCodes > 0) {
+    console.log(`🧹 Session cleanup: ${expiredSessions} sessions, ${expiredRefreshTokens} refresh tokens, ${expiredVerificationCodes} verification codes, ${expiredAuthCodes} auth codes`);
+    persistSessions(); // Save cleaned state
+  }
+}, 10 * 60 * 1000); // Every 10 minutes
 
 // ===== STORE-CREDIT LEDGER (persistent on disk) =====
 // Uses the same pattern as session persistence. Stored under project data.
@@ -580,6 +674,38 @@ if (REVIEWS_CACHE_ENABLED) {
       }
     }
   }, Math.max(30_000, REVIEWS_CACHE_SWEEP_MS));
+}
+
+// 🧹 MEMORY CLEANUP: Reviews cache cleanup
+if (REVIEWS_CACHE_ENABLED) {
+  setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    for (const [key, entry] of reviewsCache.entries()) {
+      // Remove expired entries
+      if (entry.expiresAt < now) {
+        reviewsCache.delete(key);
+        cleaned++;
+      }
+    }
+    
+    // Limit cache size (max 500 entries)
+    if (reviewsCache.size > 500) {
+      const entries = Array.from(reviewsCache.entries())
+        .sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+      const toRemove = reviewsCache.size - 500;
+      
+      for (let i = 0; i < toRemove; i++) {
+        reviewsCache.delete(entries[i][0]);
+        cleaned++;
+      }
+    }
+    
+    if (cleaned > 0) {
+      console.log(`🧹 Reviews cache cleanup: removed ${cleaned} entries, ${reviewsCache.size} remaining`);
+    }
+  }, 5 * 60 * 1000); // Every 5 minutes
 }
 
 async function loadStoreCreditLedger() {
@@ -1640,11 +1766,45 @@ function generateReservationId() {
 }
 
 // Send verification email
-async function sendVerificationEmail(email, code) {
+async function sendVerificationEmail(email, code, language = 'de') {
   if (!config.mailerSendApiKey) {
     console.log(`Verification code for ${email}: ${code}`);
     return true;
   }
+
+  // Email templates by language
+  const templates = {
+    de: {
+      subject: `Dein Anmeldecode: ${code}`,
+      heading: 'Dein Anmeldecode für Metallbude',
+      instruction: 'Gib diesen Code ein, um dich anzumelden:',
+      expiry: 'Dieser Code ist 10 Minuten gültig.',
+      textExpiry: 'WICHTIG: Dieser Code ist 10 Minuten gültig.'
+    },
+    en: {
+      subject: `Your login code: ${code}`,
+      heading: 'Your Metallbude Login Code',
+      instruction: 'Enter this code to log in:',
+      expiry: 'This code is valid for 10 minutes.',
+      textExpiry: 'IMPORTANT: This code is valid for 10 minutes.'
+    },
+    fr: {
+      subject: `Ton code de connexion: ${code}`,
+      heading: 'Ton code de connexion Metallbude',
+      instruction: 'Saisis ce code pour te connecter:',
+      expiry: 'Ce code est valable 10 minutes.',
+      textExpiry: 'IMPORTANT: Ce code est valable 10 minutes.'
+    },
+    it: {
+      subject: `Il tuo codice di accesso: ${code}`,
+      heading: 'Il tuo codice di accesso Metallbude',
+      instruction: 'Inserisci questo codice per accedere:',
+      expiry: 'Questo codice è valido per 10 minuti.',
+      textExpiry: 'IMPORTANTE: Questo codice è valido per 10 minuti.'
+    }
+  };
+
+  const lang = templates[language] || templates.de;
 
   try {
     const response = await axios.post(
@@ -1655,16 +1815,16 @@ async function sendVerificationEmail(email, code) {
           name: 'Metallbude'
         },
         to: [{ email: email }],
-        subject: 'Ihr Anmeldecode für Metallbude',
+        subject: lang.subject,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2>Ihr Anmeldecode</h2>
-            <p>Geben Sie diesen Code ein:</p>
+            <h2>${lang.heading}</h2>
+            <p>${lang.instruction}</p>
             <h1 style="font-size: 32px; letter-spacing: 5px; color: #333;">${code}</h1>
-            <p>Dieser Code ist 10 Minuten gültig.</p>
+            <p style="color: #d9534f; font-weight: bold;">${lang.expiry}</p>
           </div>
         `,
-        text: `Ihr Anmeldecode: ${code}\n\nDieser Code ist 10 Minuten gültig.`
+        text: `${lang.subject}\n\n${lang.instruction}\n\n${code}\n\n${lang.textExpiry}`
       },
       {
         headers: {
@@ -4118,7 +4278,7 @@ app.post('/reviews/:reviewId/moderate', async (req, res) => {
 // Email endpoints (MailerSend proxy)
 app.post('/email/send-code', async (req, res) => {
   try {
-    const { email, code, type = 'verification' } = req.body;
+    const { email, code, type = 'verification', language = 'de' } = req.body;
 
     if (!email || !code) {
       return res.status(400).json({ success: false, error: 'Email and code required' });
@@ -4131,6 +4291,43 @@ app.post('/email/send-code', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Email service not configured' });
     }
 
+    const templates = {
+      de: {
+        subject: `Dein ${type === 'verification' ? 'Verifizierungs' : ''}code: ${code}`,
+        heading: `Dein ${type === 'verification' ? 'Verifizierungs' : ''}code`,
+        instruction: 'Dein Code lautet:',
+        expiry: 'Dieser Code ist 10 Minuten gültig.',
+        notRequested: 'Falls du diesen Code nicht angefordert hast, ignoriere diese E-Mail.',
+        textExpiry: 'WICHTIG: Dieser Code ist 10 Minuten gültig.'
+      },
+      en: {
+        subject: `Your ${type === 'verification' ? 'verification ' : ''}code: ${code}`,
+        heading: `Your ${type === 'verification' ? 'Verification ' : ''}Code`,
+        instruction: 'Your code is:',
+        expiry: 'This code is valid for 10 minutes.',
+        notRequested: 'If you didn\'t request this code, please ignore this email.',
+        textExpiry: 'IMPORTANT: This code is valid for 10 minutes.'
+      },
+      fr: {
+        subject: `Ton code ${type === 'verification' ? 'de vérification' : ''}: ${code}`,
+        heading: `Ton code ${type === 'verification' ? 'de vérification' : ''}`,
+        instruction: 'Ton code est:',
+        expiry: 'Ce code est valable 10 minutes.',
+        notRequested: 'Si tu n\'as pas demandé ce code, ignore cet email.',
+        textExpiry: 'IMPORTANT: Ce code est valable 10 minutes.'
+      },
+      it: {
+        subject: `Il tuo codice ${type === 'verification' ? 'di verifica' : ''}: ${code}`,
+        heading: `Il tuo codice ${type === 'verification' ? 'di verifica' : ''}`,
+        instruction: 'Il tuo codice è:',
+        expiry: 'Questo codice è valido per 10 minuti.',
+        notRequested: 'Se non hai richiesto questo codice, ignora questa email.',
+        textExpiry: 'IMPORTANTE: Questo codice è valido per 10 minuti.'
+      }
+    };
+
+    const lang = templates[language] || templates.de;
+
     const emailData = {
       from: {
         email: 'noreply@metallbude.com',
@@ -4139,14 +4336,14 @@ app.post('/email/send-code', async (req, res) => {
       to: [{
         email: email
       }],
-      subject: type === 'verification' ? 'Dein Verifizierungscode' : 'Dein Code',
+      subject: lang.subject,
       html: `
-        <h2>Dein ${type === 'verification' ? 'Verifizierungs' : ''}code</h2>
-        <p>Dein Code lautet: <strong>${code}</strong></p>
-        <p>Dieser Code ist 10 Minuten gültig.</p>
-        <p>Falls du diesen Code nicht angefordert hast, ignoriere diese E-Mail.</p>
+        <h2>${lang.heading}</h2>
+        <p>${lang.instruction} <strong>${code}</strong></p>
+        <p style="color: #d9534f; font-weight: bold;">${lang.expiry}</p>
+        <p>${lang.notRequested}</p>
       `,
-      text: `Dein ${type === 'verification' ? 'Verifizierungs' : ''}code lautet: ${code}. Dieser Code ist 10 Minuten gültig.`
+      text: `${lang.heading}\n\n${lang.instruction} ${code}\n\n${lang.textExpiry}\n\n${lang.notRequested}`
     };
 
     await axios.post('https://api.mailersend.com/v1/email', emailData, {
@@ -4156,7 +4353,7 @@ app.post('/email/send-code', async (req, res) => {
       }
     });
 
-    console.log(`✅ ${type} code sent to ${email}`);
+    console.log(`✅ ${type} code sent to ${email} (language: ${language})`);
     res.json({ success: true, message: `${type} code sent successfully` });
 
   } catch (error) {
@@ -4175,7 +4372,7 @@ app.post('/email/send-code', async (req, res) => {
 
 // Request code endpoint for web OAuth flow
 app.post('/auth/request-code-web', async (req, res) => {
-  const { email, oauthSessionId } = req.body;
+  const { email, oauthSessionId, language } = req.body;
 
   if (!email) {
     return res.status(400).json({ success: false, error: 'E-Mail erforderlich' });
@@ -4192,8 +4389,8 @@ app.post('/auth/request-code-web', async (req, res) => {
     expiresAt: Date.now() + 10 * 60 * 1000
   });
 
-  await sendVerificationEmail(email, code);
-  console.log(`Web OAuth: Generated code for ${email}: ${code}`);
+  await sendVerificationEmail(email, code, language || 'de');
+  console.log(`Web OAuth: Generated code for ${email}: ${code} (language: ${language || 'de'})`);
 
   res.json({ success: true, sessionId });
 });
@@ -4490,7 +4687,7 @@ async function createShopifyCustomer(email) {
 
 // Request one-time code endpoint (for Flutter app)
 app.post('/auth/request-code', async (req, res) => {
-  const { email } = req.body;
+  const { email, language } = req.body;
 
   if (!email) {
     return res.status(400).json({ success: false, error: 'E-Mail-Adresse ist erforderlich' });
@@ -4516,8 +4713,8 @@ app.post('/auth/request-code', async (req, res) => {
     isNewCustomer
   });
 
-  await sendVerificationEmail(email, code);
-  console.log(`Mobile app: Generated code for ${email}: ${code}`);
+  await sendVerificationEmail(email, code, language || 'de');
+  console.log(`Mobile app: Generated code for ${email}: ${code} (language: ${language || 'de'})`);
 
   res.json({
     success: true,
