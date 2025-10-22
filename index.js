@@ -1666,6 +1666,90 @@ app.post('/tag-app-customer', async (req, res) => {
   }
 });
 
+// GET /check-app-discount - Check if APP25 automatic discount is active
+app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
+  try {
+    const query = `
+      query {
+        automaticDiscountNodes(first: 50, query: "status:ACTIVE") {
+          edges {
+            node {
+              id
+              automaticDiscount {
+                ... on DiscountAutomaticApp {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+                ... on DiscountAutomaticBasic {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+                ... on DiscountAutomaticBxgy {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+                ... on DiscountAutomaticFreeShipping {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await adminGraphQL(query);
+    const edges = response.data?.automaticDiscountNodes?.edges || [];
+    
+    console.log(`🔍 Found ${edges.length} ACTIVE automatic discounts`);
+    edges.forEach((edge, i) => {
+      const d = edge.node?.automaticDiscount;
+      console.log(`  ${i + 1}. "${d?.title}" (${d?.status}) [${edge.node?.id}]`);
+    });
+    
+    if (edges.length === 0) {
+      console.log('❌ No active automatic discounts found');
+      return res.json({ success: true, isActive: false, code: 'APP25' });
+    }
+
+    // Use the first active discount
+    const discount = edges[0].node.automaticDiscount;
+    console.log('✅ Using discount:', discount.title);
+    
+    const isActive = discount.status === 'ACTIVE';
+    const now = new Date();
+    const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
+    const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
+    const isCurrentlyValid = isActive && 
+      (!startsAt || now >= startsAt) && 
+      (!endsAt || now <= endsAt);
+
+    return res.json({
+      success: true,
+      isActive: isCurrentlyValid,
+      code: 'APP25',
+      type: 'automatic',
+      status: discount.status,
+      title: discount.title,
+      startsAt: discount.startsAt,
+      endsAt: discount.endsAt
+    });
+
+  } catch (error) {
+    console.error('Error checking discount status:', error);
+    res.status(500).json({ success: false, error: 'Failed to check discount status' });
+  }
+});
+
 // ===== Raffle participant management + pick-winner =====
 const RAFFLE_PARTICIPANTS_FILE = path.join(__dirname, 'data', 'raffle_participants.json');
 const RAFFLE_AUDIT_FILE = path.join(__dirname, 'data', 'raffle_audit.json');
@@ -15647,185 +15731,6 @@ app.get('/api/returns/:orderId/shipping', async (req, res) => {
       error: 'Failed to fetch return shipping data',
       details: error.message
     });
-  }
-});
-
-// Check if APP25 discount code is active and available
-app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
-  try {
-    // Check both automatic discounts AND discount codes
-    const automaticQuery = `
-      query {
-        automaticDiscountNodes(first: 20) {
-          edges {
-            node {
-              id
-              automaticDiscount {
-                ... on DiscountAutomaticBasic {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                  customerGets {
-                    value {
-                      ... on DiscountPercentage {
-                        percentage
-                      }
-                      ... on DiscountAmount {
-                        amount {
-                          amount
-                        }
-                      }
-                    }
-                  }
-                }
-                ... on DiscountAutomaticBxgy {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const codeQuery = `
-      query {
-        codeDiscountNodes(first: 10) {
-          edges {
-            node {
-              id
-              codeDiscount {
-                ... on DiscountCodeBasic {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                  codes(first: 5) {
-                    edges {
-                      node {
-                        code
-                      }
-                    }
-                  }
-                }
-                ... on DiscountCodeBxgy {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                  codes(first: 5) {
-                    edges {
-                      node {
-                        code
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    // Try automatic discounts first
-    const automaticResponse = await adminGraphQL(automaticQuery);
-    const automaticEdges = automaticResponse.data?.automaticDiscountNodes?.edges || [];
-    console.log('🔍 Found automatic discounts:', automaticEdges.length);
-    
-    // Log raw response to see structure
-    console.log('📦 RAW RESPONSE:', JSON.stringify(automaticResponse.data, null, 2));
-    
-    console.log('📋 ALL DISCOUNTS:');
-    
-    automaticEdges.forEach((edge, index) => {
-      const discount = edge.node?.automaticDiscount;
-      const title = discount?.title || '';
-      const status = discount?.status || 'UNKNOWN';
-      const percentage = discount?.customerGets?.value?.percentage;
-      const amount = discount?.customerGets?.value?.amount?.amount;
-      
-      console.log(`  ${index + 1}. "${title}" - Status: ${status} - Value: ${percentage ? percentage + '%' : amount ? '€' + amount : 'N/A'}`);
-    });
-    
-    // TEMPORARY: Just match the first ACTIVE 25% discount
-    const automaticDiscount = automaticEdges.find(edge => {
-      const discount = edge.node?.automaticDiscount;
-      const percentage = discount?.customerGets?.value?.percentage;
-      const status = discount?.status;
-      
-      return status === 'ACTIVE' && (percentage === 25 || percentage === 0.25);
-    });
-
-    if (automaticDiscount) {
-      const discount = automaticDiscount.node.automaticDiscount;
-      console.log('✅ Found automatic discount:', discount.title);
-      
-      const isActive = discount.status === 'ACTIVE';
-      const now = new Date();
-      const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
-      const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
-      const isCurrentlyValid = isActive && 
-        (!startsAt || now >= startsAt) && 
-        (!endsAt || now <= endsAt);
-
-      return res.json({
-        success: true,
-        isActive: isCurrentlyValid,
-        code: 'APP25',
-        type: 'automatic',
-        status: discount.status,
-        title: discount.title,
-        startsAt: discount.startsAt,
-        endsAt: discount.endsAt
-      });
-    }
-
-    // Try discount codes
-    const codeResponse = await adminGraphQL(codeQuery);
-    const codeEdges = codeResponse.data?.codeDiscountNodes?.edges || [];
-    console.log('� Found discount codes:', codeEdges.length);
-    
-    const app25Discount = codeEdges.find(edge => {
-      const codes = edge.node?.codeDiscount?.codes?.edges || [];
-      const codeList = codes.map(c => c.node?.code);
-      console.log('  - Codes:', codeList);
-      return codes.some(c => c.node?.code === 'APP25');
-    });
-
-    if (!app25Discount) {
-      console.log('⚠️ APP25 discount not found in either automatic or code discounts');
-      return res.json({ success: true, isActive: false, code: 'APP25' });
-    }
-
-    const discount = app25Discount.node.codeDiscount;
-    console.log('✅ Found APP25 code discount');
-    
-    const isActive = discount.status === 'ACTIVE';
-    const now = new Date();
-    const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
-    const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
-    const isCurrentlyValid = isActive && 
-      (!startsAt || now >= startsAt) && 
-      (!endsAt || now <= endsAt);
-
-    res.json({
-      success: true,
-      isActive: isCurrentlyValid,
-      code: 'APP25',
-      type: 'code',
-      status: discount.status,
-      startsAt: discount.startsAt,
-      endsAt: discount.endsAt
-    });
-
-  } catch (error) {
-    console.error('Error checking discount status:', error);
-    res.status(500).json({ success: false, error: 'Failed to check discount status' });
   }
 });
 
