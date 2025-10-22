@@ -204,7 +204,7 @@ const config = {
   adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
   // ✅ FIXED: Use consistent API version (2024-10) for both Storefront and Admin APIs
   apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
-  adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2025-10/graphql.json',
+  adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2024-10/graphql.json',
   cleverpushChannelId: process.env.CLEVERPUSH_CHANNEL_ID,
   cleverpushApiKey: process.env.CLEVERPUSH_API_KEY,
   mailerSendApiKey: process.env.MAILERSEND_API_KEY,
@@ -5033,6 +5033,9 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
   console.log('🎯 === /check-app-discount ENDPOINT CALLED ===');
   try {
+    // Use 2025-10 API for discount queries (supports status:active filter)
+    const discountApiUrl = 'https://metallbude-de.myshopify.com/admin/api/2025-10/graphql.json';
+    
     const query = `
       query {
         automaticDiscountNodes(first: 50, query: "status:active") {
@@ -5085,8 +5088,17 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     `;
 
     console.log('📤 Executing GraphQL query for ACTIVE automatic discounts...');
-    const response = await adminGraphQL(query);
-    const edges = response.data?.automaticDiscountNodes?.edges || [];
+    const response = await axios.post(
+      discountApiUrl,
+      { query },
+      { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+    );
+    
+    if (response.data?.errors) {
+      throw new Error(JSON.stringify(response.data.errors));
+    }
+    
+    const edges = response.data?.data?.automaticDiscountNodes?.edges || [];
     
     console.log(`🔍 Found ${edges.length} ACTIVE automatic discounts from query`);
     edges.forEach((edge, i) => {
@@ -5112,7 +5124,8 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       (!startsAt || now >= startsAt) && 
       (!endsAt || now <= endsAt);
 
-    console.log('🎉🎉🎉 Returning discount status - isActive:', isCurrentlyValid);
+    const percentage = discount.customerGets?.value?.percentage;
+    console.log('🎉🎉🎉 Returning discount status - isActive:', isCurrentlyValid, '- Percentage:', percentage ? percentage * 100 : 0);
     return res.json({
       success: true,
       isActive: isCurrentlyValid,
@@ -5121,7 +5134,8 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       status: discount.status,
       title: discount.title,
       startsAt: discount.startsAt,
-      endsAt: discount.endsAt
+      endsAt: discount.endsAt,
+      percentage: percentage ? percentage * 100 : 25
     });
 
   } catch (error) {
