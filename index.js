@@ -15653,9 +15653,36 @@ app.get('/api/returns/:orderId/shipping', async (req, res) => {
 // Check if APP25 discount code is active and available
 app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
   try {
-    const query = `
+    // Check both automatic discounts AND discount codes
+    const automaticQuery = `
       query {
-        codeDiscountNodes(first: 10, query: "title:APP25") {
+        automaticDiscountNodes(first: 10) {
+          edges {
+            node {
+              id
+              automaticDiscount {
+                ... on DiscountAutomaticBasic {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+                ... on DiscountAutomaticBxgy {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const codeQuery = `
+      query {
+        codeDiscountNodes(first: 10) {
           edges {
             node {
               id
@@ -15665,7 +15692,7 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
                   status
                   startsAt
                   endsAt
-                  codes(first: 1) {
+                  codes(first: 5) {
                     edges {
                       node {
                         code
@@ -15678,20 +15705,7 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
                   status
                   startsAt
                   endsAt
-                  codes(first: 1) {
-                    edges {
-                      node {
-                        code
-                      }
-                    }
-                  }
-                }
-                ... on DiscountCodeFreeShipping {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                  codes(first: 1) {
+                  codes(first: 5) {
                     edges {
                       node {
                         code
@@ -15706,47 +15720,74 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    const response = await adminGraphQL(query);
-    console.log('🔍 Discount query response:', JSON.stringify(response.data, null, 2));
+    // Try automatic discounts first
+    const automaticResponse = await adminGraphQL(automaticQuery);
+    const automaticEdges = automaticResponse.data?.automaticDiscountNodes?.edges || [];
+    console.log('🔍 Found automatic discounts:', automaticEdges.length);
     
-    const edges = response.data?.codeDiscountNodes?.edges || [];
-    console.log('📦 Found discount edges:', edges.length);
+    const automaticDiscount = automaticEdges.find(edge => {
+      const title = edge.node?.automaticDiscount?.title?.toUpperCase() || '';
+      console.log('  - Automatic discount:', title);
+      return title.includes('APP') || title.includes('25');
+    });
+
+    if (automaticDiscount) {
+      const discount = automaticDiscount.node.automaticDiscount;
+      console.log('✅ Found automatic discount:', discount.title);
+      
+      const isActive = discount.status === 'ACTIVE';
+      const now = new Date();
+      const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
+      const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
+      const isCurrentlyValid = isActive && 
+        (!startsAt || now >= startsAt) && 
+        (!endsAt || now <= endsAt);
+
+      return res.json({
+        success: true,
+        isActive: isCurrentlyValid,
+        code: 'APP25',
+        type: 'automatic',
+        status: discount.status,
+        title: discount.title,
+        startsAt: discount.startsAt,
+        endsAt: discount.endsAt
+      });
+    }
+
+    // Try discount codes
+    const codeResponse = await adminGraphQL(codeQuery);
+    const codeEdges = codeResponse.data?.codeDiscountNodes?.edges || [];
+    console.log('� Found discount codes:', codeEdges.length);
     
-    // Find APP25 discount
-    const app25Discount = edges.find(edge => {
+    const app25Discount = codeEdges.find(edge => {
       const codes = edge.node?.codeDiscount?.codes?.edges || [];
-      console.log('🔍 Checking codes:', codes.map(c => c.node?.code));
+      const codeList = codes.map(c => c.node?.code);
+      console.log('  - Codes:', codeList);
       return codes.some(c => c.node?.code === 'APP25');
     });
 
     if (!app25Discount) {
-      console.log('⚠️ APP25 discount not found');
+      console.log('⚠️ APP25 discount not found in either automatic or code discounts');
       return res.json({ success: true, isActive: false, code: 'APP25' });
     }
 
     const discount = app25Discount.node.codeDiscount;
-    console.log('✅ Found APP25 discount:', {
-      status: discount.status,
-      startsAt: discount.startsAt,
-      endsAt: discount.endsAt
-    });
+    console.log('✅ Found APP25 code discount');
     
     const isActive = discount.status === 'ACTIVE';
     const now = new Date();
     const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
     const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
-
-    // Check if currently valid (active + within date range)
     const isCurrentlyValid = isActive && 
       (!startsAt || now >= startsAt) && 
       (!endsAt || now <= endsAt);
-
-    console.log('📊 Validation:', { isActive, now: now.toISOString(), startsAt, endsAt, isCurrentlyValid });
 
     res.json({
       success: true,
       isActive: isCurrentlyValid,
       code: 'APP25',
+      type: 'code',
       status: discount.status,
       startsAt: discount.startsAt,
       endsAt: discount.endsAt
