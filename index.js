@@ -15678,9 +15678,6 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
                       }
                     }
                   }
-                  customerSelection {
-                    __typename
-                  }
                 }
                 ... on DiscountAutomaticBxgy {
                   title
@@ -15739,19 +15736,25 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     const automaticResponse = await adminGraphQL(automaticQuery);
     const automaticEdges = automaticResponse.data?.automaticDiscountNodes?.edges || [];
     console.log('🔍 Found automatic discounts:', automaticEdges.length);
+    console.log('📋 ALL DISCOUNTS:');
     
-    // Look for any discount targeting customer segments (not all customers)
-    const automaticDiscount = automaticEdges.find(edge => {
+    automaticEdges.forEach((edge, index) => {
       const discount = edge.node?.automaticDiscount;
-      const title = discount?.title?.toUpperCase() || '';
+      const title = discount?.title || '';
+      const status = discount?.status || 'UNKNOWN';
       const percentage = discount?.customerGets?.value?.percentage;
       const amount = discount?.customerGets?.value?.amount?.amount;
-      const hasSegment = discount?.customerSelection?.__typename !== 'DiscountCustomerAll';
       
-      console.log(`  - "${title}" (${percentage ? percentage + '%' : amount ? '€' + amount : 'N/A'}) [segment: ${hasSegment}]`);
+      console.log(`  ${index + 1}. "${title}" - Status: ${status} - Value: ${percentage ? percentage + '%' : amount ? '€' + amount : 'N/A'}`);
+    });
+    
+    // TEMPORARY: Just match the first ACTIVE 25% discount
+    const automaticDiscount = automaticEdges.find(edge => {
+      const discount = edge.node?.automaticDiscount;
+      const percentage = discount?.customerGets?.value?.percentage;
+      const status = discount?.status;
       
-      // Look for segment-based 25% discount
-      return hasSegment && (percentage === 25 || percentage === 0.25);
+      return status === 'ACTIVE' && (percentage === 25 || percentage === 0.25);
     });
 
     if (automaticDiscount) {
