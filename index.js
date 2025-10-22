@@ -15671,7 +15671,15 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
                       ... on DiscountPercentage {
                         percentage
                       }
+                      ... on DiscountAmount {
+                        amount {
+                          amount
+                        }
+                      }
                     }
+                  }
+                  customerSelection {
+                    __typename
                   }
                 }
                 ... on DiscountAutomaticBxgy {
@@ -15732,16 +15740,18 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     const automaticEdges = automaticResponse.data?.automaticDiscountNodes?.edges || [];
     console.log('🔍 Found automatic discounts:', automaticEdges.length);
     
-    // Look for 25% discount (APP25 is likely 25% off)
+    // Look for any discount targeting customer segments (not all customers)
     const automaticDiscount = automaticEdges.find(edge => {
       const discount = edge.node?.automaticDiscount;
       const title = discount?.title?.toUpperCase() || '';
       const percentage = discount?.customerGets?.value?.percentage;
+      const amount = discount?.customerGets?.value?.amount?.amount;
+      const hasSegment = discount?.customerSelection?.__typename !== 'DiscountCustomerAll';
       
-      console.log(`  - Automatic discount: "${title}" (${percentage ? percentage + '%' : 'N/A'})`);
+      console.log(`  - "${title}" (${percentage ? percentage + '%' : amount ? '€' + amount : 'N/A'}) [segment: ${hasSegment}]`);
       
-      // Look for 25% discount or title containing APP
-      return percentage === 25 || title.includes('APP') || title.includes('EXKLUSIV');
+      // Look for segment-based 25% discount
+      return hasSegment && (percentage === 25 || percentage === 0.25);
     });
 
     if (automaticDiscount) {
