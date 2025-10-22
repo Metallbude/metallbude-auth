@@ -1593,6 +1593,79 @@ function safeStringify(e) {
   try { return typeof e === 'string' ? e : JSON.stringify(e); } catch { return String(e); }
 }
 
+// ===== Customer Tagging for App Users =====
+
+// GraphQL mutation to tag a customer
+const MUTATION_CUSTOMER_TAG = `
+mutation tagsAdd($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) {
+    node {
+      id
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}`;
+
+// POST /tag-app-customer
+// Body: { customerId: "gid://shopify/Customer/...", email: "user@example.com", tag: "Metallbude App" }
+app.post('/tag-app-customer', async (req, res) => {
+  try {
+    const { customerId, email, tag } = req.body || {};
+    
+    // Validate inputs
+    if (!customerId || !tag) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'customerId and tag are required' 
+      });
+    }
+
+    // Ensure customerId is in GID format
+    const customerGid = customerId.startsWith('gid://') 
+      ? customerId 
+      : `gid://shopify/Customer/${customerId}`;
+
+    console.log(`🏷️  Tagging customer ${email || customerGid} with tag: "${tag}"`);
+
+    // Tag the customer using Shopify Admin API
+    const result = await adminGraphQL(MUTATION_CUSTOMER_TAG, {
+      id: customerGid,
+      tags: [tag]
+    });
+
+    // Check for errors
+    const userErrors = result?.data?.tagsAdd?.userErrors || [];
+    if (userErrors.length > 0) {
+      console.error('❌ Customer tagging failed:', userErrors);
+      return res.status(400).json({
+        success: false,
+        error: 'Failed to tag customer',
+        details: userErrors
+      });
+    }
+
+    console.log(`✅ Successfully tagged customer ${email || customerGid} with "${tag}"`);
+
+    return res.json({
+      success: true,
+      customerId: customerGid,
+      tag,
+      message: 'Customer tagged successfully'
+    });
+
+  } catch (err) {
+    console.error('❌ /tag-app-customer error:', err?.message || err);
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Internal error', 
+      details: safeStringify(err) 
+    });
+  }
+});
+
 // ===== Raffle participant management + pick-winner =====
 const RAFFLE_PARTICIPANTS_FILE = path.join(__dirname, 'data', 'raffle_participants.json');
 const RAFFLE_AUDIT_FILE = path.join(__dirname, 'data', 'raffle_audit.json');
