@@ -15656,7 +15656,7 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     // Check both automatic discounts AND discount codes
     const automaticQuery = `
       query {
-        automaticDiscountNodes(first: 10) {
+        automaticDiscountNodes(first: 20) {
           edges {
             node {
               id
@@ -15666,6 +15666,13 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
                   status
                   startsAt
                   endsAt
+                  customerGets {
+                    value {
+                      ... on DiscountPercentage {
+                        percentage
+                      }
+                    }
+                  }
                 }
                 ... on DiscountAutomaticBxgy {
                   title
@@ -15725,10 +15732,16 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     const automaticEdges = automaticResponse.data?.automaticDiscountNodes?.edges || [];
     console.log('🔍 Found automatic discounts:', automaticEdges.length);
     
+    // Look for 25% discount (APP25 is likely 25% off)
     const automaticDiscount = automaticEdges.find(edge => {
-      const title = edge.node?.automaticDiscount?.title?.toUpperCase() || '';
-      console.log('  - Automatic discount:', title);
-      return title.includes('APP') || title.includes('25');
+      const discount = edge.node?.automaticDiscount;
+      const title = discount?.title?.toUpperCase() || '';
+      const percentage = discount?.customerGets?.value?.percentage;
+      
+      console.log(`  - Automatic discount: "${title}" (${percentage ? percentage + '%' : 'N/A'})`);
+      
+      // Look for 25% discount or title containing APP
+      return percentage === 25 || title.includes('APP') || title.includes('EXKLUSIV');
     });
 
     if (automaticDiscount) {
