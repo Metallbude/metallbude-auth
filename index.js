@@ -15650,6 +15650,101 @@ app.get('/api/returns/:orderId/shipping', async (req, res) => {
   }
 });
 
+// Check if APP25 discount code is active and available
+app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
+  try {
+    const query = `
+      query {
+        codeDiscountNodes(first: 10, query: "title:APP25") {
+          edges {
+            node {
+              id
+              codeDiscount {
+                ... on DiscountCodeBasic {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                  codes(first: 1) {
+                    edges {
+                      node {
+                        code
+                      }
+                    }
+                  }
+                }
+                ... on DiscountCodeBxgy {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                  codes(first: 1) {
+                    edges {
+                      node {
+                        code
+                      }
+                    }
+                  }
+                }
+                ... on DiscountCodeFreeShipping {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                  codes(first: 1) {
+                    edges {
+                      node {
+                        code
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await adminGraphQL(query);
+    const edges = response.data?.codeDiscountNodes?.edges || [];
+    
+    // Find APP25 discount
+    const app25Discount = edges.find(edge => {
+      const codes = edge.node?.codeDiscount?.codes?.edges || [];
+      return codes.some(c => c.node?.code === 'APP25');
+    });
+
+    if (!app25Discount) {
+      return res.json({ success: true, isActive: false, code: 'APP25' });
+    }
+
+    const discount = app25Discount.node.codeDiscount;
+    const isActive = discount.status === 'ACTIVE';
+    const now = new Date();
+    const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
+    const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
+
+    // Check if currently valid (active + within date range)
+    const isCurrentlyValid = isActive && 
+      (!startsAt || now >= startsAt) && 
+      (!endsAt || now <= endsAt);
+
+    res.json({
+      success: true,
+      isActive: isCurrentlyValid,
+      code: 'APP25',
+      status: discount.status,
+      startsAt: discount.startsAt,
+      endsAt: discount.endsAt
+    });
+
+  } catch (error) {
+    console.error('Error checking discount status:', error);
+    res.status(500).json({ success: false, error: 'Failed to check discount status' });
+  }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
