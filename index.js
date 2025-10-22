@@ -5031,26 +5031,26 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 
 // GET /check-app-discount - Check if APP25 automatic discount is active
 app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
+  console.log('🎯 === /check-app-discount ENDPOINT CALLED ===');
   try {
     const query = `
       query {
-        automaticDiscountNodes(first: 50) {
+        automaticDiscountNodes(first: 50, query: "status:active") {
           edges {
             node {
               id
               automaticDiscount {
                 __typename
-                ... on DiscountAutomaticApp {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                }
                 ... on DiscountAutomaticBasic {
                   title
                   status
                   startsAt
                   endsAt
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
                   customerGets {
                     value {
                       ... on DiscountPercentage {
@@ -5084,33 +5084,25 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       }
     `;
 
+    console.log('📤 Executing GraphQL query for ACTIVE automatic discounts...');
     const response = await adminGraphQL(query);
     const edges = response.data?.automaticDiscountNodes?.edges || [];
     
-    console.log(`🔍 Found ${edges.length} total automatic discounts`);
+    console.log(`🔍 Found ${edges.length} ACTIVE automatic discounts from query`);
     edges.forEach((edge, i) => {
       const d = edge.node?.automaticDiscount;
       const percentage = d?.customerGets?.value?.percentage;
       console.log(`  ${i + 1}. "${d?.title}" - Status: ${d?.status} - Type: ${d?.__typename}${percentage ? ` - ${percentage * 100}%` : ''}`);
     });
     
-    // Filter for ACTIVE discounts
-    const activeEdges = edges.filter(edge => {
-      const d = edge.node?.automaticDiscount;
-      return d?.status === 'ACTIVE';
-    });
-    
-    console.log(`✅ ${activeEdges.length} discounts are ACTIVE`);
-    console.log(`✅ ${activeEdges.length} discounts are ACTIVE`);
-    
-    if (activeEdges.length === 0) {
-      console.log('❌ No active automatic discounts found');
+    if (edges.length === 0) {
+      console.log('❌❌❌ No active automatic discounts found - returning FALSE');
       return res.json({ success: true, isActive: false, code: 'APP25' });
     }
 
-    // Use the first active discount
-    const discount = activeEdges[0].node.automaticDiscount;
-    console.log('✅ Using discount:', discount.title);
+    // Use the first active discount (query already filtered for ACTIVE status)
+    const discount = edges[0].node.automaticDiscount;
+    console.log('✅✅✅ Using discount:', discount.title, '- Percentage:', discount.customerGets?.value?.percentage);
     
     const isActive = discount.status === 'ACTIVE';
     const now = new Date();
@@ -5120,6 +5112,7 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       (!startsAt || now >= startsAt) && 
       (!endsAt || now <= endsAt);
 
+    console.log('🎉🎉🎉 Returning discount status - isActive:', isCurrentlyValid);
     return res.json({
       success: true,
       isActive: isCurrentlyValid,
@@ -5132,7 +5125,7 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error checking discount status:', error);
+    console.error('💥💥💥 Error checking discount status:', error);
     res.status(500).json({ success: false, error: 'Failed to check discount status' });
   }
 });
