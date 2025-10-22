@@ -1675,16 +1675,17 @@ app.post('/get-discount-details', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing discountCode' });
     }
 
+    // First try to find as a code discount (manual codes)
     const QUERY_DISCOUNT_CODE = `
       query getDiscountCode($query: String!) {
-        codeDiscountNodes(first: 1, query: $query) {
+        codeDiscountNodes(first: 10, query: $query) {
           edges {
             node {
               id
               codeDiscount {
                 ... on DiscountCodeBasic {
                   title
-                  codes(first: 1) {
+                  codes(first: 10) {
                     edges {
                       node {
                         code
@@ -1709,7 +1710,7 @@ app.post('/get-discount-details', async (req, res) => {
                 }
                 ... on DiscountCodeBxgy {
                   title
-                  codes(first: 1) {
+                  codes(first: 10) {
                     edges {
                       node {
                         code
@@ -1734,7 +1735,7 @@ app.post('/get-discount-details', async (req, res) => {
                 }
                 ... on DiscountCodeFreeShipping {
                   title
-                  codes(first: 1) {
+                  codes(first: 10) {
                     edges {
                       node {
                         code
@@ -1752,8 +1753,9 @@ app.post('/get-discount-details', async (req, res) => {
       }
     `;
 
+    // Search by code, not title
     const result = await adminGraphQL(QUERY_DISCOUNT_CODE, {
-      query: `title:${discountCode}`
+      query: `code:${discountCode}`
     });
 
     const edges = result?.data?.codeDiscountNodes?.edges || [];
@@ -1761,19 +1763,35 @@ app.post('/get-discount-details', async (req, res) => {
       return res.json({ success: false, error: 'Discount code not found' });
     }
 
-    const discountNode = edges[0].node.codeDiscount;
+    // Find the discount that actually has the matching code
+    let matchingDiscount = null;
+    for (const edge of edges) {
+      const codes = edge.node.codeDiscount.codes?.edges || [];
+      for (const codeEdge of codes) {
+        if (codeEdge.node.code.toUpperCase() === discountCode.toUpperCase()) {
+          matchingDiscount = edge.node.codeDiscount;
+          break;
+        }
+      }
+      if (matchingDiscount) break;
+    }
+
+    if (!matchingDiscount) {
+      return res.json({ success: false, error: 'Discount code not found' });
+    }
+
     const discountDetails = {
       success: true,
-      title: discountNode.title,
+      title: matchingDiscount.title,
       code: discountCode,
-      status: discountNode.status,
-      startsAt: discountNode.startsAt,
-      endsAt: discountNode.endsAt,
+      status: matchingDiscount.status,
+      startsAt: matchingDiscount.startsAt,
+      endsAt: matchingDiscount.endsAt,
     };
 
     // Extract discount value (percentage or amount)
-    if (discountNode.customerGets?.value) {
-      const value = discountNode.customerGets.value;
+    if (matchingDiscount.customerGets?.value) {
+      const value = matchingDiscount.customerGets.value;
       if (value.percentage !== undefined) {
         discountDetails.type = 'percentage';
         discountDetails.value = value.percentage * 100; // Convert 0.25 to 25
