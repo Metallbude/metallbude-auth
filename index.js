@@ -1666,90 +1666,6 @@ app.post('/tag-app-customer', async (req, res) => {
   }
 });
 
-// GET /check-app-discount - Check if APP25 automatic discount is active
-app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
-  try {
-    const query = `
-      query {
-        automaticDiscountNodes(first: 50, query: "status:ACTIVE") {
-          edges {
-            node {
-              id
-              automaticDiscount {
-                ... on DiscountAutomaticApp {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                }
-                ... on DiscountAutomaticBasic {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                }
-                ... on DiscountAutomaticBxgy {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                }
-                ... on DiscountAutomaticFreeShipping {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const response = await adminGraphQL(query);
-    const edges = response.data?.automaticDiscountNodes?.edges || [];
-    
-    console.log(`🔍 Found ${edges.length} ACTIVE automatic discounts`);
-    edges.forEach((edge, i) => {
-      const d = edge.node?.automaticDiscount;
-      console.log(`  ${i + 1}. "${d?.title}" (${d?.status}) [${edge.node?.id}]`);
-    });
-    
-    if (edges.length === 0) {
-      console.log('❌ No active automatic discounts found');
-      return res.json({ success: true, isActive: false, code: 'APP25' });
-    }
-
-    // Use the first active discount
-    const discount = edges[0].node.automaticDiscount;
-    console.log('✅ Using discount:', discount.title);
-    
-    const isActive = discount.status === 'ACTIVE';
-    const now = new Date();
-    const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
-    const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
-    const isCurrentlyValid = isActive && 
-      (!startsAt || now >= startsAt) && 
-      (!endsAt || now <= endsAt);
-
-    return res.json({
-      success: true,
-      isActive: isCurrentlyValid,
-      code: 'APP25',
-      type: 'automatic',
-      status: discount.status,
-      title: discount.title,
-      startsAt: discount.startsAt,
-      endsAt: discount.endsAt
-    });
-
-  } catch (error) {
-    console.error('Error checking discount status:', error);
-    res.status(500).json({ success: false, error: 'Failed to check discount status' });
-  }
-});
-
 // ===== Raffle participant management + pick-winner =====
 const RAFFLE_PARTICIPANTS_FILE = path.join(__dirname, 'data', 'raffle_participants.json');
 const RAFFLE_AUDIT_FILE = path.join(__dirname, 'data', 'raffle_audit.json');
@@ -5111,6 +5027,90 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
     shouldRefresh: shouldRefresh,
     expiresAt: new Date(session.expiresAt).toISOString(),
   });
+});
+
+// GET /check-app-discount - Check if APP25 automatic discount is active
+app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
+  try {
+    const query = `
+      query {
+        automaticDiscountNodes(first: 50, query: "status:ACTIVE") {
+          edges {
+            node {
+              id
+              automaticDiscount {
+                ... on DiscountAutomaticApp {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+                ... on DiscountAutomaticBasic {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+                ... on DiscountAutomaticBxgy {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+                ... on DiscountAutomaticFreeShipping {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await adminGraphQL(query);
+    const edges = response.data?.automaticDiscountNodes?.edges || [];
+    
+    console.log(`🔍 Found ${edges.length} ACTIVE automatic discounts`);
+    edges.forEach((edge, i) => {
+      const d = edge.node?.automaticDiscount;
+      console.log(`  ${i + 1}. "${d?.title}" (${d?.status}) [${edge.node?.id}]`);
+    });
+    
+    if (edges.length === 0) {
+      console.log('❌ No active automatic discounts found');
+      return res.json({ success: true, isActive: false, code: 'APP25' });
+    }
+
+    // Use the first active discount
+    const discount = edges[0].node.automaticDiscount;
+    console.log('✅ Using discount:', discount.title);
+    
+    const isActive = discount.status === 'ACTIVE';
+    const now = new Date();
+    const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
+    const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
+    const isCurrentlyValid = isActive && 
+      (!startsAt || now >= startsAt) && 
+      (!endsAt || now <= endsAt);
+
+    return res.json({
+      success: true,
+      isActive: isCurrentlyValid,
+      code: 'APP25',
+      type: 'automatic',
+      status: discount.status,
+      title: discount.title,
+      startsAt: discount.startsAt,
+      endsAt: discount.endsAt
+    });
+
+  } catch (error) {
+    console.error('Error checking discount status:', error);
+    res.status(500).json({ success: false, error: 'Failed to check discount status' });
+  }
 });
 
 // Helper function to create Shopify customer access token for store credit functionality
