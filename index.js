@@ -15707,19 +15707,30 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     `;
 
     const response = await adminGraphQL(query);
+    console.log('🔍 Discount query response:', JSON.stringify(response.data, null, 2));
+    
     const edges = response.data?.codeDiscountNodes?.edges || [];
+    console.log('📦 Found discount edges:', edges.length);
     
     // Find APP25 discount
     const app25Discount = edges.find(edge => {
       const codes = edge.node?.codeDiscount?.codes?.edges || [];
+      console.log('🔍 Checking codes:', codes.map(c => c.node?.code));
       return codes.some(c => c.node?.code === 'APP25');
     });
 
     if (!app25Discount) {
+      console.log('⚠️ APP25 discount not found');
       return res.json({ success: true, isActive: false, code: 'APP25' });
     }
 
     const discount = app25Discount.node.codeDiscount;
+    console.log('✅ Found APP25 discount:', {
+      status: discount.status,
+      startsAt: discount.startsAt,
+      endsAt: discount.endsAt
+    });
+    
     const isActive = discount.status === 'ACTIVE';
     const now = new Date();
     const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
@@ -15729,6 +15740,8 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     const isCurrentlyValid = isActive && 
       (!startsAt || now >= startsAt) && 
       (!endsAt || now <= endsAt);
+
+    console.log('📊 Validation:', { isActive, now: now.toISOString(), startsAt, endsAt, isCurrentlyValid });
 
     res.json({
       success: true,
