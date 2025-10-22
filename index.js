@@ -1666,6 +1666,140 @@ app.post('/tag-app-customer', async (req, res) => {
   }
 });
 
+// ===== Get discount code details from Shopify Admin API =====
+app.post('/get-discount-details', async (req, res) => {
+  try {
+    const { discountCode } = req.body;
+    
+    if (!discountCode) {
+      return res.status(400).json({ success: false, error: 'Missing discountCode' });
+    }
+
+    const QUERY_DISCOUNT_CODE = `
+      query getDiscountCode($query: String!) {
+        codeDiscountNodes(first: 1, query: $query) {
+          edges {
+            node {
+              id
+              codeDiscount {
+                ... on DiscountCodeBasic {
+                  title
+                  codes(first: 1) {
+                    edges {
+                      node {
+                        code
+                      }
+                    }
+                  }
+                  customerGets {
+                    value {
+                      ... on DiscountPercentage {
+                        percentage
+                      }
+                      ... on DiscountAmount {
+                        amount {
+                          amount
+                        }
+                      }
+                    }
+                  }
+                  startsAt
+                  endsAt
+                  status
+                }
+                ... on DiscountCodeBxgy {
+                  title
+                  codes(first: 1) {
+                    edges {
+                      node {
+                        code
+                      }
+                    }
+                  }
+                  customerGets {
+                    value {
+                      ... on DiscountPercentage {
+                        percentage
+                      }
+                      ... on DiscountAmount {
+                        amount {
+                          amount
+                        }
+                      }
+                    }
+                  }
+                  startsAt
+                  endsAt
+                  status
+                }
+                ... on DiscountCodeFreeShipping {
+                  title
+                  codes(first: 1) {
+                    edges {
+                      node {
+                        code
+                      }
+                    }
+                  }
+                  startsAt
+                  endsAt
+                  status
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await adminGraphQL(QUERY_DISCOUNT_CODE, {
+      query: `title:${discountCode}`
+    });
+
+    const edges = result?.data?.codeDiscountNodes?.edges || [];
+    if (edges.length === 0) {
+      return res.json({ success: false, error: 'Discount code not found' });
+    }
+
+    const discountNode = edges[0].node.codeDiscount;
+    const discountDetails = {
+      success: true,
+      title: discountNode.title,
+      code: discountCode,
+      status: discountNode.status,
+      startsAt: discountNode.startsAt,
+      endsAt: discountNode.endsAt,
+    };
+
+    // Extract discount value (percentage or amount)
+    if (discountNode.customerGets?.value) {
+      const value = discountNode.customerGets.value;
+      if (value.percentage !== undefined) {
+        discountDetails.type = 'percentage';
+        discountDetails.value = value.percentage * 100; // Convert 0.25 to 25
+      } else if (value.amount?.amount) {
+        discountDetails.type = 'amount';
+        discountDetails.value = parseFloat(value.amount.amount);
+      }
+    } else {
+      // Free shipping discount
+      discountDetails.type = 'free_shipping';
+      discountDetails.value = 0;
+    }
+
+    console.log('✅ Discount details fetched:', discountDetails);
+    return res.json(discountDetails);
+
+  } catch (err) {
+    console.error('❌ /get-discount-details error:', err?.message || err);
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Internal error', 
+      details: safeStringify(err) 
+    });
+  }
+});
+
 // ===== Raffle participant management + pick-winner =====
 const RAFFLE_PARTICIPANTS_FILE = path.join(__dirname, 'data', 'raffle_participants.json');
 const RAFFLE_AUDIT_FILE = path.join(__dirname, 'data', 'raffle_audit.json');
