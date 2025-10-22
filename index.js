@@ -15736,6 +15736,10 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     const automaticResponse = await adminGraphQL(automaticQuery);
     const automaticEdges = automaticResponse.data?.automaticDiscountNodes?.edges || [];
     console.log('🔍 Found automatic discounts:', automaticEdges.length);
+    
+    // Log raw response to see structure
+    console.log('📦 RAW RESPONSE:', JSON.stringify(automaticResponse.data, null, 2));
+    
     console.log('📋 ALL DISCOUNTS:');
     
     automaticEdges.forEach((edge, index) => {
