@@ -5039,6 +5039,7 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
             node {
               id
               automaticDiscount {
+                __typename
                 ... on DiscountAutomaticApp {
                   title
                   status
@@ -5050,6 +5051,19 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
                   status
                   startsAt
                   endsAt
+                  customerGets {
+                    value {
+                      ... on DiscountPercentage {
+                        percentage
+                      }
+                      ... on DiscountAmount {
+                        amount {
+                          amount
+                          currencyCode
+                        }
+                      }
+                    }
+                  }
                 }
                 ... on DiscountAutomaticBxgy {
                   title
@@ -5076,7 +5090,8 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     console.log(`🔍 Found ${edges.length} total automatic discounts`);
     edges.forEach((edge, i) => {
       const d = edge.node?.automaticDiscount;
-      console.log(`  ${i + 1}. "${d?.title}" - Status: ${d?.status} [${edge.node?.id}]`);
+      const percentage = d?.customerGets?.value?.percentage;
+      console.log(`  ${i + 1}. "${d?.title}" - Status: ${d?.status} - Type: ${d?.__typename}${percentage ? ` - ${percentage * 100}%` : ''}`);
     });
     
     // Filter for ACTIVE discounts
