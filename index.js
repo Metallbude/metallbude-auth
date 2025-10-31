@@ -1610,10 +1610,10 @@ mutation tagsAdd($id: ID!, $tags: [String!]!) {
 }`;
 
 // POST /tag-app-customer
-// Body: { customerId: "gid://shopify/Customer/...", email: "user@example.com", tag: "Metallbude App" }
+// Body: { customerId: "gid://shopify/Customer/...", email: "user@example.com", tag: "Metallbude App", platform: "iOS" or "Android" }
 app.post('/tag-app-customer', async (req, res) => {
   try {
-    const { customerId, email, tag } = req.body || {};
+    const { customerId, email, tag, platform } = req.body || {};
     
     // Validate inputs
     if (!customerId || !tag) {
@@ -1628,12 +1628,19 @@ app.post('/tag-app-customer', async (req, res) => {
       ? customerId 
       : `gid://shopify/Customer/${customerId}`;
 
-    console.log(`🏷️  Tagging customer ${email || customerGid} with tag: "${tag}"`);
+    // Build tags array: always include base tag, add platform-specific tag if platform provided
+    const tags = [tag];
+    if (platform && (platform === 'iOS' || platform === 'Android')) {
+      const platformTag = `Metallbude App - ${platform}`;
+      tags.push(platformTag);
+    }
+
+    console.log(`🏷️  Tagging customer ${email || customerGid} with tags: ${tags.join(', ')}`);
 
     // Tag the customer using Shopify Admin API
     const result = await adminGraphQL(MUTATION_CUSTOMER_TAG, {
       id: customerGid,
-      tags: [tag]
+      tags: tags
     });
 
     // Check for errors
@@ -1647,12 +1654,12 @@ app.post('/tag-app-customer', async (req, res) => {
       });
     }
 
-    console.log(`✅ Successfully tagged customer ${email || customerGid} with "${tag}"`);
+    console.log(`✅ Successfully tagged customer ${email || customerGid} with ${tags.length} tag(s)`);
 
     return res.json({
       success: true,
       customerId: customerGid,
-      tag,
+      tags: tags,
       message: 'Customer tagged successfully'
     });
 
