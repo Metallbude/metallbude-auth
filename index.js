@@ -7425,6 +7425,86 @@ app.get('/customer/analytics', authenticateAppToken, async (req, res) => {
   }
 });
 
+// ===== SERVER-SIDE ANALYTICS FORWARDING (GA4 Measurement Protocol) =====
+// POST /analytics/track-purchase
+// Body: {
+//   event_id: string (recommended, e.g. order id),
+//   client_id?: string (ga client id),
+//   user_id?: string (optional, customer id or email hash),
+//   transaction_id: string,
+//   value: number|string,
+//   currency: string,
+//   items: [{ item_id, item_name, price, quantity }]
+// }
+app.post('/analytics/track-purchase', express.json(), async (req, res) => {
+  try {
+    const measurementId = process.env.GA_MEASUREMENT_ID;
+    const apiSecret = process.env.GA_API_SECRET;
+
+    if (!measurementId || !apiSecret) {
+      console.warn('⚠️ GA_MEASUREMENT_ID or GA_API_SECRET not configured - cannot forward analytics');
+      return res.status(501).json({ success: false, error: 'GA4 measurement not configured on server' });
+    }
+
+    const body = req.body || {};
+    const eventId = body.event_id || body.transaction_id || body.orderId || null;
+
+    // Prefer provided client_id (from mobile client) to keep GA dedup working.
+    let clientId = body.client_id || null;
+    if (!clientId) {
+      // Generate a best-effort client id (non-persistent) when app did not provide one.
+      try {
+        clientId = crypto.randomUUID();
+      } catch (e) {
+        clientId = crypto.randomBytes(16).toString('hex');
+      }
+    }
+
+    const purchaseEvent = {
+      name: 'purchase',
+      params: {
+        transaction_id: String(body.transaction_id || body.orderId || eventId || ''),
+        value: Number(body.value || 0),
+        currency: String(body.currency || 'EUR'),
+        items: Array.isArray(body.items) ? body.items.map(it => ({
+          item_id: it.item_id || it.id || it.sku || null,
+          item_name: it.item_name || it.name || null,
+          price: Number(it.price || it.unit_price || 0),
+          quantity: Number(it.quantity || it.qty || 1)
+        })) : []
+      }
+    };
+
+    const payload = {
+      client_id: String(clientId),
+      events: [purchaseEvent]
+    };
+
+    // If a user_id is present, include it (helps in GA user-scoped reporting)
+    if (body.user_id) payload.user_id = String(body.user_id);
+
+    // Include event_id for GA deduplication if available
+    if (eventId) purchaseEvent.params.event_id = String(eventId);
+
+    const endpoint = `https://www.google-analytics.com/mp/collect?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`;
+
+    console.log('📡 Forwarding purchase event to GA4:', { transaction_id: purchaseEvent.params.transaction_id, value: purchaseEvent.params.value, itemsCount: purchaseEvent.params.items.length });
+
+    const gaRes = await axios.post(endpoint, payload, { headers: { 'Content-Type': 'application/json' } });
+
+    if (gaRes.status >= 200 && gaRes.status < 300) {
+      return res.json({ success: true });
+    }
+
+    console.warn('⚠️ GA4 responded with non-2xx:', gaRes.status, gaRes.data);
+    return res.status(502).json({ success: false, error: 'GA4 forwarding failed', details: gaRes.data });
+
+  } catch (err) {
+    console.error('❌ /analytics/track-purchase error:', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Internal server error', details: err?.message || String(err) });
+  }
+});
+
 // ===== WISHLIST & FAVORITES =====
 
 // GET /customer/wishlist - Customer wishlist/favorites (Firebase + Shopify hybrid)
