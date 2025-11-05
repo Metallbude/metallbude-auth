@@ -15377,23 +15377,27 @@ app.post('/apply-store-credit', async (req, res) => {
     console.log('   Body type:', typeof req.body);
     console.log('   Body keys:', Object.keys(req.body || {}));
     
-    const { customerEmail, storeCreditAmount, cartTotal } = req.body;
+    const { customerEmail, storeCreditAmount, cartTotal, productTotal } = req.body;
     
     console.log(`💳 [STORE_CREDIT] Store credit deduction request:`);
     console.log(`   Customer: ${customerEmail}`);
     console.log(`   Available store credit: ${storeCreditAmount}€`);
     console.log(`   Cart total: ${cartTotal}€`);
+    console.log(`   Product total (excluding shipping): ${productTotal}€`);
     
-    if (!customerEmail || !storeCreditAmount || !cartTotal) {
+    if (!customerEmail || !storeCreditAmount) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: customerEmail, storeCreditAmount, cartTotal'
+        error: 'Missing required fields: customerEmail, storeCreditAmount'
       });
     }
 
-    // Calculate the actual amount to deduct (minimum of available store credit and cart total)
-    const amountToDeduct = Math.min(parseFloat(storeCreditAmount), parseFloat(cartTotal));
-    console.log(`💰 Will deduct ${amountToDeduct}€ from store credit balance`);
+    // Use productTotal if provided (excludes shipping), otherwise fall back to cartTotal
+    const baseTotal = productTotal ? parseFloat(productTotal) : parseFloat(cartTotal || 0);
+    
+    // Calculate the actual amount to deduct (minimum of available store credit and product total)
+    const amountToDeduct = Math.min(parseFloat(storeCreditAmount), baseTotal);
+    console.log(`💰 Will deduct ${amountToDeduct}€ from store credit balance (applied to products only)`);
     
     if (amountToDeduct <= 0) {
       return res.status(400).json({
@@ -15531,7 +15535,7 @@ app.post('/apply-store-credit', async (req, res) => {
                 appliesOnEachItem: false
               }
             },
-            items: { products: { all: true } }
+            items: { all: true }
           },
           customerSelection: { all: true },
           usageLimit: 1
@@ -15611,7 +15615,7 @@ app.post('/apply-store-credit', async (req, res) => {
               appliesOnEachItem: false
             }
           },
-          items: { products: { all: true } }
+          items: { all: true }
         },
         customerSelection: { all: true },
         usageLimit: 1
