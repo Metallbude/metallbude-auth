@@ -15509,18 +15509,20 @@ app.post('/apply-store-credit', async (req, res) => {
       // Found existing reservation - CREATE A NEW DISCOUNT CODE for it
       const existingRes = existingReservations[0];
       console.log(`♻️ Found existing reservation ${existingRes.id} - creating NEW discount code (old one may be used/expired)`);
+      console.log(`   Old reservation amount: ${existingRes.amount}€`);
+      console.log(`   New requested amount: ${amountToDeduct}€`);
       
-      // Create a NEW discount code for the existing reservation
+      // Update the reservation with the new amount AND discount code
       const newDiscountCode = `STORE_CREDIT_${Date.now()}_${existingRes.id.toUpperCase()}`;
-      console.log(`💳 Creating NEW discount code: ${newDiscountCode} for existing reservation`);
+      console.log(`💳 Creating NEW discount code: ${newDiscountCode} for existing reservation with updated amount`);
       
-      // Update the reservation with the new discount code
+      existingRes.amount = amountToDeduct; // Update to the new amount!
       existingRes.discountCode = newDiscountCode;
       storeCreditReservations.set(existingRes.id, existingRes);
       await persistStoreCreditReservations();
       
-      // Create the Shopify discount code for the existing reservation
-      const amountStr = Number(existingRes.amount).toFixed(2);
+      // Create the Shopify discount code with the UPDATED amount
+      const amountStr = Number(amountToDeduct).toFixed(2);
       const discountInput = {
         basicCodeDiscount: {
           title: `Store Credit Reserved - ${customerEmail} - ${existingRes.id}`,
