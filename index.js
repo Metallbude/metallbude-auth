@@ -15523,7 +15523,7 @@ app.post('/apply-store-credit', async (req, res) => {
           code: newDiscountCode,
           startsAt: new Date().toISOString(),
           endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
-          combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
+          combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: false },
           customerGets: {
             value: {
               discountAmount: {
@@ -15531,7 +15531,7 @@ app.post('/apply-store-credit', async (req, res) => {
                 appliesOnEachItem: false
               }
             },
-            items: { all: true }
+            items: { products: { all: true } }
           },
           customerSelection: { all: true },
           usageLimit: 1
@@ -15603,7 +15603,7 @@ app.post('/apply-store-credit', async (req, res) => {
         code: reservationDiscountCode, // Use the reservation code, not a new random one
         startsAt: new Date().toISOString(),
         endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
-        combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
+        combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: false },
         customerGets: {
           value: {
             discountAmount: {
@@ -15611,7 +15611,7 @@ app.post('/apply-store-credit', async (req, res) => {
               appliesOnEachItem: false
             }
           },
-          items: { all: true }
+          items: { products: { all: true } }
         },
         customerSelection: { all: true },
         usageLimit: 1
