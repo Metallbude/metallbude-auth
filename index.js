@@ -14733,6 +14733,85 @@ app.get('/api/public/wishlist/items', async (req, res) => {
     }
 });
 
+// 🎯 NEW: Get ALL wishlists for a customer (multi-wishlist support for Shopify)
+app.get('/api/public/wishlist/all', async (req, res) => {
+    try {
+        const { customerId } = req.query;
+        
+        if (!customerId) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Customer ID is required' 
+            });
+        }
+
+        console.log(`[SHOPIFY] Getting all wishlists for customer: ${customerId}`);
+
+        // Check if Firebase/multi-wishlist service is available
+        if (!firebaseEnabled || !wishlistService) {
+            console.log(`[SHOPIFY] Multi-wishlist not available - Firebase disabled or wishlist service missing`);
+            return res.status(404).json({ 
+                success: false,
+                error: 'Multi-wishlist feature not available',
+                message: 'Firebase or wishlist service not configured'
+            });
+        }
+
+        try {
+            // Get customer email for Firebase operations
+            const customerEmail = await getRealCustomerEmail(customerId);
+            const fullCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
+            
+            console.log(`[SHOPIFY] Fetching wishlists from Firebase for ${customerEmail}`);
+            
+            // Try to get all wishlists from Firebase (if multi-wishlist service exists)
+            // Check if wishlistService has a method to get all wishlists
+            let wishlists = [];
+            
+            if (typeof wishlistService.getAllWishlists === 'function') {
+                // Multi-wishlist support exists
+                wishlists = await wishlistService.getAllWishlists(fullCustomerId, customerEmail);
+                console.log(`[SHOPIFY] Found ${wishlists.length} wishlists in Firebase`);
+            } else {
+                // Fallback: Create a single "main" wishlist from existing items
+                console.log(`[SHOPIFY] Multi-wishlist not supported, creating default wishlist`);
+                const items = await wishlistService.getWishlist(fullCustomerId, customerEmail);
+                
+                wishlists = [{
+                    id: 'main',
+                    name: 'Meine Wunschliste',
+                    emoji: '♥️',
+                    items: items || [],
+                    isDefault: true,
+                    createdAt: new Date().toISOString()
+                }];
+            }
+
+            return res.json({
+                success: true,
+                wishlists: wishlists,
+                totalWishlists: wishlists.length
+            });
+
+        } catch (firebaseError) {
+            console.error('[SHOPIFY] Firebase error getting all wishlists:', firebaseError.message);
+            return res.status(500).json({ 
+                success: false,
+                error: 'Failed to fetch wishlists from Firebase',
+                details: firebaseError.message
+            });
+        }
+
+    } catch (error) {
+        console.error('[SHOPIFY] Error getting all wishlists:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
 // Add item to wishlist (public endpoint for Shopify)
 app.post('/api/public/wishlist/add', async (req, res) => {
     try {
