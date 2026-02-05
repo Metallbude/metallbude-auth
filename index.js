@@ -5037,12 +5037,14 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 });
 
 // GET /check-app-discount - Check if APP25 automatic discount is active
+// 🔥 UPDATED: Now returns ALL active discounts with product/collection targeting info
 app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
   console.log('🎯 === /check-app-discount ENDPOINT CALLED ===');
   try {
     // Use 2025-10 API for discount queries (supports status:active filter)
     const discountApiUrl = 'https://metallbude-de.myshopify.com/admin/api/2025-10/graphql.json';
     
+    // 🔥 UPDATED: Query now includes customerGets.items to get product/collection targeting
     const query = `
       query {
         automaticDiscountNodes(first: 50, query: "status:active") {
@@ -5073,6 +5075,43 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
                         }
                       }
                     }
+                    items {
+                      __typename
+                      ... on AllDiscountItems {
+                        allItems
+                      }
+                      ... on DiscountProducts {
+                        products(first: 250) {
+                          edges {
+                            node {
+                              id
+                              handle
+                            }
+                          }
+                        }
+                        productVariants(first: 250) {
+                          edges {
+                            node {
+                              id
+                              product {
+                                id
+                                handle
+                              }
+                            }
+                          }
+                        }
+                      }
+                      ... on DiscountCollections {
+                        collections(first: 250) {
+                          edges {
+                            node {
+                              id
+                              handle
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
                 }
                 ... on DiscountAutomaticBxgy {
@@ -5094,7 +5133,7 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    console.log('📤 Executing GraphQL query for ACTIVE automatic discounts...');
+    console.log('📤 Executing GraphQL query for ACTIVE automatic discounts with targeting info...');
     const response = await axios.post(
       discountApiUrl,
       { query },
@@ -5108,41 +5147,118 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     const edges = response.data?.data?.automaticDiscountNodes?.edges || [];
     
     console.log(`🔍 Found ${edges.length} ACTIVE automatic discounts from query`);
-    edges.forEach((edge, i) => {
-      const d = edge.node?.automaticDiscount;
-      const percentage = d?.customerGets?.value?.percentage;
-      console.log(`  ${i + 1}. "${d?.title}" - Status: ${d?.status} - Type: ${d?.__typename}${percentage ? ` - ${percentage * 100}%` : ''}`);
-    });
     
     if (edges.length === 0) {
       console.log('❌❌❌ No active automatic discounts found - returning FALSE');
-      return res.json({ success: true, isActive: false, code: 'APP25' });
+      return res.json({ success: true, isActive: false, code: 'APP25', discounts: [] });
     }
 
-    // Use the first active discount (query already filtered for ACTIVE status)
-    const discount = edges[0].node.automaticDiscount;
-    console.log('✅✅✅ Using discount:', discount.title, '- Percentage:', discount.customerGets?.value?.percentage);
-    
-    const isActive = discount.status === 'ACTIVE';
+    // 🔥 UPDATED: Process ALL active discounts with their targeting info
     const now = new Date();
-    const startsAt = discount.startsAt ? new Date(discount.startsAt) : null;
-    const endsAt = discount.endsAt ? new Date(discount.endsAt) : null;
-    const isCurrentlyValid = isActive && 
-      (!startsAt || now >= startsAt) && 
-      (!endsAt || now <= endsAt);
-
-    const percentage = discount.customerGets?.value?.percentage;
-    console.log('🎉🎉🎉 Returning discount status - isActive:', isCurrentlyValid, '- Percentage:', percentage ? percentage * 100 : 0);
+    const activeDiscounts = [];
+    
+    for (const edge of edges) {
+      const d = edge.node?.automaticDiscount;
+      if (!d || d.__typename !== 'DiscountAutomaticBasic') {
+        continue; // Skip non-basic discounts (BxGy, FreeShipping, etc.)
+      }
+      
+      const percentage = d.customerGets?.value?.percentage;
+      const startsAt = d.startsAt ? new Date(d.startsAt) : null;
+      const endsAt = d.endsAt ? new Date(d.endsAt) : null;
+      const isCurrentlyValid = d.status === 'ACTIVE' && 
+        (!startsAt || now >= startsAt) && 
+        (!endsAt || now <= endsAt);
+      
+      if (!isCurrentlyValid || !percentage) {
+        continue; // Skip invalid or non-percentage discounts
+      }
+      
+      // Extract targeting info
+      const items = d.customerGets?.items;
+      const itemsType = items?.__typename;
+      
+      let appliesTo = 'all'; // Default: applies to all products
+      let productIds = [];
+      let productHandles = [];
+      let collectionIds = [];
+      let collectionHandles = [];
+      
+      if (itemsType === 'AllDiscountItems') {
+        appliesTo = 'all';
+      } else if (itemsType === 'DiscountProducts') {
+        appliesTo = 'products';
+        // Get product IDs and handles
+        const products = items.products?.edges || [];
+        const variants = items.productVariants?.edges || [];
+        
+        for (const p of products) {
+          if (p.node?.id) productIds.push(p.node.id);
+          if (p.node?.handle) productHandles.push(p.node.handle);
+        }
+        // Also include products from variants
+        for (const v of variants) {
+          if (v.node?.product?.id && !productIds.includes(v.node.product.id)) {
+            productIds.push(v.node.product.id);
+          }
+          if (v.node?.product?.handle && !productHandles.includes(v.node.product.handle)) {
+            productHandles.push(v.node.product.handle);
+          }
+        }
+      } else if (itemsType === 'DiscountCollections') {
+        appliesTo = 'collections';
+        const collections = items.collections?.edges || [];
+        for (const c of collections) {
+          if (c.node?.id) collectionIds.push(c.node.id);
+          if (c.node?.handle) collectionHandles.push(c.node.handle);
+        }
+      }
+      
+      const discountInfo = {
+        title: d.title,
+        percentage: percentage * 100, // Convert to percentage (e.g., 0.25 -> 25)
+        appliesTo,
+        productIds,
+        productHandles,
+        collectionIds,
+        collectionHandles,
+        startsAt: d.startsAt,
+        endsAt: d.endsAt,
+      };
+      
+      activeDiscounts.push(discountInfo);
+      console.log(`  ✅ "${d.title}" - ${percentage * 100}% - Applies to: ${appliesTo}${appliesTo === 'products' ? ` (${productIds.length} products)` : ''}${appliesTo === 'collections' ? ` (${collectionIds.length} collections)` : ''}`);
+    }
+    
+    if (activeDiscounts.length === 0) {
+      console.log('❌❌❌ No valid percentage discounts found - returning FALSE');
+      return res.json({ success: true, isActive: false, code: 'APP25', discounts: [] });
+    }
+    
+    // 🔥 For backwards compatibility, also return the "best" discount for all products
+    // Find the discount that applies to all products, or the highest percentage
+    let bestGlobalDiscount = activeDiscounts.find(d => d.appliesTo === 'all');
+    if (!bestGlobalDiscount) {
+      // No global discount - find highest percentage
+      bestGlobalDiscount = activeDiscounts.reduce((best, current) => 
+        current.percentage > best.percentage ? current : best, activeDiscounts[0]);
+    }
+    
+    console.log(`🎉🎉🎉 Returning ${activeDiscounts.length} active discounts - Best global: ${bestGlobalDiscount.title} (${bestGlobalDiscount.percentage}%)`);
+    
     return res.json({
       success: true,
-      isActive: isCurrentlyValid,
+      isActive: true,
       code: 'APP25',
       type: 'automatic',
-      status: discount.status,
-      title: discount.title,
-      startsAt: discount.startsAt,
-      endsAt: discount.endsAt,
-      percentage: percentage ? percentage * 100 : 25
+      status: 'ACTIVE',
+      // Backwards compatible fields (using best global discount)
+      title: bestGlobalDiscount.title,
+      startsAt: bestGlobalDiscount.startsAt,
+      endsAt: bestGlobalDiscount.endsAt,
+      percentage: bestGlobalDiscount.percentage,
+      // 🔥 NEW: All active discounts with targeting info
+      discounts: activeDiscounts,
     });
 
   } catch (error) {
