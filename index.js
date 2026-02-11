@@ -1847,6 +1847,9 @@ function generateReservationId() {
 
 // Send verification email
 async function sendVerificationEmail(email, code, language = 'de') {
+  console.log(`📧 sendVerificationEmail called for ${email}`);
+  console.log(`📧 API key configured: ${config.mailerSendApiKey ? 'YES (length: ' + config.mailerSendApiKey.length + ')' : 'NO'}`);
+  
   if (!config.mailerSendApiKey) {
     console.log(`⚠️ MAILERSEND_API_KEY not configured - cannot send email!`);
     console.log(`Verification code for ${email}: ${code}`);
@@ -1919,7 +1922,9 @@ async function sendVerificationEmail(email, code, language = 'de') {
     console.log(`✅ Email sent successfully to ${email} (status: ${response.status})`);
     return response.status === 202;
   } catch (error) {
-    console.error('❌ MailerSend error:', error.response?.status, error.response?.data || error.message);
+    console.log('❌ MailerSend API FAILED:');
+    console.log('   Status:', error.response?.status);
+    console.log('   Data:', JSON.stringify(error.response?.data || error.message));
     console.log(`Fallback - Verification code for ${email}: ${code}`);
     return true;
   }
