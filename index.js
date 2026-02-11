@@ -1848,9 +1848,12 @@ function generateReservationId() {
 // Send verification email
 async function sendVerificationEmail(email, code, language = 'de') {
   if (!config.mailerSendApiKey) {
+    console.log(`⚠️ MAILERSEND_API_KEY not configured - cannot send email!`);
     console.log(`Verification code for ${email}: ${code}`);
     return true;
   }
+  
+  console.log(`📧 Attempting to send verification email to ${email}...`);
 
   // Email templates by language
   const templates = {
@@ -1913,10 +1916,11 @@ async function sendVerificationEmail(email, code, language = 'de') {
         }
       }
     );
+    console.log(`✅ Email sent successfully to ${email} (status: ${response.status})`);
     return response.status === 202;
   } catch (error) {
-    console.error('MailerSend error:', error.response?.data || error.message);
-    console.log(`Verification code for ${email}: ${code}`);
+    console.error('❌ MailerSend error:', error.response?.status, error.response?.data || error.message);
+    console.log(`Fallback - Verification code for ${email}: ${code}`);
     return true;
   }
 }
