@@ -524,7 +524,6 @@ setInterval(() => {
   }
   
   if (expiredSessions > 0 || expiredRefreshTokens > 0 || expiredVerificationCodes > 0 || expiredAuthCodes > 0) {
-    console.log(`🧹 Session cleanup: ${expiredSessions} sessions, ${expiredRefreshTokens} refresh tokens, ${expiredVerificationCodes} verification codes, ${expiredAuthCodes} auth codes`);
     persistSessions(); // Save cleaned state
   }
 }, 10 * 60 * 1000); // Every 10 minutes
@@ -4803,7 +4802,6 @@ app.post('/auth/request-code', async (req, res) => {
   });
 
   await sendVerificationEmail(email, code, language || 'de');
-  console.log(`Mobile app: Generated code for ${email}: ${code} (language: ${language || 'de'})`);
 
   res.json({
     success: true,
@@ -4974,12 +4972,6 @@ const authenticateAppToken = async (req, res, next) => {
   }
 
   const token = authHeader.substring(7);
-  // Non-sensitive debug: log token length and current session store size (do not log token value)
-  try {
-    console.log(`🔐 Authorization header present (token length: ${token.length}), sessions in memory: ${sessions.size}`);
-  } catch (e) {
-    console.log('🔐 Authorization debug logging skipped');
-  }
 
   let session = sessions.get(token);
 
@@ -5018,7 +5010,6 @@ const authenticateAppToken = async (req, res, next) => {
     });
   }
 
-  console.log(`✅ Valid session found for ${session.email}`);
   req.session = session;
   next();
 };
@@ -5048,7 +5039,6 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 // GET /check-app-discount - Check if APP25 automatic discount is active
 // 🔥 UPDATED: Now returns ALL active discounts with product/collection targeting info
 app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
-  console.log('🎯 === /check-app-discount ENDPOINT CALLED ===');
   try {
     // Use 2025-10 API for discount queries (supports status:active filter)
     const discountApiUrl = 'https://metallbude-de.myshopify.com/admin/api/2025-10/graphql.json';
@@ -5142,7 +5132,6 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       }
     `;
 
-    console.log('📤 Executing GraphQL query for ACTIVE automatic discounts with targeting info...');
     const response = await axios.post(
       discountApiUrl,
       { query },
@@ -7657,7 +7646,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
           req.session.email
         );
         wishlistProductIds = wishlistItems.map(item => item.productId);
-        console.log(`🔥 Firebase returned ${wishlistItems.length} wishlist items`);
       } catch (firebaseError) {
         console.error('❌ Firebase wishlist fetch failed, falling back to Shopify:', firebaseError.message);
         useFirebase = false;
@@ -7667,8 +7655,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
     // Fallback to Shopify if Firebase fails or is not enabled
     // Also sync from Shopify if Firebase is working but no document exists yet
     if (!useFirebase || shouldSyncFromShopify) {
-      console.log('📦 Using Shopify metafield for wishlist');
-      
       const query = `
         query getCustomerWishlist($customerId: ID!) {
           customer(id: $customerId) {
@@ -7857,11 +7843,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       let selectedImage = null;
       
       if (wishlistItem && (wishlistItem.selectedOptions || wishlistItem.variantId)) {
-        console.log(`🔍 [VARIANT] Processing wishlist item:`, {
-          productId: product.id,
-          variantId: wishlistItem.variantId,
-          selectedOptions: wishlistItem.selectedOptions
-        });
         
         // Find the matching variant by ID first
         if (wishlistItem.variantId) {
@@ -7884,13 +7865,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
         }
         
         if (selectedVariant) {
-          console.log(`✅ [VARIANT] Found matching variant:`, {
-            variantId: selectedVariant.id,
-            title: selectedVariant.title,
-            selectedOptions: selectedVariant.selectedOptions,
-            image: selectedVariant.image?.url
-          });
-          
           selectedOptions = {};
           selectedVariant.selectedOptions.forEach(opt => {
             selectedOptions[opt.name] = opt.value;
@@ -7900,7 +7874,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
           selectedCompareAtPrice = selectedVariant.compareAtPrice;
           selectedImage = selectedVariant.image?.url || product.featuredImage?.url;
         } else {
-          console.log(`⚠️ [VARIANT] No matching variant found, using stored options:`, wishlistItem.selectedOptions);
           selectedOptions = wishlistItem.selectedOptions || {};
           // For fallback, try to find any variant with similar color
           if (wishlistItem.selectedOptions?.Farbe) {
@@ -7911,7 +7884,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
               )
             );
             if (fallbackVariant) {
-              console.log(`🔄 [VARIANT] Using fallback variant for color match:`, fallbackVariant.id);
               selectedImage = fallbackVariant.image?.url || product.featuredImage?.url;
               selectedPrice = fallbackVariant.price;
               selectedCompareAtPrice = fallbackVariant.compareAtPrice;
@@ -8104,8 +8076,6 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
 
     // Fallback to Shopify if Firebase fails or is not enabled
     if (!useFirebase) {
-      console.log('📦 Using Shopify metafield for wishlist operation');
-      
       // Get current wishlist from Shopify
       const getQuery = `
         query getCustomerWishlist($customerId: ID!) {
@@ -14129,16 +14099,9 @@ async function loadWishlistData() {
     try {
         const filePath = path.join(__dirname, 'wishlist_data.json');
         const data = await fs.readFile(filePath, 'utf8');
-        console.log('✅ [STORAGE] Successfully loaded wishlist data from filesystem');
         return JSON.parse(data);
     } catch (error) {
-        if (error.code === 'ENOENT') {
-            console.log('ℹ️ [STORAGE] No wishlist data file found, starting with empty data');
-            return {}; // Return empty object if file doesn't exist
-        } else {
-            console.error('⚠️ [STORAGE] Error reading wishlist data file (using empty data):', error.message);
-            return {}; // Return empty object if any read error
-        }
+        return {}; // Return empty object if file doesn't exist or any read error
     }
 }
 
@@ -14161,9 +14124,7 @@ async function saveWishlistData(data) {
     try {
         const filePath = path.join(__dirname, 'wishlist_data.json');
         await fs.writeFile(filePath, JSON.stringify(data, null, 2));
-        console.log('✅ [STORAGE] Successfully saved wishlist data to filesystem');
     } catch (error) {
-        console.error('⚠️ [STORAGE] Error saving wishlist data to filesystem (continuing without persistent storage):', error.message);
         // Don't throw error - continue without persistent storage
         // The data will still be processed and sent to Firebase
     }
@@ -14172,12 +14133,10 @@ async function saveWishlistData(data) {
 // Sync Firebase wishlist to public storage for a specific customer
 async function syncFirebaseToPublicStorage(customerId) {
     if (!firebaseEnabled || !wishlistService) {
-        console.log('🔥 [SYNC] Firebase not available, skipping sync');
         return false;
     }
 
     try {
-        console.log(`🔄 [SYNC] Syncing Firebase to public storage for customer: ${customerId}`);
         
         // Try both customer ID formats to find the Firebase document
         let firebaseItems = [];
@@ -14190,10 +14149,9 @@ async function syncFirebaseToPublicStorage(customerId) {
             firebaseItems = await wishlistService.getWishlist(customerId, `sync-${customerId}@metallbude.internal`);
             if (firebaseItems.length > 0) {
                 foundFormat = 'simple';
-                console.log(`✅ [SYNC] Found ${firebaseItems.length} items using simple format`);
             }
         } catch (error) {
-            console.log(`⚠️ [SYNC] Simple format failed: ${error.message}`);
+            // Simple format not found, will try full format
         }
         
         // If no items found, try full Shopify GID format
@@ -14203,15 +14161,13 @@ async function syncFirebaseToPublicStorage(customerId) {
                 firebaseItems = await wishlistService.getWishlist(fullCustomerId, `sync-${customerId}@metallbude.internal`);
                 if (firebaseItems.length > 0) {
                     foundFormat = 'full';
-                    console.log(`✅ [SYNC] Found ${firebaseItems.length} items using full format`);
                 }
             } catch (error) {
-                console.log(`⚠️ [SYNC] Full format failed: ${error.message}`);
+                // Full format not found
             }
         }
         
         if (firebaseItems.length === 0) {
-            console.log(`ℹ️ [SYNC] No wishlist items found in Firebase for customer ${customerId}`);
             return true; // Not an error, just empty wishlist
         }
         
@@ -14236,12 +14192,10 @@ async function syncFirebaseToPublicStorage(customerId) {
         // Update public storage with Firebase data
         publicWishlistData[customerId] = publicItems;
         await saveWishlistData(publicWishlistData);
-        
-        console.log(`✅ [SYNC] Successfully synced ${publicItems.length} items from Firebase to public storage for customer ${customerId}`);
         return true;
         
     } catch (error) {
-        console.error(`🚨 [SYNC] Error syncing Firebase to public storage for customer ${customerId}:`, error);
+        console.error(`[SYNC ERROR] Customer ${customerId}:`, error.message);
         return false;
     }
 }
@@ -14249,12 +14203,10 @@ async function syncFirebaseToPublicStorage(customerId) {
 // Sync all customers' wishlists from Firebase to public storage
 async function syncAllFirebaseToPublicStorage() {
     if (!firebaseEnabled || !wishlistService) {
-        console.log('🔥 [SYNC] Firebase not available, skipping full sync');
         return false;
     }
 
     try {
-        console.log('🔄 [SYNC] Starting full sync from Firebase to public storage');
         
         // Get all wishlist documents from Firebase
         const db = wishlistService.db;
@@ -14557,9 +14509,6 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
                 if (publicItemIndex !== -1) {
                     wishlistData[shopifyCustomerId].splice(publicItemIndex, 1);
                     await saveWishlistData(wishlistData);
-                    console.log(`✅ [SYNC] Successfully removed item from public storage for customer ${shopifyCustomerId}`);
-                } else {
-                    console.log(`ℹ️ [SYNC] Item not found in public storage for customer ${shopifyCustomerId}`);
                 }
             }
         } catch (syncError) {
@@ -14602,16 +14551,12 @@ app.get('/api/public/wishlist/items', async (req, res) => {
         // Always try to sync from Firebase first to ensure we have the latest data
         if (firebaseEnabled && wishlistService) {
             try {
-                console.log(`[SHOPIFY] Syncing Firebase data for customer: ${customerId}`);
                 const syncSuccess = await syncFirebaseToPublicStorage(customerId);
                 
                 if (syncSuccess) {
-                    console.log(`[SHOPIFY] Successfully synced Firebase data, loading from public storage`);
                     const wishlistData = await loadWishlistData();
                     customerWishlist = wishlistData[customerId] || [];
-                    console.log(`[SHOPIFY] Found ${customerWishlist.length} items after Firebase sync`);
                 } else {
-                    console.log(`[SHOPIFY] Firebase sync failed, trying direct Firebase lookup`);
                     // Direct Firebase lookup as fallback
                     const fullCustomerId = `gid://shopify/Customer/${customerId}`;
                     // ✅ NEW: Get real customer email for Firebase operations
@@ -14619,10 +14564,8 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                     const firebaseItems = await wishlistService.getWishlistProductIds(fullCustomerId, customerEmail);
                     
                     if (firebaseItems.length > 0) {
-                        console.log(`[SHOPIFY] Found ${firebaseItems.length} items in Firebase`);
                         customerWishlist = firebaseItems.map(productId => ({ productId }));
                     } else {
-                        console.log(`[SHOPIFY] No items found in Firebase, using file storage`);
                         const wishlistData = await loadWishlistData();
                         customerWishlist = wishlistData[customerId] || [];
                     }
@@ -14634,13 +14577,10 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                 customerWishlist = wishlistData[customerId] || [];
             }
         } else {
-            console.log(`[SHOPIFY] Firebase not available, using file storage`);
             // Fallback to file storage
             const wishlistData = await loadWishlistData();
             customerWishlist = wishlistData[customerId] || [];
         }
-
-        console.log(`[SHOPIFY] Returning ${customerWishlist.length} items in wishlist`);
 
         // ✅ CRITICAL FIX: Process wishlist items through Shopify GraphQL to get proper variant images
         // This ensures the public API returns the same rich data as the mobile API
@@ -14650,8 +14590,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                 const wishlistProductIds = customerWishlist.map(item => item.productId).filter(Boolean);
                 
                 if (wishlistProductIds.length > 0) {
-                    console.log(`[SHOPIFY] Fetching product details from Shopify for ${wishlistProductIds.length} products`);
-                    
                     // Use the same GraphQL query as the mobile API
                     const productsQuery = `
                       query getWishlistProducts($productIds: [ID!]!) {
@@ -14736,7 +14674,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                     );
 
                     const products = productsResponse.data.data?.nodes || [];
-                    console.log(`[SHOPIFY] Fetched details for ${products.length} products from Shopify`);
                     
                     // Process each wishlist item with its corresponding product data
                     const enhancedWishlist = [];
@@ -14764,11 +14701,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                             let selectedImage = null;
                             
                             if (wishlistItem.selectedOptions || wishlistItem.variantId) {
-                                console.log(`🔍 [VARIANT] Processing public wishlist item:`, {
-                                    productId: product.id,
-                                    variantId: wishlistItem.variantId,
-                                    selectedOptions: wishlistItem.selectedOptions
-                                });
                                 
                                 // Find the matching variant by ID first
                                 if (wishlistItem.variantId) {
@@ -14791,13 +14723,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                                 }
                                 
                                 if (selectedVariant) {
-                                    console.log(`✅ [VARIANT] Found matching variant:`, {
-                                        variantId: selectedVariant.id,
-                                        title: selectedVariant.title,
-                                        selectedOptions: selectedVariant.selectedOptions,
-                                        image: selectedVariant.image?.url
-                                    });
-                                    
                                     selectedOptions = {};
                                     selectedVariant.selectedOptions.forEach(opt => {
                                         selectedOptions[opt.name] = opt.value;
@@ -14807,7 +14732,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                                     selectedCompareAtPrice = selectedVariant.compareAtPrice;
                                     selectedImage = selectedVariant.image?.url || product.featuredImage?.url;
                                 } else {
-                                    console.log(`⚠️ [VARIANT] No matching variant found, using stored options:`, wishlistItem.selectedOptions);
                                     selectedOptions = wishlistItem.selectedOptions || {};
                                     selectedImage = product.featuredImage?.url;
                                 }
@@ -14835,7 +14759,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                         }
                     }
                     
-                    console.log(`[SHOPIFY] Enhanced ${enhancedWishlist.length} wishlist items with variant data`);
                     customerWishlist = enhancedWishlist;
                 }
             } catch (shopifyError) {
