@@ -83,8 +83,6 @@ const corsOptions = {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
-    console.log(`🔍 CORS check for origin: ${origin}`);
-    
     const allowedOrigins = process.env.NODE_ENV === 'production' 
       ? [
           'https://metallbude.com',
@@ -117,7 +115,6 @@ const corsOptions = {
       origin.includes('shopify.com') ||
       origin.includes('myshopify.com')
     )) {
-      console.log(`✅ CORS allowed for origin: ${origin}`);
       callback(null, true);
     } else {
       console.log(`🚫 CORS blocked origin: ${origin}`);
@@ -4654,6 +4651,7 @@ async function getShopifyCustomerByEmail(email) {
               lastName
               displayName
               phone
+              tags
               emailMarketingConsent {
                 marketingState
               }
@@ -4840,7 +4838,8 @@ app.post('/auth/verify-code', async (req, res) => {
       email: shopifyCustomer.email,
       displayName: shopifyCustomer.displayName || shopifyCustomer.email.split('@')[0],
       firstName: shopifyCustomer.firstName || '',
-      lastName: shopifyCustomer.lastName || ''
+      lastName: shopifyCustomer.lastName || '',
+      tags: shopifyCustomer.tags || []
     };
   } else {
     customerId = config.customerEmails.get(email) || 
@@ -14543,8 +14542,6 @@ app.get('/api/public/wishlist/items', async (req, res) => {
                 error: 'Customer ID is required' 
             });
         }
-
-        console.log(`[SHOPIFY] Getting wishlist for customer: ${customerId}`);
 
         let customerWishlist = [];
 
