@@ -3275,33 +3275,35 @@ app.post('/notify-me/register', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Variant ID is required' });
     }
 
-    // Get the Notify Me API key from environment
-    const notifyMeApiKey = process.env.NOTIFY_ME;
-    
-    if (!notifyMeApiKey) {
-      console.error('❌ NOTIFY_ME API key not configured');
-      return res.status(500).json({ success: false, error: 'Notify Me service not configured' });
-    }
-
     console.log(`📬 Notify Me: Registering ${email} for variant ${variant_id}`);
 
-    // Make request to Notify Me / ReStock Alerts API
-    // Using the Hengam API endpoint that the widget uses
+    // Notify Me API endpoint (from widget network inspection)
+    // No API key needed - uses shop_id to identify the shop
     const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+    const productUrl = `https://${shopDomain}/products/${product_handle || 'product'}?variant=${variant_id}`;
     
     const notifyMeResponse = await axios.post(
-      'https://api.hengam.io/restock-alerts/v1/subscriptions',
+      'https://api.notify-me.app/subscription/',
       {
         email: email,
-        product_id: String(product_id),
+        full_name: null,
+        phone_number: null,
+        whatsapp_number: null,
+        contact_list_consent: true,
+        locale: 'de',
+        product_id: parseInt(product_id) || product_id,
         variant_id: String(variant_id),
-        shop: shopDomain
+        shop_id: 34008,  // Metallbude shop ID in Notify Me
+        timezone: '+1',
+        url: productUrl,
+        push_provider: null,
+        push_token: null
       },
       {
         headers: {
           'Content-Type': 'application/json',
-          'Origin': `https://${shopDomain}`,
-          'Referer': `https://${shopDomain}/`
+          'Origin': 'https://metallbude.com',
+          'Referer': 'https://metallbude.com/'
         }
       }
     );
@@ -3316,9 +3318,13 @@ app.post('/notify-me/register', async (req, res) => {
   } catch (error) {
     console.error('❌ Notify Me error:', error.response?.data || error.message);
     
-    // Check if already registered (409 Conflict)
-    if (error.response?.status === 409) {
-      return res.status(409).json({ 
+    // Check for duplicate subscription
+    const errorDetail = error.response?.data?.detail || error.response?.data?.message || '';
+    
+    if (error.response?.status === 409 || 
+        errorDetail.toLowerCase().includes('already') || 
+        errorDetail.toLowerCase().includes('duplicate')) {
+      return res.status(200).json({ 
         success: true, 
         message: 'You are already on the waitlist for this product',
         alreadyRegistered: true
@@ -3326,10 +3332,10 @@ app.post('/notify-me/register', async (req, res) => {
     }
     
     // Validation error
-    if (error.response?.status === 422) {
+    if (error.response?.status === 400 || error.response?.status === 422) {
       return res.status(422).json({ 
         success: false, 
-        error: error.response?.data?.message || 'Validation error'
+        error: errorDetail || 'Validation error'
       });
     }
     
