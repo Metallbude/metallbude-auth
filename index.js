@@ -3285,20 +3285,24 @@ app.post('/notify-me/register', async (req, res) => {
 
     console.log(`📬 Notify Me: Registering ${email} for variant ${variant_id}`);
 
-    // Make request to Notify Me API (Hengam/ReStock Alerts)
-    // Using the subscription endpoint with X-Api-Key authentication
+    // Make request to Notify Me / ReStock Alerts API
+    // The widget uses the Hengam API endpoint for creating subscriptions
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com';
+    
     const notifyMeResponse = await axios.post(
-      'https://api.notify-me.app/v1/subscriptions/',
+      'https://restock-alerts-api.hengam.io/api/v1/subscription/',
       {
         email: email,
-        product_id: parseInt(product_id) || product_id,
-        variant_id: parseInt(variant_id) || variant_id,
-        locale: 'de'
+        product_id: String(product_id),
+        variant_id: String(variant_id),
+        shop: shopDomain,
+        source: 'mobile_app'
       },
       {
         headers: {
           'Content-Type': 'application/json',
-          'X-Api-Key': notifyMeApiKey
+          'Origin': `https://${shopDomain}`,
+          'Referer': `https://${shopDomain}/`
         }
       }
     );
