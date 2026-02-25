@@ -3285,29 +3285,20 @@ app.post('/notify-me/register', async (req, res) => {
 
     console.log(`📬 Notify Me: Registering ${email} for variant ${variant_id}`);
 
-    // Make request to Notify Me API
-    // Adjust this URL based on your specific Notify Me app provider:
-    // - Notify Me by Spurit: https://notifyme.spurit.com/api
-    // - Back in Stock by HulkApps: https://bis-api.hulkapps.com/api
-    // - Notify Me app: https://a.notifyapp.io/api/v1
+    // Make request to Notify Me API (Hengam/ReStock Alerts)
+    // Using the subscription endpoint with X-Api-Key authentication
     const notifyMeResponse = await axios.post(
-      'https://a.notifyapp.io/api/v1/notifications',
+      'https://api.notify-me.app/v1/subscriptions/',
       {
         email: email,
-        product_id: product_id,
-        variant_id: variant_id,
-        product_title: product_title,
-        variant_title: variant_title,
-        product_handle: product_handle,
-        product_image: product_image,
-        shop: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
-        platform: platform || 'flutter_app'
+        product_id: parseInt(product_id) || product_id,
+        variant_id: parseInt(variant_id) || variant_id,
+        locale: 'de'
       },
       {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${notifyMeApiKey}`,
-          'X-Shop-Domain': process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com'
+          'X-Api-Key': notifyMeApiKey
         }
       }
     );
