@@ -3249,6 +3249,103 @@ app.get('/test/klaviyo', async (req, res) => {
   }
 });
 
+// ============================================
+// NOTIFY ME - Back in Stock Notifications
+// ============================================
+
+// Notify Me endpoint - proxies requests to the Notify Me app API
+app.post('/notify-me/register', async (req, res) => {
+  try {
+    const { 
+      email, 
+      product_id, 
+      variant_id, 
+      product_title, 
+      variant_title, 
+      product_handle,
+      product_image,
+      platform 
+    } = req.body;
+
+    // Validate required fields
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+    if (!variant_id) {
+      return res.status(400).json({ success: false, error: 'Variant ID is required' });
+    }
+
+    // Get the Notify Me API key from environment
+    const notifyMeApiKey = process.env.NOTIFY_ME;
+    
+    if (!notifyMeApiKey) {
+      console.error('❌ NOTIFY_ME API key not configured');
+      return res.status(500).json({ success: false, error: 'Notify Me service not configured' });
+    }
+
+    console.log(`📬 Notify Me: Registering ${email} for variant ${variant_id}`);
+
+    // Make request to Notify Me API
+    // Adjust this URL based on your specific Notify Me app provider:
+    // - Notify Me by Spurit: https://notifyme.spurit.com/api
+    // - Back in Stock by HulkApps: https://bis-api.hulkapps.com/api
+    // - Notify Me app: https://a.notifyapp.io/api/v1
+    const notifyMeResponse = await axios.post(
+      'https://a.notifyapp.io/api/v1/notifications',
+      {
+        email: email,
+        product_id: product_id,
+        variant_id: variant_id,
+        product_title: product_title,
+        variant_title: variant_title,
+        product_handle: product_handle,
+        product_image: product_image,
+        shop: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
+        platform: platform || 'flutter_app'
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${notifyMeApiKey}`,
+          'X-Shop-Domain': process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com'
+        }
+      }
+    );
+
+    console.log(`✅ Notify Me: Successfully registered ${email}`);
+    
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Successfully registered for notification'
+    });
+
+  } catch (error) {
+    console.error('❌ Notify Me error:', error.response?.data || error.message);
+    
+    // Check if already registered (409 Conflict)
+    if (error.response?.status === 409) {
+      return res.status(409).json({ 
+        success: true, 
+        message: 'You are already on the waitlist for this product',
+        alreadyRegistered: true
+      });
+    }
+    
+    // Validation error
+    if (error.response?.status === 422) {
+      return res.status(422).json({ 
+        success: false, 
+        error: error.response?.data?.message || 'Validation error'
+      });
+    }
+    
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Failed to register for notification. Please try again.'
+    });
+  }
+});
+
 // Newsletter endpoints (Klaviyo proxy)
 app.post('/newsletter/subscribe', async (req, res) => {
   try {
