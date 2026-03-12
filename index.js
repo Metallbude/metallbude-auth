@@ -16113,15 +16113,34 @@ app.post('/ai/analyze-image', async (req, res) => {
           contents: [{
             parts: [
               {
-                text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture.
+                text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture and home accessories.
 
 === YOUR MAIN TASK ===
-The user photographs a piece of furniture and wants to find a SIMILAR product at Metallbude.
+The user photographs something to find a matching Metallbude product.
 
-IMPORTANT: Focus ONLY on the MAIN OBJECT in the image!
-- The main object is in the CENTER or FOREGROUND
-- IGNORE background objects, decorations, plants, walls, floors
-- Identify WHICH piece of furniture the user photographed
+=== CRITICAL THINKING LOGIC ===
+
+STEP 1: Identify what's in the photo (the main object in center/foreground)
+
+STEP 2: Determine user intent using this logic:
+
+  IF the photo shows FURNITURE (chair, table, shelf, etc.)
+  → User wants SIMILAR furniture from Metallbude
+  
+  IF the photo shows an ITEM/OBJECT (not furniture)
+  → User wants a Metallbude product to HOLD, STORE, ORGANIZE, or DISPLAY that item!
+  
+  Think: "What would this item need? Where would you put it?"
+  - Clothing items → coat rack, clothes rail, hanger, hook
+  - Bathroom items → towel holder, toilet paper holder, shower shelf
+  - Kitchen items → paper towel holder, dish towel holder, tray
+  - Books/magazines → shelf, bookend
+  - Shoes → shoe rack
+  - Bottles/wine → wine rack
+  - Small objects → tray, organizer, shelf
+  - Baby → cradle, moses basket
+
+STEP 3: Find matching Metallbude products from the catalog below
 
 === COMPLETE METALLBUDE PRODUCT CATALOG ===
 
@@ -16227,17 +16246,30 @@ IMPORTANT for searchTerms:
 - Include colors in all languages (schwarz, black, noir, nero)
 - Include style terms (industrial, minimalist, modern)
 
-EXAMPLE - Photo of outdoor lounge chair with black metal frame:
+EXAMPLE 1 - User photographs FURNITURE (find similar):
 {
   "mainObject": "Black outdoor lounge chair with metal frame and cushion",
   "confidence": 0.95,
-  "userIntent": "Looking for comfortable outdoor seating",
+  "userIntent": "Looking for similar outdoor seating furniture",
   "productType": "Lounge chair outdoor",
   "matchingProducts": ["DIEGO", "CRUZ", "Garten Lounge Set"],
   "labels": ["lounge chair", "outdoor", "garden furniture", "metal frame", "cushion"],
   "colors": ["black", "schwarz", "noir", "nero"],
   "material": "Metal",
   "searchTerms": ["DIEGO", "CRUZ", "Lounge", "Sessel", "chair", "fauteuil", "poltrona", "Outdoor", "extérieur", "esterno", "Garten", "garden", "jardin", "giardino", "schwarz", "black", "noir", "nero", "Metall", "metal", "métal", "metallo"]
+}
+
+EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
+{
+  "mainObject": "Toilet paper roll",
+  "confidence": 0.95,
+  "userIntent": "Looking for a holder to store/display this item",
+  "productType": "Toilet paper holder",
+  "matchingProducts": ["TUALI", "MO"],
+  "labels": ["toilet paper", "bathroom", "WC", "hygiene"],
+  "colors": ["white", "weiß", "blanc", "bianco"],
+  "material": "Paper",
+  "searchTerms": ["TUALI", "MO", "Toilettenpapierhalter", "toilet paper holder", "porte-papier toilette", "portarotolo", "Bad", "bathroom", "salle de bain", "bagno", "WC", "Toilette", "minimalist", "Metall", "metal"]
 }`
               },
               {
