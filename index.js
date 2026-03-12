@@ -16080,12 +16080,12 @@ app.get('/api/returns/:orderId/shipping', async (req, res) => {
 });
 
 // ============================================================================
-// AI VISUAL SEARCH - Google Cloud Vision API
+// AI VISUAL SEARCH - Using Google Gemini for Smart Furniture Recognition
 // ============================================================================
 
 /**
- * Analyze image using Google Cloud Vision API
- * Used by mobile app visual search feature
+ * Analyze image using Google Gemini AI
+ * Much smarter than Cloud Vision - actually understands furniture context
  */
 app.post('/ai/analyze-image', async (req, res) => {
   try {
@@ -16095,180 +16095,152 @@ app.post('/ai/analyze-image', async (req, res) => {
       return res.status(400).json({ error: 'No image provided' });
     }
     
-    const apiKey = process.env.GOOGLE_CLOUD_VISION_KEY;
-    if (!apiKey) {
-      console.error('❌ GOOGLE_CLOUD_VISION_KEY not configured');
-      return res.status(500).json({ error: 'Vision API not configured' });
+    // Try Gemini first (smarter), fall back to Cloud Vision
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_CLOUD_VISION_KEY;
+    
+    if (!geminiKey) {
+      console.error('❌ No AI API key configured (GEMINI_API_KEY or GOOGLE_CLOUD_VISION_KEY)');
+      return res.status(500).json({ error: 'AI API not configured' });
     }
     
-    console.log('🔍 Analyzing image with Google Cloud Vision...');
+    console.log('🔍 Analyzing image with Google Gemini AI...');
     
-    const visionResponse = await axios.post(
-      `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-      {
-        requests: [{
-          image: { content: image },
-          features: [
-            { type: 'LABEL_DETECTION', maxResults: 15 },
-            { type: 'IMAGE_PROPERTIES', maxResults: 5 },
-            { type: 'OBJECT_LOCALIZATION', maxResults: 10 }
-          ]
-        }]
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000
-      }
-    );
-    
-    const response = visionResponse.data.responses[0];
-    
-    if (response.error) {
-      console.error('❌ Vision API error:', response.error);
-      return res.status(500).json({ error: response.error.message });
-    }
-    
-    // Extract labels
-    const labels = (response.labelAnnotations || [])
-      .map(l => l.description.toLowerCase());
-    
-    // Extract colors from dominant colors
-    const colorInfo = response.imagePropertiesAnnotation?.dominantColors?.colors || [];
-    const colors = colorInfo.slice(0, 5).map(c => {
-      const { red = 0, green = 0, blue = 0 } = c.color || {};
-      // Map RGB to color names
-      if (red > 200 && green > 200 && blue > 200) return 'white';
-      if (red < 60 && green < 60 && blue < 60) return 'black';
-      if (red > 180 && green > 140 && blue < 100) return 'gold';
-      if (red > 140 && green > 90 && blue < 70) return 'wood';
-      if (red > 180 && green > 160 && blue > 140 && blue < 180) return 'beige';
-      if (Math.abs(red - green) < 30 && Math.abs(green - blue) < 30 && red > 100) return 'gray';
-      if (red > 150 && green < 100 && blue < 100) return 'red';
-      if (blue > 150 && red < 100 && green < 100) return 'blue';
-      if (green > 150 && red < 100 && blue < 100) return 'green';
-      return 'neutral';
-    }).filter((c, i, arr) => arr.indexOf(c) === i); // Remove duplicates
-    
-    // Extract objects
-    const objects = (response.localizedObjectAnnotations || [])
-      .map(o => o.name.toLowerCase());
-    
-    // Generate search terms (German translations for furniture)
-    const searchTerms = [];
-    
-    // Map English labels to German search terms for Metallbude products
-    const translations = {
-      // Furniture types
-      'chair': 'stuhl',
-      'armchair': 'sessel',
-      'lounge chair': 'sessel',
-      'furniture': 'möbel',
-      'shelf': 'regal',
-      'shelving': 'regal',
-      'bookshelf': 'regal',
-      'table': 'tisch',
-      'desk': 'schreibtisch',
-      'side table': 'beistelltisch',
-      'coffee table': 'couchtisch',
-      'coat rack': 'garderobe',
-      'clothes rack': 'kleiderstange',
-      'wardrobe': 'garderobe',
-      'hook': 'haken',
-      'wall hook': 'wandhaken',
-      'lamp': 'lampe',
-      'light': 'leuchte',
-      'mirror': 'spiegel',
-      'bench': 'bank',
-      'stool': 'hocker',
-      'container': 'container',
-      'cart': 'rollcontainer',
-      'cabinet': 'schrank',
-      'rack': 'regal',
-      'stand': 'ständer',
-      // Materials
-      'metal': 'metall',
-      'steel': 'stahl',
-      'iron': 'eisen',
-      'wood': 'holz',
-      'leather': 'leder',
-      'fabric': 'stoff',
-      // Colors
-      'black': 'schwarz',
-      'white': 'weiß',
-      'gold': 'gold',
-      'gray': 'grau',
-      'grey': 'grau',
-      'beige': 'beige',
-      'brown': 'braun'
-    };
-    
-    // Add translated search terms
-    for (const label of labels) {
-      // Check direct translation
-      if (translations[label]) {
-        searchTerms.push(translations[label]);
-      }
-      // Check partial matches
-      for (const [eng, ger] of Object.entries(translations)) {
-        if (label.includes(eng)) {
-          searchTerms.push(ger);
+    try {
+      // Use Gemini 1.5 Flash for fast, accurate furniture recognition
+      const geminiResponse = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
+        {
+          contents: [{
+            parts: [
+              {
+                text: `Du bist ein Möbel-Experte für den Shop "Metallbude" der industrielle Metall-Möbel verkauft.
+
+Analysiere dieses Bild und identifiziere das Möbelstück. Antworte NUR mit einem JSON-Objekt (keine Erklärungen):
+
+{
+  "productType": "exakter Möbeltyp auf Deutsch (z.B. Outdoor Lounge Sessel, Kleiderstange, Wandregal, Beistelltisch)",
+  "labels": ["3-5 beschreibende Labels auf Deutsch"],
+  "colors": ["erkannte Farben auf Deutsch (schwarz, weiß, gold, beige, grau, etc.)"],
+  "material": "Hauptmaterial (Metall, Holz, Stoff, Leder)",
+  "style": "Stil (industrial, minimalist, modern, skandinavisch)",
+  "searchTerms": ["5-8 deutsche Suchbegriffe die zu diesem Produkt passen, z.B. Sessel, Lounge, Outdoor, Terrasse, schwarz, Metall"]
+}
+
+Wichtig: Metallbude verkauft hauptsächlich:
+- Kleiderstangen und Garderoben
+- Regale (Wand, Stand, Industrie)
+- Sessel und Loungemöbel  
+- Beistelltische und Couchtische
+- Wandhaken und Aufhängungen
+- Spiegel und Lampen
+
+Erkenne das Möbelstück so genau wie möglich!`
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: image
+                }
+              }
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 500
+          }
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 30000
+        }
+      );
+      
+      const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (geminiText) {
+        console.log('📝 Gemini raw response:', geminiText);
+        
+        // Extract JSON from response
+        const jsonMatch = geminiText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const analysis = JSON.parse(jsonMatch[0]);
+          
+          console.log(`✅ Gemini analysis complete!`);
+          console.log(`   Product: ${analysis.productType}`);
+          console.log(`   Labels: ${analysis.labels?.join(', ')}`);
+          console.log(`   Colors: ${analysis.colors?.join(', ')}`);
+          console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
+          
+          return res.json({
+            labels: analysis.labels || [],
+            colors: analysis.colors || [],
+            objects: [analysis.productType],
+            style: analysis.style || 'modern',
+            material: analysis.material,
+            confidence: 0.9,
+            searchTerms: analysis.searchTerms || [],
+            productType: analysis.productType
+          });
         }
       }
-      // Also add original label
-      searchTerms.push(label);
-    }
-    
-    // Add object-based terms
-    for (const obj of objects) {
-      if (translations[obj]) {
-        searchTerms.push(translations[obj]);
+      
+      throw new Error('Could not parse Gemini response');
+      
+    } catch (geminiError) {
+      console.log('⚠️ Gemini failed, trying Cloud Vision fallback:', geminiError.message);
+      
+      // Fallback to Cloud Vision if Gemini fails
+      const visionKey = process.env.GOOGLE_CLOUD_VISION_KEY;
+      if (!visionKey) {
+        throw geminiError;
       }
-      searchTerms.push(obj);
-    }
-    
-    // Add color-based search terms
-    for (const color of colors) {
-      if (translations[color]) {
-        searchTerms.push(translations[color]);
+      
+      const visionResponse = await axios.post(
+        `https://vision.googleapis.com/v1/images:annotate?key=${visionKey}`,
+        {
+          requests: [{
+            image: { content: image },
+            features: [
+              { type: 'LABEL_DETECTION', maxResults: 15 },
+              { type: 'IMAGE_PROPERTIES', maxResults: 5 },
+              { type: 'OBJECT_LOCALIZATION', maxResults: 10 }
+            ]
+          }]
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
+      );
+      
+      const response = visionResponse.data.responses[0];
+      const labels = (response.labelAnnotations || []).map(l => l.description.toLowerCase());
+      const objects = (response.localizedObjectAnnotations || []).map(o => o.name.toLowerCase());
+      
+      // Smart translation for furniture terms
+      const furnitureTranslations = {
+        'chair': 'Stuhl', 'armchair': 'Sessel', 'lounge': 'Lounge',
+        'furniture': 'Möbel', 'shelf': 'Regal', 'table': 'Tisch',
+        'coat rack': 'Garderobe', 'rack': 'Regal', 'hook': 'Haken',
+        'outdoor': 'Outdoor', 'patio': 'Terrasse', 'garden': 'Garten'
+      };
+      
+      const searchTerms = [];
+      for (const label of [...labels, ...objects]) {
+        for (const [eng, ger] of Object.entries(furnitureTranslations)) {
+          if (label.includes(eng)) searchTerms.push(ger);
+        }
       }
+      
+      return res.json({
+        labels,
+        colors: ['neutral'],
+        objects,
+        style: 'modern',
+        confidence: 0.5,
+        searchTerms: [...new Set(searchTerms)].slice(0, 8)
+      });
     }
-    
-    // Determine style
-    let style = 'modern';
-    if (labels.some(l => l.includes('minimalist')) || 
-        (colors.includes('black') && colors.includes('white'))) {
-      style = 'minimalist';
-    } else if (labels.some(l => l.includes('industrial')) || 
-               labels.some(l => l.includes('metal')) ||
-               labels.some(l => l.includes('steel'))) {
-      style = 'industrial';
-    } else if (labels.some(l => l.includes('rustic')) || 
-               colors.includes('wood')) {
-      style = 'rustic';
-    } else if (labels.some(l => l.includes('scandinavian'))) {
-      style = 'scandinavian';
-    }
-    
-    // Calculate confidence
-    const confidence = labels.length > 5 ? 0.85 : (labels.length > 2 ? 0.7 : 0.5);
-    
-    // Remove duplicates and limit search terms
-    const uniqueTerms = [...new Set(searchTerms)].slice(0, 10);
-    
-    console.log(`✅ Vision analysis complete: ${labels.length} labels, ${colors.length} colors, ${objects.length} objects`);
-    console.log(`   Search terms: ${uniqueTerms.join(', ')}`);
-    
-    res.json({
-      labels,
-      colors,
-      objects,
-      style,
-      confidence,
-      searchTerms: uniqueTerms
-    });
     
   } catch (error) {
-    console.error('❌ Vision API error:', error.response?.data || error.message);
+    console.error('❌ AI analysis error:', error.response?.data || error.message);
     res.status(500).json({ 
       error: 'Image analysis failed',
       details: error.message 
