@@ -16113,43 +16113,63 @@ app.post('/ai/analyze-image', async (req, res) => {
           contents: [{
             parts: [
               {
-                text: `Du bist ein Produkterkennung-System für den Online-Shop "Metallbude" (metallbude.de).
+                text: `Du bist ein Produkterkennung-System für "Metallbude" (metallbude.com) - ein Shop für minimalistische Metallmöbel.
 
-WICHTIG: Metallbude verkauft diese EXAKTEN Produktkategorien:
-- "Kleiderstange" / "Kleiderstangen" (clothing rails)
-- "Garderobe" / "Garderoben" (coat racks)
-- "Wandregal" / "Wandregale" (wall shelves)
-- "Standregal" / "Standregale" (standing shelves)
-- "Sessel" / "Lounge Sessel" / "Outdoor Sessel" (armchairs/lounge chairs)
-- "Beistelltisch" / "Beistelltische" (side tables)
-- "Couchtisch" / "Couchtische" (coffee tables)
-- "Wandhaken" (wall hooks)
-- "Spiegel" (mirrors)
-- "Lampe" / "Lampen" (lamps)
-- "Hocker" (stools)
-- "Stuhl" / "Stühle" (chairs)
+=== METALLBUDE PRODUKTKATALOG ===
 
-Analysiere das Bild und identifiziere das Produkt. Antworte NUR mit JSON:
+FLURMÖBEL:
+- Kleiderstange (RUBI, etc.) - freistehende Kleiderstangen
+- Schuhregal (NEVA, BOVI) - offene Schuhregale aus Metall
+- Kleiderhaken (PALO) - Wandhaken Sets
+- S-Haken - Leder S-Haken für Kleiderstangen
+- Kleiderbügel (FAY) - Metallkleiderbügel
+
+BADEZIMMER:
+- Handtuchhalter (VANA, TENSI) - Wandmontage
+- Handtuchständer (DELAYA) - freistehend
+- Duschablage (SHEA) - Duschregal
+- Toilettenpapierhalter (TUALI)
+
+WOHNZIMMER:
+- Beistelltisch (COSMO) - runde/eckige Metalltische
+- Couchtisch - Wohnzimmertische
+- Wandregal (LENN) - Metallregale
+
+SCHLAFZIMMER:
+- Nachttisch (NELIO) - hängender Nachttisch
+- Herrendiener (JAMES) - Kleiderständer
+- Babywiege - Metallwiege
+
+OUTDOOR:
+- Outdoor Möbel, Gartenmöbel
+- Feuerschale, Tischfeuer
+
+HAUSTIERE:
+- Hundebett, Futterstation, Futternapf
+
+=== METALLBUDE FARBEN ===
+Schwarz, Weiß, Cashew (beige), Blueberry Soda (blau), Mango Lassi (gelb), Matcha Latte (grün), Pink Lemonade (rosa), Green Tea, Hot Choc, Red Wine, Macchiato
+
+=== DEINE AUFGABE ===
+Analysiere das Bild und finde das passende Metallbude-Produkt. Antworte NUR mit JSON:
 
 {
-  "productType": "genauer Produkttyp aus der Liste oben (z.B. 'Outdoor Sessel', 'Kleiderstange', 'Wandregal')",
-  "labels": ["5 beschreibende deutsche Begriffe"],
-  "colors": ["Farben auf Deutsch: schwarz, weiß, gold, messing, beige, grau, braun, natur"],
-  "material": "Metall/Holz/Stoff/Leder/Rattan",
-  "style": "industrial/modern/minimalistisch/skandinavisch/boho",
-  "searchTerms": ["WICHTIG: 6-10 Suchbegriffe die EXAKT zu Metallbude Produktnamen passen würden"]
+  "productType": "EXAKTER Produkttyp (z.B. 'Kleiderstange', 'Schuhregal', 'Handtuchhalter', 'Beistelltisch')",
+  "productName": "Falls erkennbar der Produktname (z.B. 'RUBI', 'COSMO', 'NELIO')",
+  "labels": ["5 beschreibende Begriffe"],
+  "colors": ["erkannte Farben aus der Metallbude-Palette"],
+  "material": "Metall/Holz/Stoff/Leder",
+  "room": "Flur/Badezimmer/Wohnzimmer/Schlafzimmer/Outdoor/Küche",
+  "searchTerms": ["8-12 Suchbegriffe die in der Metallbude-Suche funktionieren"]
 }
 
-REGELN für searchTerms:
-1. Verwende Produktnamen aus der Liste oben (Sessel, Kleiderstange, etc.)
-2. Füge Material hinzu (Metall, Holz, etc.)
-3. Füge Farbe hinzu (schwarz, gold, etc.)
-4. Füge Stil hinzu (industrial, modern, etc.)
-5. Bei Outdoor-Möbeln: "Outdoor", "Garten", "Terrasse"
-6. Kombiniere: z.B. "Outdoor Sessel", "Sessel schwarz", "Lounge"
-
-Beispiel für einen schwarzen Outdoor-Sessel:
-searchTerms: ["Sessel", "Outdoor Sessel", "Lounge Sessel", "Lounge", "Outdoor", "schwarz", "Metall", "Garten", "Terrasse"]`
+WICHTIG für searchTerms - verwende:
+1. Den Produkttyp (Kleiderstange, Schuhregal, Handtuchhalter, etc.)
+2. Den Raum (Flur, Bad, Wohnzimmer, etc.) 
+3. Die Farbe (schwarz, weiß, Cashew, etc.)
+4. Material (Metall, industrial)
+5. Stil-Begriffe (minimalistisch, modern, industrial)
+6. Verwandte Begriffe (Garderobe für Kleiderstange, Regal für Schuhregal)`
               },
               {
                 inlineData: {
@@ -16182,19 +16202,31 @@ searchTerms: ["Sessel", "Outdoor Sessel", "Lounge Sessel", "Lounge", "Outdoor", 
           
           console.log(`✅ Gemini analysis complete!`);
           console.log(`   Product: ${analysis.productType}`);
+          console.log(`   Name: ${analysis.productName || 'unknown'}`);
+          console.log(`   Room: ${analysis.room || 'unknown'}`);
           console.log(`   Labels: ${analysis.labels?.join(', ')}`);
           console.log(`   Colors: ${analysis.colors?.join(', ')}`);
           console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
+          
+          // Build comprehensive search terms including room and product name
+          let allSearchTerms = [...(analysis.searchTerms || [])];
+          if (analysis.productName && !allSearchTerms.includes(analysis.productName)) {
+            allSearchTerms.unshift(analysis.productName);
+          }
+          if (analysis.room && !allSearchTerms.includes(analysis.room)) {
+            allSearchTerms.push(analysis.room);
+          }
           
           return res.json({
             labels: analysis.labels || [],
             colors: analysis.colors || [],
             objects: [analysis.productType],
-            style: analysis.style || 'modern',
             material: analysis.material,
-            confidence: 0.9,
-            searchTerms: analysis.searchTerms || [],
-            productType: analysis.productType
+            confidence: 0.95,
+            searchTerms: allSearchTerms,
+            productType: analysis.productType,
+            productName: analysis.productName || null,
+            room: analysis.room || null
           });
         }
       }
