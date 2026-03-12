@@ -16113,63 +16113,90 @@ app.post('/ai/analyze-image', async (req, res) => {
           contents: [{
             parts: [
               {
-                text: `Du bist ein Produkterkennung-System für "Metallbude" (metallbude.com) - ein Shop für minimalistische Metallmöbel.
+                text: `Du bist ein visuelles Produkterkennungs-System für "Metallbude" (metallbude.com).
+
+=== DEINE HAUPTAUFGABE ===
+Der Nutzer fotografiert ein Möbelstück oder Wohnaccessoire und möchte ein ÄHNLICHES Produkt bei Metallbude finden.
+
+WICHTIG: Fokussiere dich NUR auf das HAUPTOBJEKT im Bild!
+- Das Hauptobjekt ist das Möbelstück/Accessoire das im ZENTRUM oder VORDERGRUND steht
+- IGNORIERE Hintergrundobjekte, Dekoration, Pflanzen, Wände, Böden
+- Der Nutzer fotografiert EIN spezifisches Möbelstück - finde heraus WELCHES
+
+=== WAS DER NUTZER SUCHT ===
+Wenn jemand einen Stuhl/Sessel fotografiert → sucht Sitzmöbel, Lounge, Sessel
+Wenn jemand ein Regal fotografiert → sucht Regale, Ablagen, Aufbewahrung
+Wenn jemand eine Stange/Ständer fotografiert → sucht Kleiderstangen, Handtuchhalter
+Wenn jemand einen Tisch fotografiert → sucht Beistelltisch, Couchtisch, Nachttisch
 
 === METALLBUDE PRODUKTKATALOG ===
 
-FLURMÖBEL:
-- Kleiderstange (RUBI, etc.) - freistehende Kleiderstangen
-- Schuhregal (NEVA, BOVI) - offene Schuhregale aus Metall
-- Kleiderhaken (PALO) - Wandhaken Sets
-- S-Haken - Leder S-Haken für Kleiderstangen
-- Kleiderbügel (FAY) - Metallkleiderbügel
+SITZMÖBEL & OUTDOOR:
+- Sessel, Lounge Sessel, Outdoor Sessel, Gartenmöbel
+- Hocker, Barhocker
+
+AUFBEWAHRUNG & ORGANISATION:
+- Kleiderstange (RUBI) - freistehend für Kleidung
+- Schuhregal (NEVA, BOVI) - offene Metallregale
+- Wandregal (LENN) - Metallregale an der Wand
+- Kleiderhaken (PALO), S-Haken, Kleiderbügel (FAY)
 
 BADEZIMMER:
 - Handtuchhalter (VANA, TENSI) - Wandmontage
 - Handtuchständer (DELAYA) - freistehend
-- Duschablage (SHEA) - Duschregal
-- Toilettenpapierhalter (TUALI)
+- Duschablage (SHEA), Toilettenpapierhalter (TUALI)
 
-WOHNZIMMER:
-- Beistelltisch (COSMO) - runde/eckige Metalltische
-- Couchtisch - Wohnzimmertische
-- Wandregal (LENN) - Metallregale
+TISCHE:
+- Beistelltisch (COSMO) - klein, rund/eckig
+- Couchtisch - größer, fürs Wohnzimmer
+- Nachttisch (NELIO) - hängend, fürs Schlafzimmer
 
-SCHLAFZIMMER:
-- Nachttisch (NELIO) - hängender Nachttisch
-- Herrendiener (JAMES) - Kleiderständer
-- Babywiege - Metallwiege
+SONSTIGES:
+- Herrendiener (JAMES), Babywiege, Feuerschale
+- Hundebett, Futterstation
 
-OUTDOOR:
-- Outdoor Möbel, Gartenmöbel
-- Feuerschale, Tischfeuer
+=== FARBEN ===
+Schwarz, Weiß, Cashew, Blueberry Soda, Mango Lassi, Matcha Latte, Pink Lemonade
 
-HAUSTIERE:
-- Hundebett, Futterstation, Futternapf
-
-=== METALLBUDE FARBEN ===
-Schwarz, Weiß, Cashew (beige), Blueberry Soda (blau), Mango Lassi (gelb), Matcha Latte (grün), Pink Lemonade (rosa), Green Tea, Hot Choc, Red Wine, Macchiato
-
-=== DEINE AUFGABE ===
-Analysiere das Bild und finde das passende Metallbude-Produkt. Antworte NUR mit JSON:
+=== ANTWORT FORMAT ===
+Antworte NUR mit diesem JSON:
 
 {
-  "productType": "EXAKTER Produkttyp (z.B. 'Kleiderstange', 'Schuhregal', 'Handtuchhalter', 'Beistelltisch')",
-  "productName": "Falls erkennbar der Produktname (z.B. 'RUBI', 'COSMO', 'NELIO')",
-  "labels": ["5 beschreibende Begriffe"],
-  "colors": ["erkannte Farben aus der Metallbude-Palette"],
-  "material": "Metall/Holz/Stoff/Leder",
-  "room": "Flur/Badezimmer/Wohnzimmer/Schlafzimmer/Outdoor/Küche",
-  "searchTerms": ["8-12 Suchbegriffe die in der Metallbude-Suche funktionieren"]
+  "mainObject": "Was ist das HAUPTOBJEKT im Bild? (z.B. 'Outdoor Lounge Sessel', 'Kleiderstange mit Kleidung', 'Beistelltisch')",
+  "confidence": 0.0-1.0,
+  "userIntent": "Was sucht der Nutzer wahrscheinlich? (z.B. 'Sitzmöglichkeit für draußen', 'Kleideraufbewahrung', 'kleiner Tisch')",
+  "productType": "Passende Metallbude-Kategorie (Sessel/Kleiderstange/Beistelltisch/Wandregal/etc.)",
+  "labels": ["5 beschreibende deutsche Begriffe für das Hauptobjekt"],
+  "colors": ["erkannte Farben"],
+  "material": "Hauptmaterial (Metall/Holz/Rattan/Stoff)",
+  "searchTerms": ["10-15 deutsche Suchbegriffe", "die bei Metallbude funktionieren", "Produkttypen", "Farben", "Materialien", "Stilbegriffe"]
 }
 
-WICHTIG für searchTerms - verwende:
-1. Den Produkttyp (Kleiderstange, Schuhregal, Handtuchhalter, etc.)
-2. Den Raum (Flur, Bad, Wohnzimmer, etc.) 
-3. Die Farbe (schwarz, weiß, Cashew, etc.)
-4. Material (Metall, industrial)
-5. Stil-Begriffe (minimalistisch, modern, industrial)
-6. Verwandte Begriffe (Garderobe für Kleiderstange, Regal für Schuhregal)`
+BEISPIELE:
+
+Foto von schwarzem Outdoor-Sessel:
+{
+  "mainObject": "Schwarzer Outdoor Lounge Sessel mit Metallgestell",
+  "confidence": 0.95,
+  "userIntent": "Sucht bequeme Outdoor-Sitzmöglichkeit",
+  "productType": "Sessel",
+  "labels": ["Lounge Sessel", "Outdoor Möbel", "Gartensessel", "Metallgestell", "bequem"],
+  "colors": ["schwarz"],
+  "material": "Metall",
+  "searchTerms": ["Sessel", "Lounge", "Outdoor", "Garten", "Terrasse", "schwarz", "Metall", "Sitzmöbel", "Gartenmöbel", "Loungemöbel"]
+}
+
+Foto von Kleiderstange:
+{
+  "mainObject": "Freistehende Kleiderstange aus schwarzem Metall",
+  "confidence": 0.98,
+  "userIntent": "Sucht Kleiderstange oder Garderobe",
+  "productType": "Kleiderstange",
+  "labels": ["Kleiderstange", "Garderobe", "freistehend", "Metall", "industrial"],
+  "colors": ["schwarz"],
+  "material": "Metall",
+  "searchTerms": ["Kleiderstange", "RUBI", "Garderobe", "Kleiderständer", "schwarz", "Metall", "Flur", "industrial", "minimalistisch", "freistehend"]
+}`
               },
               {
                 inlineData: {
@@ -16201,32 +16228,35 @@ WICHTIG für searchTerms - verwende:
           const analysis = JSON.parse(jsonMatch[0]);
           
           console.log(`✅ Gemini analysis complete!`);
-          console.log(`   Product: ${analysis.productType}`);
-          console.log(`   Name: ${analysis.productName || 'unknown'}`);
-          console.log(`   Room: ${analysis.room || 'unknown'}`);
+          console.log(`   Main Object: ${analysis.mainObject}`);
+          console.log(`   Confidence: ${analysis.confidence}`);
+          console.log(`   User Intent: ${analysis.userIntent}`);
+          console.log(`   Product Type: ${analysis.productType}`);
           console.log(`   Labels: ${analysis.labels?.join(', ')}`);
           console.log(`   Colors: ${analysis.colors?.join(', ')}`);
           console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
           
-          // Build comprehensive search terms including room and product name
+          // Build comprehensive search terms
           let allSearchTerms = [...(analysis.searchTerms || [])];
-          if (analysis.productName && !allSearchTerms.includes(analysis.productName)) {
-            allSearchTerms.unshift(analysis.productName);
+          
+          // Add product type at the beginning if not already there
+          if (analysis.productType && !allSearchTerms.some(t => t.toLowerCase() === analysis.productType.toLowerCase())) {
+            allSearchTerms.unshift(analysis.productType);
           }
-          if (analysis.room && !allSearchTerms.includes(analysis.room)) {
-            allSearchTerms.push(analysis.room);
-          }
+          
+          // Remove duplicates and empty values
+          allSearchTerms = [...new Set(allSearchTerms.filter(t => t && t.trim()))];
           
           return res.json({
             labels: analysis.labels || [],
             colors: analysis.colors || [],
-            objects: [analysis.productType],
+            objects: [analysis.mainObject || analysis.productType],
             material: analysis.material,
-            confidence: 0.95,
+            confidence: analysis.confidence || 0.8,
             searchTerms: allSearchTerms,
             productType: analysis.productType,
-            productName: analysis.productName || null,
-            room: analysis.room || null
+            mainObject: analysis.mainObject,
+            userIntent: analysis.userIntent
           });
         }
       }
