@@ -16113,124 +16113,131 @@ app.post('/ai/analyze-image', async (req, res) => {
           contents: [{
             parts: [
               {
-                text: `Du bist ein visuelles Produkterkennungs-System für "Metallbude" (metallbude.com) - Shop für minimalistische Metallmöbel.
+                text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture.
 
-=== DEINE HAUPTAUFGABE ===
-Der Nutzer fotografiert ein Möbelstück und möchte ein ÄHNLICHES Produkt bei Metallbude finden.
+=== YOUR MAIN TASK ===
+The user photographs a piece of furniture and wants to find a SIMILAR product at Metallbude.
 
-WICHTIG: Fokussiere dich NUR auf das HAUPTOBJEKT im Bild!
-- Das Hauptobjekt steht im ZENTRUM oder VORDERGRUND
-- IGNORIERE Hintergrundobjekte, Dekoration, Pflanzen, Wände, Böden
-- Finde heraus WELCHES Möbelstück der Nutzer fotografiert hat
+IMPORTANT: Focus ONLY on the MAIN OBJECT in the image!
+- The main object is in the CENTER or FOREGROUND
+- IGNORE background objects, decorations, plants, walls, floors
+- Identify WHICH piece of furniture the user photographed
 
-=== KOMPLETTER METALLBUDE PRODUKTKATALOG ===
+=== COMPLETE METALLBUDE PRODUCT CATALOG ===
 
-TISCHE:
-- Beistelltisch (COSMO, CIRO, DENYA, RAW S, SOLI X)
-- Couchtisch (CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X)
-- Lounge-Tisch Outdoor LAGO
-- Lowboard TAVIR
-- Nachttisch hängend (NELIO), stehend (DAMIO)
-- Konsolentisch RIA
-- Schreibtisch DONNA
-- Tischsatz TRE SEMNIA X
+TABLES / TISCHE / TABLES / TAVOLI:
+- Side table / Beistelltisch / Table d'appoint / Tavolino (COSMO, CIRO, DENYA, RAW S, SOLI X)
+- Coffee table / Couchtisch / Table basse / Tavolino da caffè (CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X)
+- Outdoor lounge table / Lounge-Tisch Outdoor / Table lounge extérieur / Tavolo lounge esterno LAGO
+- Lowboard / Lowboard / Meuble TV / Mobile TV TAVIR
+- Nightstand hanging / Nachttisch hängend / Table de chevet suspendue / Comodino sospeso NELIO
+- Nightstand standing / Nachttisch stehend / Table de chevet / Comodino DAMIO
+- Console table / Konsolentisch / Console / Consolle RIA
+- Desk / Schreibtisch / Bureau / Scrivania DONNA
+- Table set / Tischsatz / Set de tables / Set tavoli TRE SEMNIA X
 
-REGALE & AUFBEWAHRUNG:
-- Standregal THARON
-- Wandregal (LENN, LINARA, ARIS, RAW L)
-- Metallregal (RIVO, RIVO S)
-- Ablage RIVO
-- Schuhregal (NEVA, BOVI, CAMO)
-- Weinregal VINIA
-- Rollcontainer JUNO
-- Buchstütze DARCY
+SHELVES & STORAGE / REGALE & AUFBEWAHRUNG / ÉTAGÈRES / SCAFFALI:
+- Standing shelf / Standregal / Étagère sur pied / Scaffale THARON
+- Wall shelf / Wandregal / Étagère murale / Mensola (LENN, LINARA, ARIS, RAW L)
+- Metal shelf / Metallregal / Étagère métallique / Scaffale metallico (RIVO, RIVO S)
+- Shelf / Ablage / Tablette / Ripiano RIVO
+- Shoe rack / Schuhregal / Étagère à chaussures / Scarpiera (NEVA, BOVI, CAMO)
+- Wine rack / Weinregal / Porte-bouteilles / Portabottiglie VINIA
+- Rolling container / Rollcontainer / Caisson à roulettes / Cassettiera JUNO
+- Bookend / Buchstütze / Serre-livres / Reggilibri DARCY
 
-GARDEROBEN & FLUR:
-- Garderobe TAMINA
-- Wandgarderobe MALOU
-- Kleiderstange (RUBI, ENIO)
-- Kleiderhaken PALO
-- Wandhaken LOU
-- Leder S-Haken
-- Kleiderbügel FAY
-- Herrendiener JAMES
-- Dielenständer CHARLES
-- Schuhlöffel TILO
+COAT RACKS & HALLWAY / GARDEROBEN & FLUR / ENTRÉE / INGRESSO:
+- Coat rack / Garderobe / Portemanteau / Appendiabiti TAMINA
+- Wall coat rack / Wandgarderobe / Portemanteau mural / Attaccapanni MALOU
+- Clothes rail / Kleiderstange / Portant vêtements / Appendiabiti (RUBI, ENIO)
+- Coat hook / Kleiderhaken / Patère / Gancio PALO
+- Wall hook / Wandhaken / Crochet mural / Gancio muro LOU
+- Leather S-hook / Leder S-Haken / Crochet S cuir / Gancio S pelle
+- Clothes hanger / Kleiderbügel / Cintre / Gruccia FAY
+- Valet stand / Herrendiener / Valet de chambre / Indossatore JAMES
+- Hall stand / Dielenständer / Porte-manteau / Attaccapanni CHARLES
+- Shoehorn / Schuhlöffel / Chausse-pied / Calzascarpe TILO
 
-BADEZIMMER:
-- Handtuchhalter (VANA, TENSI, NALI, STENNI, MILO)
-- Handtuchständer DELAYA
-- Handtuchleiter ESTINA
-- Duschablage SHEA
-- Toilettenpapierhalter (TUALI, MO)
+BATHROOM / BADEZIMMER / SALLE DE BAIN / BAGNO:
+- Towel holder / Handtuchhalter / Porte-serviettes / Portasciugamani (VANA, TENSI, NALI, STENNI, MILO)
+- Towel stand / Handtuchständer / Porte-serviettes sur pied / Piantana portasciugamani DELAYA
+- Towel ladder / Handtuchleiter / Échelle porte-serviettes / Scala portasciugamani ESTINA
+- Shower shelf / Duschablage / Étagère de douche / Mensola doccia SHEA
+- Toilet paper holder / Toilettenpapierhalter / Porte-papier toilette / Portarotolo (TUALI, MO)
 
-KÜCHE:
-- Küchenrollenhalter IVANA
-- Spültuchhalter NIA
-- Serviertablett DAVA
-- Tablett CUT
-- Dekotablett (RAW T, SIVA)
-- Untersetzer KIVA
+KITCHEN / KÜCHE / CUISINE / CUCINA:
+- Paper towel holder / Küchenrollenhalter / Porte-essuie-tout / Portarotolo cucina IVANA
+- Dish towel holder / Spültuchhalter / Porte-torchons / Porta strofinacci NIA
+- Serving tray / Serviertablett / Plateau de service / Vassoio DAVA
+- Tray / Tablett / Plateau / Vassoio CUT
+- Decorative tray / Dekotablett / Plateau décoratif / Vassoio decorativo (RAW T, SIVA)
+- Coaster / Untersetzer / Dessous de verre / Sottobicchiere KIVA
 
-WOHNZIMMER & DEKO:
-- Kerzenständer NOA (L, S)
-- Vase (FYONA, RAW V)
-- Spiegel RIVO
-- Wandspiegel (CAYA, CALEO)
-- Magnettafel TAVO
-- Holzmagnete ELA
-- Hängekonsole SION
-- Gießkanne YAMIRA
-- Tischorganizer LIMA
+LIVING ROOM & DECOR / WOHNZIMMER & DEKO / SALON / SOGGIORNO:
+- Candle holder / Kerzenständer / Bougeoir / Portacandele NOA (L, S)
+- Vase / Vase / Vase / Vaso (FYONA, RAW V)
+- Mirror / Spiegel / Miroir / Specchio RIVO
+- Wall mirror / Wandspiegel / Miroir mural / Specchio da parete (CAYA, CALEO)
+- Magnetic board / Magnettafel / Tableau magnétique / Lavagna magnetica TAVO
+- Wood magnets / Holzmagnete / Aimants en bois / Magneti in legno ELA
+- Hanging console / Hängekonsole / Console suspendue / Consolle sospesa SION
+- Watering can / Gießkanne / Arrosoir / Annaffiatoio YAMIRA
+- Desk organizer / Tischorganizer / Organiseur de bureau / Organizer LIMA
 
-SCHLAFZIMMER:
-- Hängender Nachttisch NELIO
-- Stehender Nachttisch DAMIO
-- Babywiege KORSINA
-- Robe Moseskorb
+BEDROOM / SCHLAFZIMMER / CHAMBRE / CAMERA:
+- Hanging nightstand / Hängender Nachttisch / Table de chevet suspendue / Comodino sospeso NELIO
+- Standing nightstand / Stehender Nachttisch / Table de chevet / Comodino DAMIO
+- Baby cradle / Babywiege / Berceau / Culla KORSINA
+- Moses basket / Moseskorb / Couffin / Cesta moses ROBE
 
-OUTDOOR & GARTEN:
-- Lounge-Sessel Outdoor DIEGO
-- Lounge-Sofa Outdoor CRUZ
-- Lounge-Tisch Outdoor LAGO
-- Garten Lounge Set
+OUTDOOR & GARDEN / OUTDOOR & GARTEN / EXTÉRIEUR / ESTERNO:
+- Outdoor lounge chair / Lounge-Sessel Outdoor / Fauteuil lounge extérieur / Poltrona lounge esterno DIEGO
+- Outdoor lounge sofa / Lounge-Sofa Outdoor / Canapé lounge extérieur / Divano lounge esterno CRUZ
+- Outdoor lounge table / Lounge-Tisch Outdoor / Table lounge extérieur / Tavolo lounge esterno LAGO
+- Garden lounge set / Garten Lounge Set / Salon de jardin / Set giardino
 
-SITZMÖBEL:
-- Stuhl LINELLE
-- Barhocker BARNI
+SEATING / SITZMÖBEL / ASSISES / SEDUTE:
+- Chair / Stuhl / Chaise / Sedia LINELLE
+- Bar stool / Barhocker / Tabouret de bar / Sgabello BARNI
 
-TÜREN:
-- Lofttür (LUX, BRIX)
+DOORS / TÜREN / PORTES / PORTE:
+- Loft door / Lofttür / Porte loft / Porta loft (LUX, BRIX)
 
-=== FARBEN ===
-Schwarz, Weiß, Cashew (beige), Blueberry Soda (blau), Mango Lassi (gelb), Matcha Latte (grün), Pink Lemonade (rosa), Green Tea, Hot Choc, Red Wine, Macchiato
+=== COLORS / FARBEN / COULEURS / COLORI ===
+Black/Schwarz/Noir/Nero, White/Weiß/Blanc/Bianco, Cashew/Cashew/Noix de cajou/Anacardo (beige), Blueberry Soda (blue/blau/bleu/blu), Mango Lassi (yellow/gelb/jaune/giallo), Matcha Latte (green/grün/vert/verde), Pink Lemonade (pink/rosa/rose/rosa), Green Tea, Hot Choc, Red Wine, Macchiato
 
-=== ANTWORT FORMAT ===
-Antworte NUR mit JSON:
+=== RESPONSE FORMAT ===
+Respond ONLY with JSON:
 
 {
-  "mainObject": "Beschreibung des HAUPTOBJEKTS (z.B. 'Schwarzer Outdoor Lounge Sessel')",
+  "mainObject": "Description of the MAIN OBJECT",
   "confidence": 0.0-1.0,
-  "userIntent": "Was sucht der Nutzer? (z.B. 'Sucht Outdoor-Sitzmöbel')",
-  "productType": "Metallbude-Kategorie (z.B. 'Lounge-Sessel', 'Kleiderstange', 'Beistelltisch')",
-  "matchingProducts": ["DIEGO", "CRUZ"] // Produktnamen die passen könnten
-  "labels": ["5 beschreibende Begriffe"],
-  "colors": ["erkannte Farben"],
-  "material": "Metall/Holz/Rattan/Stoff",
-  "searchTerms": ["12-15 Suchbegriffe die bei Metallbude Treffer liefern"]
+  "userIntent": "What is the user looking for?",
+  "productType": "Metallbude category",
+  "matchingProducts": ["DIEGO", "CRUZ"],
+  "labels": ["5 descriptive terms"],
+  "colors": ["detected colors"],
+  "material": "Metal/Wood/Rattan/Fabric",
+  "searchTerms": ["15-20 search terms in DE, EN, FR, IT that will match Metallbude products"]
 }
 
-BEISPIEL - Foto von Outdoor-Sessel mit schwarzem Metallgestell:
+IMPORTANT for searchTerms:
+- Include product names (DIEGO, CRUZ, COSMO, etc.)
+- Include category in ALL 4 LANGUAGES (Sessel, chair, fauteuil, poltrona)
+- Include colors in all languages (schwarz, black, noir, nero)
+- Include style terms (industrial, minimalist, modern)
+
+EXAMPLE - Photo of outdoor lounge chair with black metal frame:
 {
-  "mainObject": "Schwarzer Outdoor Lounge Sessel mit Metallgestell und Polster",
+  "mainObject": "Black outdoor lounge chair with metal frame and cushion",
   "confidence": 0.95,
-  "userIntent": "Sucht bequemen Outdoor-Sessel für Garten/Terrasse",
-  "productType": "Lounge-Sessel Outdoor",
+  "userIntent": "Looking for comfortable outdoor seating",
+  "productType": "Lounge chair outdoor",
   "matchingProducts": ["DIEGO", "CRUZ", "Garten Lounge Set"],
-  "labels": ["Lounge Sessel", "Outdoor", "Gartenmöbel", "Metallgestell", "Polster"],
-  "colors": ["schwarz"],
-  "material": "Metall",
-  "searchTerms": ["Lounge", "Sessel", "Outdoor", "DIEGO", "CRUZ", "Garten", "Terrasse", "schwarz", "Lounge-Sessel", "Gartenmöbel", "Outdoor Möbel", "Loungemöbel", "Metall"]
+  "labels": ["lounge chair", "outdoor", "garden furniture", "metal frame", "cushion"],
+  "colors": ["black", "schwarz", "noir", "nero"],
+  "material": "Metal",
+  "searchTerms": ["DIEGO", "CRUZ", "Lounge", "Sessel", "chair", "fauteuil", "poltrona", "Outdoor", "extérieur", "esterno", "Garten", "garden", "jardin", "giardino", "schwarz", "black", "noir", "nero", "Metall", "metal", "métal", "metallo"]
 }`
               },
               {
@@ -16243,7 +16250,7 @@ BEISPIEL - Foto von Outdoor-Sessel mit schwarzem Metallgestell:
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 600
+            maxOutputTokens: 800
           }
         },
         {
