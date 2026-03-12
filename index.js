@@ -16311,25 +16311,168 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
           console.log(`   Colors: ${analysis.colors?.join(', ')}`);
           console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
           
-          // Build comprehensive search terms including matching product names
-          let allSearchTerms = [];
+          // ============================================
+          // DIRECTLY FETCH PRODUCTS FROM SHOPIFY
+          // ============================================
+          let products = [];
           
-          // Add matching product names FIRST (highest priority)
+          try {
+            // Build search queries for Shopify
+            const searchQueries = [];
+            
+            // 1. Search for specific product names from matchingProducts
+            if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
+              for (const productName of analysis.matchingProducts) {
+                searchQueries.push(`title:*${productName}*`);
+              }
+            }
+            
+            // 2. Search by product type / category keywords
+            if (analysis.productType) {
+              searchQueries.push(analysis.productType);
+            }
+            
+            // 3. Add key labels for broader search
+            if (analysis.labels && analysis.labels.length > 0) {
+              searchQueries.push(analysis.labels.slice(0, 2).join(' OR '));
+            }
+            
+            console.log('🔍 Shopify search queries:', searchQueries);
+            
+            // Query Shopify Storefront API
+            const shopifyQuery = `
+              query searchProducts($query: String!) {
+                products(first: 20, query: $query, sortKey: RELEVANCE) {
+                  edges {
+                    node {
+                      id
+                      title
+                      handle
+                      description
+                      productType
+                      vendor
+                      tags
+                      priceRange {
+                        minVariantPrice {
+                          amount
+                          currencyCode
+                        }
+                      }
+                      featuredImage {
+                        url
+                        altText
+                      }
+                      images(first: 3) {
+                        edges {
+                          node {
+                            url
+                            altText
+                          }
+                        }
+                      }
+                      variants(first: 1) {
+                        edges {
+                          node {
+                            id
+                            availableForSale
+                            price {
+                              amount
+                              currencyCode
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+            
+            const seenIds = new Set();
+            
+            // Execute searches for matching products first (highest priority)
+            for (const query of searchQueries.slice(0, 5)) {
+              try {
+                const shopifyResponse = await axios.post(
+                  config.adminApiUrl,
+                  {
+                    query: shopifyQuery,
+                    variables: { query }
+                  },
+                  {
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Shopify-Storefront-Access-Token': config.storefrontToken
+                    },
+                    timeout: 10000
+                  }
+                );
+                
+                const edges = shopifyResponse.data?.data?.products?.edges || [];
+                for (const edge of edges) {
+                  const product = edge.node;
+                  if (!seenIds.has(product.id)) {
+                    seenIds.add(product.id);
+                    
+                    // Calculate relevance score
+                    let score = 0.5;
+                    const titleLower = product.title.toLowerCase();
+                    
+                    // Boost if title contains matching product names
+                    for (const mp of (analysis.matchingProducts || [])) {
+                      if (titleLower.includes(mp.toLowerCase())) {
+                        score += 0.4;
+                      }
+                    }
+                    
+                    // Boost by color match
+                    for (const color of (analysis.colors || [])) {
+                      if (titleLower.includes(color.toLowerCase())) {
+                        score += 0.1;
+                      }
+                    }
+                    
+                    products.push({
+                      id: product.id,
+                      handle: product.handle,
+                      title: product.title,
+                      description: product.description,
+                      productType: product.productType,
+                      price: product.priceRange?.minVariantPrice?.amount,
+                      currency: product.priceRange?.minVariantPrice?.currencyCode,
+                      image: product.featuredImage?.url,
+                      images: (product.images?.edges || []).map(e => e.node.url),
+                      available: product.variants?.edges?.[0]?.node?.availableForSale,
+                      relevanceScore: Math.min(score, 1.0)
+                    });
+                  }
+                }
+              } catch (searchError) {
+                console.log(`⚠️ Search query "${query}" failed:`, searchError.message);
+              }
+            }
+            
+            // Sort by relevance score
+            products.sort((a, b) => b.relevanceScore - a.relevanceScore);
+            products = products.slice(0, 15); // Top 15 results
+            
+            console.log(`📦 Found ${products.length} products from Shopify`);
+            
+          } catch (shopifyError) {
+            console.log('⚠️ Shopify product fetch failed:', shopifyError.message);
+          }
+          
+          // Build search terms for fallback
+          let allSearchTerms = [];
           if (analysis.matchingProducts) {
             allSearchTerms.push(...analysis.matchingProducts);
           }
-          
-          // Add product type
           if (analysis.productType) {
             allSearchTerms.push(analysis.productType);
           }
-          
-          // Add AI-generated search terms
           if (analysis.searchTerms) {
             allSearchTerms.push(...analysis.searchTerms);
           }
-          
-          // Remove duplicates and empty values
           allSearchTerms = [...new Set(allSearchTerms.filter(t => t && t.trim()))];
           
           return res.json({
@@ -16342,7 +16485,9 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
             productType: analysis.productType,
             matchingProducts: analysis.matchingProducts || [],
             mainObject: analysis.mainObject,
-            userIntent: analysis.userIntent
+            userIntent: analysis.userIntent,
+            // NEW: Actual products from Shopify
+            products: products
           });
         }
       }
