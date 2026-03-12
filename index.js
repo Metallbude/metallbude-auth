@@ -16113,89 +16113,124 @@ app.post('/ai/analyze-image', async (req, res) => {
           contents: [{
             parts: [
               {
-                text: `Du bist ein visuelles Produkterkennungs-System für "Metallbude" (metallbude.com).
+                text: `Du bist ein visuelles Produkterkennungs-System für "Metallbude" (metallbude.com) - Shop für minimalistische Metallmöbel.
 
 === DEINE HAUPTAUFGABE ===
-Der Nutzer fotografiert ein Möbelstück oder Wohnaccessoire und möchte ein ÄHNLICHES Produkt bei Metallbude finden.
+Der Nutzer fotografiert ein Möbelstück und möchte ein ÄHNLICHES Produkt bei Metallbude finden.
 
 WICHTIG: Fokussiere dich NUR auf das HAUPTOBJEKT im Bild!
-- Das Hauptobjekt ist das Möbelstück/Accessoire das im ZENTRUM oder VORDERGRUND steht
+- Das Hauptobjekt steht im ZENTRUM oder VORDERGRUND
 - IGNORIERE Hintergrundobjekte, Dekoration, Pflanzen, Wände, Böden
-- Der Nutzer fotografiert EIN spezifisches Möbelstück - finde heraus WELCHES
+- Finde heraus WELCHES Möbelstück der Nutzer fotografiert hat
 
-=== WAS DER NUTZER SUCHT ===
-Wenn jemand einen Stuhl/Sessel fotografiert → sucht Sitzmöbel, Lounge, Sessel
-Wenn jemand ein Regal fotografiert → sucht Regale, Ablagen, Aufbewahrung
-Wenn jemand eine Stange/Ständer fotografiert → sucht Kleiderstangen, Handtuchhalter
-Wenn jemand einen Tisch fotografiert → sucht Beistelltisch, Couchtisch, Nachttisch
-
-=== METALLBUDE PRODUKTKATALOG ===
-
-SITZMÖBEL & OUTDOOR:
-- Sessel, Lounge Sessel, Outdoor Sessel, Gartenmöbel
-- Hocker, Barhocker
-
-AUFBEWAHRUNG & ORGANISATION:
-- Kleiderstange (RUBI) - freistehend für Kleidung
-- Schuhregal (NEVA, BOVI) - offene Metallregale
-- Wandregal (LENN) - Metallregale an der Wand
-- Kleiderhaken (PALO), S-Haken, Kleiderbügel (FAY)
-
-BADEZIMMER:
-- Handtuchhalter (VANA, TENSI) - Wandmontage
-- Handtuchständer (DELAYA) - freistehend
-- Duschablage (SHEA), Toilettenpapierhalter (TUALI)
+=== KOMPLETTER METALLBUDE PRODUKTKATALOG ===
 
 TISCHE:
-- Beistelltisch (COSMO) - klein, rund/eckig
-- Couchtisch - größer, fürs Wohnzimmer
-- Nachttisch (NELIO) - hängend, fürs Schlafzimmer
+- Beistelltisch (COSMO, CIRO, DENYA, RAW S, SOLI X)
+- Couchtisch (CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X)
+- Lounge-Tisch Outdoor LAGO
+- Lowboard TAVIR
+- Nachttisch hängend (NELIO), stehend (DAMIO)
+- Konsolentisch RIA
+- Schreibtisch DONNA
+- Tischsatz TRE SEMNIA X
 
-SONSTIGES:
-- Herrendiener (JAMES), Babywiege, Feuerschale
-- Hundebett, Futterstation
+REGALE & AUFBEWAHRUNG:
+- Standregal THARON
+- Wandregal (LENN, LINARA, ARIS, RAW L)
+- Metallregal (RIVO, RIVO S)
+- Ablage RIVO
+- Schuhregal (NEVA, BOVI, CAMO)
+- Weinregal VINIA
+- Rollcontainer JUNO
+- Buchstütze DARCY
+
+GARDEROBEN & FLUR:
+- Garderobe TAMINA
+- Wandgarderobe MALOU
+- Kleiderstange (RUBI, ENIO)
+- Kleiderhaken PALO
+- Wandhaken LOU
+- Leder S-Haken
+- Kleiderbügel FAY
+- Herrendiener JAMES
+- Dielenständer CHARLES
+- Schuhlöffel TILO
+
+BADEZIMMER:
+- Handtuchhalter (VANA, TENSI, NALI, STENNI, MILO)
+- Handtuchständer DELAYA
+- Handtuchleiter ESTINA
+- Duschablage SHEA
+- Toilettenpapierhalter (TUALI, MO)
+
+KÜCHE:
+- Küchenrollenhalter IVANA
+- Spültuchhalter NIA
+- Serviertablett DAVA
+- Tablett CUT
+- Dekotablett (RAW T, SIVA)
+- Untersetzer KIVA
+
+WOHNZIMMER & DEKO:
+- Kerzenständer NOA (L, S)
+- Vase (FYONA, RAW V)
+- Spiegel RIVO
+- Wandspiegel (CAYA, CALEO)
+- Magnettafel TAVO
+- Holzmagnete ELA
+- Hängekonsole SION
+- Gießkanne YAMIRA
+- Tischorganizer LIMA
+
+SCHLAFZIMMER:
+- Hängender Nachttisch NELIO
+- Stehender Nachttisch DAMIO
+- Babywiege KORSINA
+- Robe Moseskorb
+
+OUTDOOR & GARTEN:
+- Lounge-Sessel Outdoor DIEGO
+- Lounge-Sofa Outdoor CRUZ
+- Lounge-Tisch Outdoor LAGO
+- Garten Lounge Set
+
+SITZMÖBEL:
+- Stuhl LINELLE
+- Barhocker BARNI
+
+TÜREN:
+- Lofttür (LUX, BRIX)
 
 === FARBEN ===
-Schwarz, Weiß, Cashew, Blueberry Soda, Mango Lassi, Matcha Latte, Pink Lemonade
+Schwarz, Weiß, Cashew (beige), Blueberry Soda (blau), Mango Lassi (gelb), Matcha Latte (grün), Pink Lemonade (rosa), Green Tea, Hot Choc, Red Wine, Macchiato
 
 === ANTWORT FORMAT ===
-Antworte NUR mit diesem JSON:
+Antworte NUR mit JSON:
 
 {
-  "mainObject": "Was ist das HAUPTOBJEKT im Bild? (z.B. 'Outdoor Lounge Sessel', 'Kleiderstange mit Kleidung', 'Beistelltisch')",
+  "mainObject": "Beschreibung des HAUPTOBJEKTS (z.B. 'Schwarzer Outdoor Lounge Sessel')",
   "confidence": 0.0-1.0,
-  "userIntent": "Was sucht der Nutzer wahrscheinlich? (z.B. 'Sitzmöglichkeit für draußen', 'Kleideraufbewahrung', 'kleiner Tisch')",
-  "productType": "Passende Metallbude-Kategorie (Sessel/Kleiderstange/Beistelltisch/Wandregal/etc.)",
-  "labels": ["5 beschreibende deutsche Begriffe für das Hauptobjekt"],
+  "userIntent": "Was sucht der Nutzer? (z.B. 'Sucht Outdoor-Sitzmöbel')",
+  "productType": "Metallbude-Kategorie (z.B. 'Lounge-Sessel', 'Kleiderstange', 'Beistelltisch')",
+  "matchingProducts": ["DIEGO", "CRUZ"] // Produktnamen die passen könnten
+  "labels": ["5 beschreibende Begriffe"],
   "colors": ["erkannte Farben"],
-  "material": "Hauptmaterial (Metall/Holz/Rattan/Stoff)",
-  "searchTerms": ["10-15 deutsche Suchbegriffe", "die bei Metallbude funktionieren", "Produkttypen", "Farben", "Materialien", "Stilbegriffe"]
+  "material": "Metall/Holz/Rattan/Stoff",
+  "searchTerms": ["12-15 Suchbegriffe die bei Metallbude Treffer liefern"]
 }
 
-BEISPIELE:
-
-Foto von schwarzem Outdoor-Sessel:
+BEISPIEL - Foto von Outdoor-Sessel mit schwarzem Metallgestell:
 {
-  "mainObject": "Schwarzer Outdoor Lounge Sessel mit Metallgestell",
+  "mainObject": "Schwarzer Outdoor Lounge Sessel mit Metallgestell und Polster",
   "confidence": 0.95,
-  "userIntent": "Sucht bequeme Outdoor-Sitzmöglichkeit",
-  "productType": "Sessel",
-  "labels": ["Lounge Sessel", "Outdoor Möbel", "Gartensessel", "Metallgestell", "bequem"],
+  "userIntent": "Sucht bequemen Outdoor-Sessel für Garten/Terrasse",
+  "productType": "Lounge-Sessel Outdoor",
+  "matchingProducts": ["DIEGO", "CRUZ", "Garten Lounge Set"],
+  "labels": ["Lounge Sessel", "Outdoor", "Gartenmöbel", "Metallgestell", "Polster"],
   "colors": ["schwarz"],
   "material": "Metall",
-  "searchTerms": ["Sessel", "Lounge", "Outdoor", "Garten", "Terrasse", "schwarz", "Metall", "Sitzmöbel", "Gartenmöbel", "Loungemöbel"]
-}
-
-Foto von Kleiderstange:
-{
-  "mainObject": "Freistehende Kleiderstange aus schwarzem Metall",
-  "confidence": 0.98,
-  "userIntent": "Sucht Kleiderstange oder Garderobe",
-  "productType": "Kleiderstange",
-  "labels": ["Kleiderstange", "Garderobe", "freistehend", "Metall", "industrial"],
-  "colors": ["schwarz"],
-  "material": "Metall",
-  "searchTerms": ["Kleiderstange", "RUBI", "Garderobe", "Kleiderständer", "schwarz", "Metall", "Flur", "industrial", "minimalistisch", "freistehend"]
+  "searchTerms": ["Lounge", "Sessel", "Outdoor", "DIEGO", "CRUZ", "Garten", "Terrasse", "schwarz", "Lounge-Sessel", "Gartenmöbel", "Outdoor Möbel", "Loungemöbel", "Metall"]
 }`
               },
               {
@@ -16208,7 +16243,7 @@ Foto von Kleiderstange:
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 500
+            maxOutputTokens: 600
           }
         },
         {
@@ -16232,16 +16267,27 @@ Foto von Kleiderstange:
           console.log(`   Confidence: ${analysis.confidence}`);
           console.log(`   User Intent: ${analysis.userIntent}`);
           console.log(`   Product Type: ${analysis.productType}`);
+          console.log(`   Matching Products: ${analysis.matchingProducts?.join(', ')}`);
           console.log(`   Labels: ${analysis.labels?.join(', ')}`);
           console.log(`   Colors: ${analysis.colors?.join(', ')}`);
           console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
           
-          // Build comprehensive search terms
-          let allSearchTerms = [...(analysis.searchTerms || [])];
+          // Build comprehensive search terms including matching product names
+          let allSearchTerms = [];
           
-          // Add product type at the beginning if not already there
-          if (analysis.productType && !allSearchTerms.some(t => t.toLowerCase() === analysis.productType.toLowerCase())) {
-            allSearchTerms.unshift(analysis.productType);
+          // Add matching product names FIRST (highest priority)
+          if (analysis.matchingProducts) {
+            allSearchTerms.push(...analysis.matchingProducts);
+          }
+          
+          // Add product type
+          if (analysis.productType) {
+            allSearchTerms.push(analysis.productType);
+          }
+          
+          // Add AI-generated search terms
+          if (analysis.searchTerms) {
+            allSearchTerms.push(...analysis.searchTerms);
           }
           
           // Remove duplicates and empty values
@@ -16255,6 +16301,7 @@ Foto von Kleiderstange:
             confidence: analysis.confidence || 0.8,
             searchTerms: allSearchTerms,
             productType: analysis.productType,
+            matchingProducts: analysis.matchingProducts || [],
             mainObject: analysis.mainObject,
             userIntent: analysis.userIntent
           });
