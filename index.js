@@ -16079,6 +16079,233 @@ app.get('/api/returns/:orderId/shipping', async (req, res) => {
   }
 });
 
+// ============================================================================
+// AI VISUAL SEARCH - Google Cloud Vision API
+// ============================================================================
+
+/**
+ * Analyze image using Google Cloud Vision API
+ * Used by mobile app visual search feature
+ */
+app.post('/ai/analyze-image', async (req, res) => {
+  try {
+    const { image } = req.body; // base64 image
+    
+    if (!image) {
+      return res.status(400).json({ error: 'No image provided' });
+    }
+    
+    const apiKey = process.env.GOOGLE_CLOUD_VISION_KEY;
+    if (!apiKey) {
+      console.error('❌ GOOGLE_CLOUD_VISION_KEY not configured');
+      return res.status(500).json({ error: 'Vision API not configured' });
+    }
+    
+    console.log('🔍 Analyzing image with Google Cloud Vision...');
+    
+    const visionResponse = await axios.post(
+      `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
+      {
+        requests: [{
+          image: { content: image },
+          features: [
+            { type: 'LABEL_DETECTION', maxResults: 15 },
+            { type: 'IMAGE_PROPERTIES', maxResults: 5 },
+            { type: 'OBJECT_LOCALIZATION', maxResults: 10 }
+          ]
+        }]
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    );
+    
+    const response = visionResponse.data.responses[0];
+    
+    if (response.error) {
+      console.error('❌ Vision API error:', response.error);
+      return res.status(500).json({ error: response.error.message });
+    }
+    
+    // Extract labels
+    const labels = (response.labelAnnotations || [])
+      .map(l => l.description.toLowerCase());
+    
+    // Extract colors from dominant colors
+    const colorInfo = response.imagePropertiesAnnotation?.dominantColors?.colors || [];
+    const colors = colorInfo.slice(0, 5).map(c => {
+      const { red = 0, green = 0, blue = 0 } = c.color || {};
+      // Map RGB to color names
+      if (red > 200 && green > 200 && blue > 200) return 'white';
+      if (red < 60 && green < 60 && blue < 60) return 'black';
+      if (red > 180 && green > 140 && blue < 100) return 'gold';
+      if (red > 140 && green > 90 && blue < 70) return 'wood';
+      if (red > 180 && green > 160 && blue > 140 && blue < 180) return 'beige';
+      if (Math.abs(red - green) < 30 && Math.abs(green - blue) < 30 && red > 100) return 'gray';
+      if (red > 150 && green < 100 && blue < 100) return 'red';
+      if (blue > 150 && red < 100 && green < 100) return 'blue';
+      if (green > 150 && red < 100 && blue < 100) return 'green';
+      return 'neutral';
+    }).filter((c, i, arr) => arr.indexOf(c) === i); // Remove duplicates
+    
+    // Extract objects
+    const objects = (response.localizedObjectAnnotations || [])
+      .map(o => o.name.toLowerCase());
+    
+    // Generate search terms (German translations for furniture)
+    const searchTerms = [];
+    
+    // Map English labels to German search terms for Metallbude products
+    const translations = {
+      // Furniture types
+      'chair': 'stuhl',
+      'armchair': 'sessel',
+      'lounge chair': 'sessel',
+      'furniture': 'möbel',
+      'shelf': 'regal',
+      'shelving': 'regal',
+      'bookshelf': 'regal',
+      'table': 'tisch',
+      'desk': 'schreibtisch',
+      'side table': 'beistelltisch',
+      'coffee table': 'couchtisch',
+      'coat rack': 'garderobe',
+      'clothes rack': 'kleiderstange',
+      'wardrobe': 'garderobe',
+      'hook': 'haken',
+      'wall hook': 'wandhaken',
+      'lamp': 'lampe',
+      'light': 'leuchte',
+      'mirror': 'spiegel',
+      'bench': 'bank',
+      'stool': 'hocker',
+      'container': 'container',
+      'cart': 'rollcontainer',
+      'cabinet': 'schrank',
+      'rack': 'regal',
+      'stand': 'ständer',
+      // Materials
+      'metal': 'metall',
+      'steel': 'stahl',
+      'iron': 'eisen',
+      'wood': 'holz',
+      'leather': 'leder',
+      'fabric': 'stoff',
+      // Colors
+      'black': 'schwarz',
+      'white': 'weiß',
+      'gold': 'gold',
+      'gray': 'grau',
+      'grey': 'grau',
+      'beige': 'beige',
+      'brown': 'braun'
+    };
+    
+    // Add translated search terms
+    for (const label of labels) {
+      // Check direct translation
+      if (translations[label]) {
+        searchTerms.push(translations[label]);
+      }
+      // Check partial matches
+      for (const [eng, ger] of Object.entries(translations)) {
+        if (label.includes(eng)) {
+          searchTerms.push(ger);
+        }
+      }
+      // Also add original label
+      searchTerms.push(label);
+    }
+    
+    // Add object-based terms
+    for (const obj of objects) {
+      if (translations[obj]) {
+        searchTerms.push(translations[obj]);
+      }
+      searchTerms.push(obj);
+    }
+    
+    // Add color-based search terms
+    for (const color of colors) {
+      if (translations[color]) {
+        searchTerms.push(translations[color]);
+      }
+    }
+    
+    // Determine style
+    let style = 'modern';
+    if (labels.some(l => l.includes('minimalist')) || 
+        (colors.includes('black') && colors.includes('white'))) {
+      style = 'minimalist';
+    } else if (labels.some(l => l.includes('industrial')) || 
+               labels.some(l => l.includes('metal')) ||
+               labels.some(l => l.includes('steel'))) {
+      style = 'industrial';
+    } else if (labels.some(l => l.includes('rustic')) || 
+               colors.includes('wood')) {
+      style = 'rustic';
+    } else if (labels.some(l => l.includes('scandinavian'))) {
+      style = 'scandinavian';
+    }
+    
+    // Calculate confidence
+    const confidence = labels.length > 5 ? 0.85 : (labels.length > 2 ? 0.7 : 0.5);
+    
+    // Remove duplicates and limit search terms
+    const uniqueTerms = [...new Set(searchTerms)].slice(0, 10);
+    
+    console.log(`✅ Vision analysis complete: ${labels.length} labels, ${colors.length} colors, ${objects.length} objects`);
+    console.log(`   Search terms: ${uniqueTerms.join(', ')}`);
+    
+    res.json({
+      labels,
+      colors,
+      objects,
+      style,
+      confidence,
+      searchTerms: uniqueTerms
+    });
+    
+  } catch (error) {
+    console.error('❌ Vision API error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      error: 'Image analysis failed',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * AI Chat endpoint for customer support
+ * Handles complex questions that local FAQ can't answer
+ */
+app.post('/ai/chat', async (req, res) => {
+  try {
+    const { message, context } = req.body;
+    
+    if (!message) {
+      return res.status(400).json({ error: 'No message provided' });
+    }
+    
+    // For now, return a helpful default response
+    // You can integrate OpenAI or Gemini here later
+    const response = `Ich verstehe deine Frage zu "${message.slice(0, 50)}...". 
+    
+Für komplexere Anfragen empfehle ich dir, unseren Kundenservice zu kontaktieren:
+📧 Email: info@metallbude.com
+📞 Oder nutze den "Mit Mitarbeiter sprechen" Button.
+
+Alternativ findest du viele Antworten in unseren FAQ unter metallbude.com/pages/faq`;
+    
+    res.json({ response });
+    
+  } catch (error) {
+    console.error('❌ Chat API error:', error);
+    res.status(500).json({ error: 'Chat failed' });
+  }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
