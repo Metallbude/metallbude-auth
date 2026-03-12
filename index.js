@@ -16113,28 +16113,43 @@ app.post('/ai/analyze-image', async (req, res) => {
           contents: [{
             parts: [
               {
-                text: `Du bist ein Möbel-Experte für den Shop "Metallbude" der industrielle Metall-Möbel verkauft.
+                text: `Du bist ein Produkterkennung-System für den Online-Shop "Metallbude" (metallbude.de).
 
-Analysiere dieses Bild und identifiziere das Möbelstück. Antworte NUR mit einem JSON-Objekt (keine Erklärungen):
+WICHTIG: Metallbude verkauft diese EXAKTEN Produktkategorien:
+- "Kleiderstange" / "Kleiderstangen" (clothing rails)
+- "Garderobe" / "Garderoben" (coat racks)
+- "Wandregal" / "Wandregale" (wall shelves)
+- "Standregal" / "Standregale" (standing shelves)
+- "Sessel" / "Lounge Sessel" / "Outdoor Sessel" (armchairs/lounge chairs)
+- "Beistelltisch" / "Beistelltische" (side tables)
+- "Couchtisch" / "Couchtische" (coffee tables)
+- "Wandhaken" (wall hooks)
+- "Spiegel" (mirrors)
+- "Lampe" / "Lampen" (lamps)
+- "Hocker" (stools)
+- "Stuhl" / "Stühle" (chairs)
+
+Analysiere das Bild und identifiziere das Produkt. Antworte NUR mit JSON:
 
 {
-  "productType": "exakter Möbeltyp auf Deutsch (z.B. Outdoor Lounge Sessel, Kleiderstange, Wandregal, Beistelltisch)",
-  "labels": ["3-5 beschreibende Labels auf Deutsch"],
-  "colors": ["erkannte Farben auf Deutsch (schwarz, weiß, gold, beige, grau, etc.)"],
-  "material": "Hauptmaterial (Metall, Holz, Stoff, Leder)",
-  "style": "Stil (industrial, minimalist, modern, skandinavisch)",
-  "searchTerms": ["5-8 deutsche Suchbegriffe die zu diesem Produkt passen, z.B. Sessel, Lounge, Outdoor, Terrasse, schwarz, Metall"]
+  "productType": "genauer Produkttyp aus der Liste oben (z.B. 'Outdoor Sessel', 'Kleiderstange', 'Wandregal')",
+  "labels": ["5 beschreibende deutsche Begriffe"],
+  "colors": ["Farben auf Deutsch: schwarz, weiß, gold, messing, beige, grau, braun, natur"],
+  "material": "Metall/Holz/Stoff/Leder/Rattan",
+  "style": "industrial/modern/minimalistisch/skandinavisch/boho",
+  "searchTerms": ["WICHTIG: 6-10 Suchbegriffe die EXAKT zu Metallbude Produktnamen passen würden"]
 }
 
-Wichtig: Metallbude verkauft hauptsächlich:
-- Kleiderstangen und Garderoben
-- Regale (Wand, Stand, Industrie)
-- Sessel und Loungemöbel  
-- Beistelltische und Couchtische
-- Wandhaken und Aufhängungen
-- Spiegel und Lampen
+REGELN für searchTerms:
+1. Verwende Produktnamen aus der Liste oben (Sessel, Kleiderstange, etc.)
+2. Füge Material hinzu (Metall, Holz, etc.)
+3. Füge Farbe hinzu (schwarz, gold, etc.)
+4. Füge Stil hinzu (industrial, modern, etc.)
+5. Bei Outdoor-Möbeln: "Outdoor", "Garten", "Terrasse"
+6. Kombiniere: z.B. "Outdoor Sessel", "Sessel schwarz", "Lounge"
 
-Erkenne das Möbelstück so genau wie möglich!`
+Beispiel für einen schwarzen Outdoor-Sessel:
+searchTerms: ["Sessel", "Outdoor Sessel", "Lounge Sessel", "Lounge", "Outdoor", "schwarz", "Metall", "Garten", "Terrasse"]`
               },
               {
                 inlineData: {
