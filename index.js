@@ -16334,8 +16334,16 @@ EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
       if (geminiText) {
         console.log('📝 Gemini raw response:', geminiText);
         
-        // Extract JSON from response
-        const jsonMatch = geminiText.match(/\{[\s\S]*\}/);
+        // Extract JSON from response - strip markdown code fences first
+        let cleanedText = geminiText;
+        // Remove ```json and ``` markdown wrappers
+        cleanedText = cleanedText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+        // Also handle just ``` without json
+        cleanedText = cleanedText.replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+        
+        console.log('📝 Cleaned text:', cleanedText);
+        
+        const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const analysis = JSON.parse(jsonMatch[0]);
           
@@ -16688,7 +16696,12 @@ Respond with JSON:
     if (geminiText) {
       console.log('📝 Focused Gemini response:', geminiText);
       
-      const jsonMatch = geminiText.match(/\{[\s\S]*\}/);
+      // Extract JSON from response - strip markdown code fences first
+      let cleanedText = geminiText;
+      cleanedText = cleanedText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+      cleanedText = cleanedText.replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+      
+      const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const analysis = JSON.parse(jsonMatch[0]);
         
