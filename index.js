@@ -17230,10 +17230,87 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Note: Image generation via Imagen 3 requires Vertex AI (not available via API key)
-    // For now, we return the detailed text description which is based on actual product images
+    // Step 3: Generate image with Imagen 3
     let generatedImageBase64 = null;
-    console.log(`ℹ️ [VISUALIZE] Image generation skipped (requires Vertex AI). Using text visualization.`);
+    const vertexKey = process.env.VERTEX_AI_API_KEY;
+    const projectId = process.env.GOOGLE_CLOUD_PROJECT_ID;
+    const location = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+    
+    // Create a detailed prompt for Imagen based on the analysis
+    const imagePrompt = `Interior design visualization: A ${roomAnalysis.style || 'modern'} ${roomAnalysis.roomType || 'room'} with the "${productTitle}" product placed ${roomAnalysis.suggestedPlacement || 'in the space'}. 
+The product is a minimalist metal piece from Metallbude. 
+${visualization.visualDescription || ''}
+Photorealistic, professional interior photography, natural lighting, high quality.`;
+    
+    // Try Generative Language API first (uses same key as Gemini)
+    if (geminiKey && !generatedImageBase64) {
+      console.log(`🎨 [VISUALIZE] Step 3: Trying Imagen 3 via Generative Language API...`);
+      console.log(`   Prompt: ${imagePrompt.substring(0, 150)}...`);
+      
+      try {
+        const imagenResponse = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${geminiKey}`,
+          {
+            instances: [{ prompt: imagePrompt }],
+            parameters: {
+              sampleCount: 1,
+              aspectRatio: '4:3',
+              personGeneration: 'dont_allow',
+              safetyFilterLevel: 'block_some'
+            }
+          },
+          { 
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 60000 
+          }
+        );
+        
+        if (imagenResponse.data?.predictions?.[0]?.bytesBase64Encoded) {
+          generatedImageBase64 = imagenResponse.data.predictions[0].bytesBase64Encoded;
+          console.log(`✅ [VISUALIZE] Image generated via Generative Language API! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+        } else {
+          console.log(`⚠️ [VISUALIZE] Generative Language API response:`, JSON.stringify(imagenResponse.data).substring(0, 300));
+        }
+      } catch (glError) {
+        console.log(`⚠️ [VISUALIZE] Generative Language API Imagen failed:`, glError.response?.data?.error?.message || glError.message);
+      }
+    }
+    
+    // Try Vertex AI as fallback
+    if (vertexKey && projectId && !generatedImageBase64) {
+      console.log(`🎨 [VISUALIZE] Trying Imagen 3 via Vertex AI...`);
+      
+      try {
+        const imagenResponse = await axios.post(
+          `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/imagen-3.0-generate-001:predict?key=${vertexKey}`,
+          {
+            instances: [{ prompt: imagePrompt }],
+            parameters: {
+              sampleCount: 1,
+              aspectRatio: '4:3',
+              safetyFilterLevel: 'block_some'
+            }
+          },
+          { 
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 60000 
+          }
+        );
+        
+        if (imagenResponse.data?.predictions?.[0]?.bytesBase64Encoded) {
+          generatedImageBase64 = imagenResponse.data.predictions[0].bytesBase64Encoded;
+          console.log(`✅ [VISUALIZE] Image generated via Vertex AI! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+        } else {
+          console.log(`⚠️ [VISUALIZE] Vertex AI response:`, JSON.stringify(imagenResponse.data).substring(0, 300));
+        }
+      } catch (vertexError) {
+        console.log(`⚠️ [VISUALIZE] Vertex AI Imagen failed:`, vertexError.response?.data?.error?.message || vertexError.message);
+      }
+    }
+    
+    if (!generatedImageBase64) {
+      console.log(`ℹ️ [VISUALIZE] No image generated. Using text visualization only.`);
+    }
     
     // Generate a unique visualization ID
     const visualizationId = `viz_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
