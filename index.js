@@ -16368,31 +16368,29 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
           
           try {
             // Build search queries for Shopify (Storefront API - no wildcards)
+            // ONLY search for specific Metallbude product names - no generic terms!
             const searchQueries = [];
             
-            // 1. Search for specific product names from matchingProducts
+            // 1. Search ONLY for specific product names from matchingProducts
             if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
               for (const productName of analysis.matchingProducts) {
-                searchQueries.push(productName);  // Simple search, no wildcards
+                searchQueries.push(productName);  // e.g., "TUALI", "MO"
               }
             }
             
-            // 2. Search by product type / category keywords
-            if (analysis.productType) {
+            // 2. If no specific products, search by product type
+            if (searchQueries.length === 0 && analysis.productType) {
               searchQueries.push(analysis.productType);
             }
             
-            // 3. Add key labels for broader search
-            if (analysis.labels && analysis.labels.length > 0) {
-              searchQueries.push(analysis.labels.slice(0, 2).join(' OR '));
-            }
+            // DON'T add generic labels - they return too many irrelevant results
             
             console.log('🔍 Shopify search queries:', searchQueries);
             
             // Query Shopify Storefront API
             const shopifyQuery = `
               query searchProducts($query: String!) {
-                products(first: 20, query: $query, sortKey: RELEVANCE) {
+                products(first: 10, query: $query, sortKey: RELEVANCE) {
                   edges {
                     node {
                       id
@@ -16462,18 +16460,35 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
                 for (const edge of edges) {
                   const product = edge.node;
                   if (!seenIds.has(product.id)) {
-                    seenIds.add(product.id);
                     
-                    // Calculate relevance score
-                    let score = 0.5;
+                    // Calculate relevance score - start at 0!
+                    let score = 0;
                     const titleLower = product.title.toLowerCase();
                     
-                    // Boost if title contains matching product names
+                    // ONLY include if title contains a matching product name
+                    let isRelevant = false;
                     for (const mp of (analysis.matchingProducts || [])) {
                       if (titleLower.includes(mp.toLowerCase())) {
-                        score += 0.4;
+                        score += 0.7;
+                        isRelevant = true;
                       }
                     }
+                    
+                    // Also check product type match
+                    if (analysis.productType && 
+                        (titleLower.includes(analysis.productType.toLowerCase()) ||
+                         product.productType?.toLowerCase().includes(analysis.productType.toLowerCase()))) {
+                      score += 0.2;
+                      isRelevant = true;
+                    }
+                    
+                    // Skip completely irrelevant products
+                    if (!isRelevant) {
+                      console.log(`⏭️ Skipping irrelevant: ${product.title}`);
+                      continue;
+                    }
+                    
+                    seenIds.add(product.id);
                     
                     // Boost by color match
                     for (const color of (analysis.colors || [])) {
