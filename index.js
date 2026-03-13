@@ -16089,7 +16089,13 @@ app.get('/api/returns/:orderId/shipping', async (req, res) => {
  */
 app.post('/ai/analyze-image', async (req, res) => {
   try {
-    const { image } = req.body; // base64 image
+    const { image, language = 'DE', country = 'DE' } = req.body; // base64 image + locale
+    
+    // Map language codes: 'en' -> 'EN', 'de' -> 'DE', etc.
+    const shopifyLanguage = (language || 'DE').toUpperCase();
+    const shopifyCountry = (country || 'DE').toUpperCase();
+    
+    console.log(`🌍 Locale: language=${shopifyLanguage}, country=${shopifyCountry}`);
     
     if (!image) {
       return res.status(400).json({ error: 'No image provided' });
@@ -16419,9 +16425,9 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             console.log('🔍 Shopify search queries:', searchQueries);
             console.log('🎯 Looking for matchingProducts:', analysis.matchingProducts);
             
-            // Query Shopify Storefront API - fetch more results to ensure we find all matches
+            // Query Shopify Storefront API with locale support for translations
             const shopifyQuery = `
-              query searchProducts($query: String!) {
+              query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
                 products(first: 25, query: $query, sortKey: RELEVANCE) {
                   edges {
                     node {
@@ -16473,17 +16479,22 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             // Execute searches for matching products - run more queries to catch all products
             for (const query of searchQueries.slice(0, 10)) {
               try {
-                console.log(`🔎 Executing Shopify search: "${query}"`);
+                console.log(`🔎 Executing Shopify search: "${query}" (lang: ${shopifyLanguage}, country: ${shopifyCountry})`);
                 const shopifyResponse = await axios.post(
                   config.apiUrl,  // Use Storefront API, not Admin API
                   {
                     query: shopifyQuery,
-                    variables: { query }
+                    variables: { 
+                      query,
+                      lang: shopifyLanguage,
+                      country: shopifyCountry
+                    }
                   },
                   {
                     headers: {
                       'Content-Type': 'application/json',
-                      'X-Shopify-Storefront-Access-Token': config.storefrontToken
+                      'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+                      'Accept-Language': shopifyLanguage.toLowerCase()
                     },
                     timeout: 10000
                   }
@@ -16521,8 +16532,24 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
                       // For longer names (4+ chars), also allow substring match
                       const containsMatch = mpLower.length >= 4 && titleLower.includes(mpLower);
                       
-                      // Also check handle for product name
-                      const handleMatch = product.handle && product.handle.toLowerCase().includes(mpLower);
+                      // Check handle with STRICT word boundary matching
+                      // Handle format is like "toilettenpapierhalter-zum-kleben-mo"
+                      // For short names (<=3 chars), require exact word boundary match in handle
+                      // For longer names (4+ chars), allow substring match
+                      let handleMatch = false;
+                      if (product.handle) {
+                        const handleLower = product.handle.toLowerCase();
+                        const handleWords = handleLower.split('-');
+                        
+                        if (mpLower.length <= 3) {
+                          // STRICT: Short names must be exact word match in handle
+                          // "mo" should NOT match "moses" or "mode" only exact "mo"
+                          handleMatch = handleWords.some(word => word === mpLower);
+                        } else {
+                          // Longer names can use substring match
+                          handleMatch = handleLower.includes(mpLower);
+                        }
+                      }
                       
                       if (wordMatch || upperCaseMatch || containsMatch || handleMatch) {
                         score += 0.9;
@@ -16792,7 +16819,11 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
  */
 app.post('/ai/analyze-selected-object', async (req, res) => {
   try {
-    const { image, selectedObject, customQuery } = req.body;
+    const { image, selectedObject, customQuery, language = 'DE', country = 'DE' } = req.body;
+    
+    // Map language codes for Shopify translations
+    const shopifyLanguage = (language || 'DE').toUpperCase();
+    const shopifyCountry = (country || 'DE').toUpperCase();
     
     if (!image) {
       return res.status(400).json({ error: 'No image provided' });
@@ -16883,11 +16914,11 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
         try {
           const analysis = JSON.parse(jsonMatch[0]);
         
-        // Fetch products from Shopify
+        // Fetch products from Shopify with translations
         let products = [];
         if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
           const shopifyQuery = `
-            query searchProducts($query: String!) {
+            query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
               products(first: 15, query: $query, sortKey: RELEVANCE) {
                 edges {
                   node {
@@ -16909,11 +16940,19 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
             try {
               const shopifyResponse = await axios.post(
                 config.apiUrl,  // Use Storefront API, not Admin API
-                { query: shopifyQuery, variables: { query: productName } },  // Simple search, no wildcards
+                { 
+                  query: shopifyQuery, 
+                  variables: { 
+                    query: productName,
+                    lang: shopifyLanguage,
+                    country: shopifyCountry
+                  } 
+                },
                 {
                   headers: {
                     'Content-Type': 'application/json',
-                    'X-Shopify-Storefront-Access-Token': config.storefrontToken
+                    'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+                    'Accept-Language': shopifyLanguage.toLowerCase()
                   },
                   timeout: 10000
                 }
@@ -17122,49 +17161,61 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created`);
     
-    // Step 3: Try to generate an actual image using Gemini's image generation
-    // Note: This uses the experimental imagen capabilities
+    // Step 3: Try to generate an actual image using Imagen 3
     let generatedImageUrl = null;
     let generatedImageBase64 = null;
     
     try {
       console.log(`🖼️ [VISUALIZE] Step 3: Attempting image generation...`);
       
-      // Use Imagen 3 for image generation
-      const imageGenResponse = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${geminiKey}`,
-        {
-          instances: [{
-            prompt: `Photorealistic interior design photo showing a minimalist metal "${productTitle}" placed in a ${roomAnalysis.roomType || 'modern room'}. 
-              
+      const imagePrompt = `Photorealistic interior design photo showing a minimalist metal "${productTitle}" placed in a ${roomAnalysis.roomType || 'modern room'}. 
 Style: ${roomAnalysis.style || 'modern minimalist'}
 Placement: ${roomAnalysis.suggestedPlacement || 'appropriate location'}
 Color scheme: ${(roomAnalysis.colorPalette || ['neutral']).join(', ')}
 Lighting: ${roomAnalysis.lighting || 'natural light'}
+The product should be a sleek, minimalist metal piece that fits naturally in the space. High-quality interior design photography style.`;
 
-The product should be a sleek, minimalist metal piece that fits naturally in the space. High-quality interior design photography style.`
-          }],
-          parameters: {
-            sampleCount: 1,
-            aspectRatio: '16:9'
+      console.log(`🖼️ [VISUALIZE] Prompt: ${imagePrompt.substring(0, 100)}...`);
+      
+      // Use Imagen 3 via Generative Language API
+      const imageGenResponse = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:generateImages?key=${geminiKey}`,
+        {
+          prompt: imagePrompt,
+          config: {
+            numberOfImages: 1,
+            aspectRatio: '16:9',
+            outputOptions: {
+              mimeType: 'image/jpeg'
+            }
           }
         },
-        { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
+        { headers: { 'Content-Type': 'application/json' }, timeout: 90000 }
       );
       
-      // Check if we got an image back - Imagen 3 returns predictions array
-      const predictions = imageGenResponse.data?.predictions || [];
-      if (predictions.length > 0 && predictions[0].bytesBase64Encoded) {
-        generatedImageBase64 = predictions[0].bytesBase64Encoded;
-        console.log(`✅ [VISUALIZE] Image generated! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+      console.log(`🖼️ [VISUALIZE] API Response status: ${imageGenResponse.status}`);
+      
+      // Check if we got an image back
+      const generatedImages = imageGenResponse.data?.generatedImages || [];
+      if (generatedImages.length > 0) {
+        // Imagen 3 returns images in generatedImages[].image.imageBytes (base64)
+        const imageData = generatedImages[0]?.image?.imageBytes;
+        if (imageData) {
+          generatedImageBase64 = imageData;
+          console.log(`✅ [VISUALIZE] Image generated! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+        } else {
+          console.log(`⚠️ [VISUALIZE] No image bytes in response:`, JSON.stringify(generatedImages[0]).substring(0, 200));
+        }
       } else {
-        console.log(`⚠️ [VISUALIZE] No image in response:`, JSON.stringify(imageGenResponse.data).substring(0, 200));
+        console.log(`⚠️ [VISUALIZE] No generated images in response:`, JSON.stringify(imageGenResponse.data).substring(0, 300));
       }
       
     } catch (imageError) {
-      console.log(`⚠️ [VISUALIZE] Image generation not available:`, imageError.message);
-      // This is expected - image generation may not be available
-      // We'll return the text description instead
+      console.log(`⚠️ [VISUALIZE] Image generation failed:`, imageError.message);
+      if (imageError.response?.data) {
+        console.log(`⚠️ [VISUALIZE] Error details:`, JSON.stringify(imageError.response.data).substring(0, 500));
+      }
+      // Image generation may not be available - we'll return the text description instead
     }
     
     // Generate a unique visualization ID
