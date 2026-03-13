@@ -16372,9 +16372,18 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             const searchQueries = [];
             
             // 1. Search ONLY for specific product names from matchingProducts
+            // Use combined OR query to search all products at once for better results
             if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
+              // First, try combined OR query (e.g., "TUALI OR MO")
+              const combinedQuery = analysis.matchingProducts.join(' OR ');
+              searchQueries.push(combinedQuery);
+              
+              // Also add individual searches - use title: prefix for better matching
               for (const productName of analysis.matchingProducts) {
-                searchQueries.push(productName);  // e.g., "TUALI", "MO"
+                // For all product names, search with title prefix for exact product name match
+                searchQueries.push(`title:*${productName}*`);
+                // Also search without prefix as fallback
+                searchQueries.push(productName);
               }
             }
             
@@ -16386,11 +16395,12 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             // DON'T add generic labels - they return too many irrelevant results
             
             console.log('🔍 Shopify search queries:', searchQueries);
+            console.log('🎯 Looking for matchingProducts:', analysis.matchingProducts);
             
-            // Query Shopify Storefront API
+            // Query Shopify Storefront API - fetch more results to ensure we find all matches
             const shopifyQuery = `
               query searchProducts($query: String!) {
-                products(first: 10, query: $query, sortKey: RELEVANCE) {
+                products(first: 25, query: $query, sortKey: RELEVANCE) {
                   edges {
                     node {
                       id
@@ -16438,9 +16448,10 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             
             const seenIds = new Set();
             
-            // Execute searches for matching products first (highest priority)
-            for (const query of searchQueries.slice(0, 5)) {
+            // Execute searches for matching products - run more queries to catch all products
+            for (const query of searchQueries.slice(0, 10)) {
               try {
+                console.log(`🔎 Executing Shopify search: "${query}"`);
                 const shopifyResponse = await axios.post(
                   config.apiUrl,  // Use Storefront API, not Admin API
                   {
@@ -16464,7 +16475,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
                     // Calculate relevance score - start at 0!
                     let score = 0;
                     const titleLower = product.title.toLowerCase();
-                    const titleWords = titleLower.split(/[\s\-_]+/);  // Split title into words
+                    const titleUpper = product.title.toUpperCase();
+                    const titleWords = titleLower.split(/[\s\-_\(\)]+/);  // Split title into words
                     
                     // STRICT: ONLY include if title contains EXACT product name from matchingProducts
                     // This must be a word boundary match, not substring
@@ -16472,16 +16484,29 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
                     let matchedProductName = null;
                     for (const mp of (analysis.matchingProducts || [])) {
                       const mpLower = mp.toLowerCase();
-                      // Check for word boundary match (not substring)
-                      // "TUALI" should match "TUALI Black" but not "ITUAL"
-                      const wordMatch = titleWords.some(word => word === mpLower);
-                      const containsMatch = titleLower.includes(mpLower) && mpLower.length >= 2;
+                      const mpUpper = mp.toUpperCase();
                       
-                      if (wordMatch || containsMatch) {
+                      // Check for word boundary match (not substring)
+                      // For short product names (2-3 chars), require exact word match
+                      // "MO" should match "Toilettenpapierhalter MO" but not "COSMO"
+                      const wordMatch = titleWords.some(word => word === mpLower);
+                      
+                      // Also check if title contains the uppercase product name with boundaries
+                      // Using regex for proper word boundary matching
+                      const upperRegex = new RegExp(`\\b${mpUpper}\\b`);
+                      const upperCaseMatch = upperRegex.test(titleUpper);
+                      
+                      // For longer names (4+ chars), also allow substring match
+                      const containsMatch = mpLower.length >= 4 && titleLower.includes(mpLower);
+                      
+                      // Also check handle for product name
+                      const handleMatch = product.handle && product.handle.toLowerCase().includes(mpLower);
+                      
+                      if (wordMatch || upperCaseMatch || containsMatch || handleMatch) {
                         score += 0.9;
                         isRelevant = true;
                         matchedProductName = mp;
-                        console.log(`✅ Product "${product.title}" matches "${mp}" (word: ${wordMatch}, contains: ${containsMatch})`);
+                        console.log(`✅ Product "${product.title}" (handle: ${product.handle}) matches "${mp}" (word: ${wordMatch}, upper: ${upperCaseMatch}, contains: ${containsMatch}, handle: ${handleMatch})`);
                         break;
                       }
                     }
@@ -16842,6 +16867,235 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
   } catch (error) {
     console.error('❌ Focused analysis error:', error.message);
     res.status(500).json({ error: 'Analysis failed', details: error.message });
+  }
+});
+
+// ============================================================================
+// AI ROOM VISUALIZATION - "See it in your space" Feature (BETA)
+// Uses Gemini to help users visualize Metallbude products in their rooms
+// ============================================================================
+
+/**
+ * Generate a room visualization showing a product in user's space
+ * This is a BETA feature - unlimited during testing
+ */
+app.post('/ai/visualize-room', async (req, res) => {
+  try {
+    const { roomImage, productHandle, productTitle, productImages, customerId } = req.body;
+    
+    if (!roomImage || !productHandle) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Room image and product handle are required' 
+      });
+    }
+    
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      return res.status(500).json({ 
+        success: false,
+        error: 'AI service not configured' 
+      });
+    }
+    
+    console.log(`🏠 [VISUALIZE] Request received:`);
+    console.log(`   Product: ${productTitle} (${productHandle})`);
+    console.log(`   Customer: ${customerId || 'anonymous'}`);
+    console.log(`   Room image size: ${(roomImage.length / 1024).toFixed(1)} KB`);
+    console.log(`   Product images: ${productImages?.length || 0}`);
+    
+    // Step 1: Analyze the room to understand the space
+    console.log(`🔍 [VISUALIZE] Step 1: Analyzing room...`);
+    
+    const roomAnalysisPrompt = `Analyze this room image for interior design placement. Identify:
+1. Room type (living room, bedroom, bathroom, kitchen, hallway, etc.)
+2. Available spaces where furniture could be placed
+3. Existing furniture and decor style
+4. Lighting conditions
+5. Color palette of the room
+6. Best location to place a "${productTitle}" (a minimalist metal product from Metallbude)
+
+Respond in JSON format:
+{
+  "roomType": "living room",
+  "style": "modern minimalist",
+  "colorPalette": ["white", "gray", "wood tones"],
+  "lighting": "natural daylight",
+  "suggestedPlacement": "description of where the product would look best",
+  "placementArea": "wall/floor/corner/shelf", 
+  "confidence": 0.9
+}`;
+
+    const analysisResponse = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      {
+        contents: [{
+          parts: [
+            { text: roomAnalysisPrompt },
+            { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
+          ]
+        }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 500 }
+      },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
+    );
+    
+    let roomAnalysis = {};
+    try {
+      const analysisText = analysisResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        roomAnalysis = JSON.parse(jsonMatch[0]);
+      }
+    } catch (e) {
+      console.log('⚠️ Could not parse room analysis:', e.message);
+    }
+    
+    console.log(`✅ [VISUALIZE] Room analysis:`, roomAnalysis);
+    
+    // Step 2: Create a detailed visualization description
+    console.log(`🎨 [VISUALIZE] Step 2: Creating visualization description...`);
+    
+    const visualizationPrompt = `Based on the room analysis and product information, create a detailed description of how "${productTitle}" from Metallbude would look in this space.
+
+Room Analysis: ${JSON.stringify(roomAnalysis)}
+
+Create a photorealistic description for image generation:
+1. Describe exactly where the product is placed
+2. How it interacts with existing furniture
+3. How the lighting falls on it
+4. The overall aesthetic impact
+
+Respond in JSON:
+{
+  "visualDescription": "detailed description for image generation",
+  "designTips": ["tip 1", "tip 2"],
+  "styleMatch": "how well the product matches the room (1-10)",
+  "alternativeSpots": ["other places it could go"]
+}`;
+
+    const descResponse = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      {
+        contents: [{
+          parts: [
+            { text: visualizationPrompt },
+            { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
+          ]
+        }],
+        generationConfig: { temperature: 0.5, maxOutputTokens: 800 }
+      },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
+    );
+    
+    let visualization = {};
+    try {
+      const descText = descResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const jsonMatch = descText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        visualization = JSON.parse(jsonMatch[0]);
+      }
+    } catch (e) {
+      console.log('⚠️ Could not parse visualization:', e.message);
+    }
+    
+    console.log(`✅ [VISUALIZE] Visualization created`);
+    
+    // Step 3: Try to generate an actual image using Gemini's image generation
+    // Note: This uses the experimental imagen capabilities
+    let generatedImageUrl = null;
+    let generatedImageBase64 = null;
+    
+    try {
+      console.log(`🖼️ [VISUALIZE] Step 3: Attempting image generation...`);
+      
+      // Use Gemini 2.0 with image generation capability
+      const imageGenResponse = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${geminiKey}`,
+        {
+          contents: [{
+            parts: [{
+              text: `Generate a photorealistic interior design image showing a minimalist metal "${productTitle}" placed in a ${roomAnalysis.roomType || 'modern room'}. 
+              
+Style: ${roomAnalysis.style || 'modern minimalist'}
+Placement: ${roomAnalysis.suggestedPlacement || 'appropriate location'}
+Color scheme: ${(roomAnalysis.colorPalette || ['neutral']).join(', ')}
+Lighting: ${roomAnalysis.lighting || 'natural light'}
+
+The product should be a sleek, minimalist metal piece that fits naturally in the space. Make it look like a high-quality interior design photo.`
+            }]
+          }],
+          generationConfig: {
+            responseModalities: ['image', 'text'],
+            responseMimeType: 'image/jpeg'
+          }
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
+      );
+      
+      // Check if we got an image back
+      const parts = imageGenResponse.data?.candidates?.[0]?.content?.parts || [];
+      for (const part of parts) {
+        if (part.inlineData?.data) {
+          generatedImageBase64 = part.inlineData.data;
+          console.log(`✅ [VISUALIZE] Image generated! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+          break;
+        }
+      }
+      
+    } catch (imageError) {
+      console.log(`⚠️ [VISUALIZE] Image generation not available:`, imageError.message);
+      // This is expected - image generation may not be available
+      // We'll return the text description instead
+    }
+    
+    // Generate a unique visualization ID
+    const visualizationId = `viz_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Return the result
+    const result = {
+      success: true,
+      visualizationId,
+      productHandle,
+      productTitle,
+      roomAnalysis: {
+        roomType: roomAnalysis.roomType,
+        style: roomAnalysis.style,
+        suggestedPlacement: roomAnalysis.suggestedPlacement,
+        confidence: roomAnalysis.confidence
+      },
+      visualization: {
+        description: visualization.visualDescription,
+        designTips: visualization.designTips || [],
+        styleMatch: visualization.styleMatch,
+        alternativeSpots: visualization.alternativeSpots || []
+      },
+      // Image data (if generation succeeded)
+      generatedImage: generatedImageBase64 ? {
+        base64: generatedImageBase64,
+        mimeType: 'image/jpeg'
+      } : null,
+      // Beta info
+      beta: true,
+      disclaimer: 'This is an AI-generated visualization. Actual product appearance may vary.',
+      // Usage tracking (for future rate limiting)
+      usage: {
+        remaining: 'unlimited', // Beta period
+        resetDate: null
+      }
+    };
+    
+    console.log(`✅ [VISUALIZE] Response ready (image: ${generatedImageBase64 ? 'yes' : 'no'})`);
+    
+    res.json(result);
+    
+  } catch (error) {
+    console.error('❌ [VISUALIZE] Error:', error.response?.data || error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Visualization failed',
+      details: error.message
+    });
   }
 });
 
