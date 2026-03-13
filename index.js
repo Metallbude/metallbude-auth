@@ -17297,7 +17297,7 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Step 3: Generate image with Imagen 3
+    // Step 3: Generate image using Gemini native image generation
     let generatedImageBase64 = null;
     // Create a detailed prompt for image generation based on the analysis
     const imagePrompt = `Create a photorealistic interior design visualization:
@@ -17314,88 +17314,83 @@ Requirements:
 - High quality, magazine-worthy composition
 - Show how the product enhances the room's aesthetic`;
     
-    // Try image generation with multiple model options
+    // Try Gemini native image generation FIRST (most reliable with standard API key)
+    // Per docs: https://ai.google.dev/gemini-api/docs/image-generation
     if (geminiKey && !generatedImageBase64) {
       console.log(`🎨 [VISUALIZE] Step 3: Trying image generation...`);
       console.log(`   Prompt: ${imagePrompt.substring(0, 150)}...`);
       
-      // Models to try in order (most likely to work first)
-      const imagenModels = [
-        'imagen-3.0-generate-002',
-        'imagen-3.0-generate-001', 
-        'imagen-3.0-fast-generate-001',
-        'imagegeneration@006'
-      ];
-      
-      // Try Imagen models via generateImages endpoint
-      for (const modelName of imagenModels) {
-        if (generatedImageBase64) break;
-        
-        try {
-          console.log(`   🎨 Trying model: ${modelName}`);
-          const imagenResponse = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateImages?key=${geminiKey}`,
-            {
-              prompt: imagePrompt,
-              config: {
-                numberOfImages: 1,
-                aspectRatio: "4:3",
-                safetyFilterLevel: "BLOCK_ONLY_HIGH"
-              }
-            },
-            { 
-              headers: { 'Content-Type': 'application/json' },
-              timeout: 60000 
+      try {
+        console.log(`   🎨 Trying Gemini native image gen: gemini-2.0-flash-exp`);
+        const geminiResponse = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${geminiKey}`,
+          {
+            contents: [{ 
+              parts: [{ 
+                text: imagePrompt 
+              }] 
+            }],
+            generationConfig: {
+              responseModalities: ["image", "text"]  // lowercase per docs
             }
-          );
-          
-          // Check for image in response
-          const images = imagenResponse.data?.generatedImages || imagenResponse.data?.images;
-          if (images && images[0]) {
-            const imageData = images[0].image?.imageBytes || images[0].bytesBase64Encoded || images[0].imageBytes;
-            if (imageData) {
-              generatedImageBase64 = imageData;
-              console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+          },
+          { 
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 90000 
+          }
+        );
+        
+        const candidates = geminiResponse.data?.candidates;
+        if (candidates?.[0]?.content?.parts) {
+          for (const part of candidates[0].content.parts) {
+            if (part.inlineData?.data) {
+              generatedImageBase64 = part.inlineData.data;
+              console.log(`✅ [VISUALIZE] Image generated via gemini-2.0-flash-exp! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
               break;
             }
           }
-        } catch (err) {
-          const msg = err.response?.data?.error?.message || err.message;
-          console.log(`   ⚠️ ${modelName}: ${msg.substring(0, 100)}`);
         }
+      } catch (err) {
+        const msg = err.response?.data?.error?.message || err.message;
+        console.log(`   ⚠️ gemini-2.0-flash-exp: ${msg.substring(0, 150)}`);
       }
       
-      // Fallback: Try Gemini with native image generation (gemini-2.0-flash-preview-image-generation)
+      // Fallback: Try Imagen models via generateImages endpoint (requires paid/Vertex access)
       if (!generatedImageBase64) {
-        const geminiImageModels = ['gemini-2.0-flash-preview-image-generation', 'gemini-2.0-flash'];
+        const imagenModels = [
+          'imagen-3.0-generate-001', 
+          'imagen-3.0-fast-generate-001'
+        ];
         
-        for (const modelName of geminiImageModels) {
+        for (const modelName of imagenModels) {
           if (generatedImageBase64) break;
-          
+        
           try {
-            console.log(`   🎨 Trying Gemini model: ${modelName}`);
-            const geminiResponse = await axios.post(
-              `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
+            console.log(`   🎨 Trying Imagen fallback: ${modelName}`);
+            const imagenResponse = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateImages?key=${geminiKey}`,
               {
-                contents: [{ parts: [{ text: `Generate an image: ${imagePrompt}` }] }],
-                generationConfig: {
-                  responseModalities: ["IMAGE", "TEXT"]
+                prompt: imagePrompt,
+                config: {
+                  numberOfImages: 1,
+                  aspectRatio: "4:3",
+                  safetyFilterLevel: "BLOCK_ONLY_HIGH"
                 }
               },
               { 
                 headers: { 'Content-Type': 'application/json' },
-                timeout: 90000 
+                timeout: 60000 
               }
             );
             
-            const candidates = geminiResponse.data?.candidates;
-            if (candidates?.[0]?.content?.parts) {
-              for (const part of candidates[0].content.parts) {
-                if (part.inlineData?.data) {
-                  generatedImageBase64 = part.inlineData.data;
-                  console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-                  break;
-                }
+            // Check for image in response
+            const images = imagenResponse.data?.generatedImages || imagenResponse.data?.images;
+            if (images && images[0]) {
+              const imageData = images[0].image?.imageBytes || images[0].bytesBase64Encoded || images[0].imageBytes;
+              if (imageData) {
+                generatedImageBase64 = imageData;
+                console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+                break;
               }
             }
           } catch (err) {
