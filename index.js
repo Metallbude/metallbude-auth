@@ -16487,7 +16487,10 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
             mainObject: analysis.mainObject,
             userIntent: analysis.userIntent,
             // NEW: Actual products from Shopify
-            products: products
+            products: products,
+            // DEBUG: Raw Gemini response for testing
+            _debug_gemini_raw: geminiText,
+            _debug_gemini_parsed: analysis
           });
         }
       }
