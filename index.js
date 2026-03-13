@@ -17133,15 +17133,28 @@ Respond in JSON:
     let roomAnalysis = {};
     try {
       const analysisText = analysisResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+      console.log(`📝 [VISUALIZE] Raw room analysis response (first 500 chars):`, analysisText.substring(0, 500));
+      
+      // Extract JSON - handle markdown code blocks
+      let jsonText = analysisText;
+      // Remove markdown code blocks if present
+      const codeBlockMatch = analysisText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (codeBlockMatch) {
+        jsonText = codeBlockMatch[1].trim();
+      }
+      // Find the JSON object
+      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         roomAnalysis = JSON.parse(jsonMatch[0]);
+        console.log(`✅ [VISUALIZE] Parsed room analysis successfully`);
+      } else {
+        console.log(`⚠️ [VISUALIZE] No JSON found in room analysis response`);
       }
     } catch (e) {
-      console.log('⚠️ Could not parse room analysis:', e.message);
+      console.log('⚠️ [VISUALIZE] Could not parse room analysis:', e.message);
     }
     
-    console.log(`✅ [VISUALIZE] Room analysis:`, roomAnalysis);
+    console.log(`✅ [VISUALIZE] Room analysis:`, JSON.stringify(roomAnalysis, null, 2));
     
     // Step 2: Create a detailed visualization description (include product images!)
     console.log(`🎨 [VISUALIZE] Step 2: Creating visualization description...`);
@@ -17185,12 +17198,23 @@ Respond in JSON:
     let visualization = {};
     try {
       const descText = descResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const jsonMatch = descText.match(/\{[\s\S]*\}/);
+      console.log(`📝 [VISUALIZE] Raw visualization response (first 500 chars):`, descText.substring(0, 500));
+      
+      // Extract JSON - handle markdown code blocks
+      let jsonText = descText;
+      const codeBlockMatch = descText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (codeBlockMatch) {
+        jsonText = codeBlockMatch[1].trim();
+      }
+      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         visualization = JSON.parse(jsonMatch[0]);
+        console.log(`✅ [VISUALIZE] Parsed visualization successfully`);
+      } else {
+        console.log(`⚠️ [VISUALIZE] No JSON found in visualization response`);
       }
     } catch (e) {
-      console.log('⚠️ Could not parse visualization:', e.message);
+      console.log('⚠️ [VISUALIZE] Could not parse visualization:', e.message);
     }
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
