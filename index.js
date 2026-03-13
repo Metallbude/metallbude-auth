@@ -16689,7 +16689,9 @@ Respond with JSON:
   "productType": "Category name",
   "matchingProducts": ["PRODUCT1", "PRODUCT2"],
   "searchTerms": ["search", "terms", "in", "DE", "EN", "FR", "IT"]
-}`
+}
+
+CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
             },
             {
               inlineData: {
@@ -16701,7 +16703,7 @@ Respond with JSON:
         }],
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 500
+          maxOutputTokens: 1000
         }
       },
       {
@@ -16720,9 +16722,12 @@ Respond with JSON:
       cleanedText = cleanedText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
       cleanedText = cleanedText.replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
       
+      console.log('📝 Cleaned text:', cleanedText);
+      
       const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const analysis = JSON.parse(jsonMatch[0]);
+        try {
+          const analysis = JSON.parse(jsonMatch[0]);
         
         // Fetch products from Shopify
         let products = [];
@@ -16789,7 +16794,15 @@ Respond with JSON:
           searchTerms: analysis.searchTerms || [],
           products: products
         });
+        } catch (parseError) {
+          console.log('❌ JSON parse error:', parseError.message);
+          console.log('❌ Raw JSON match:', jsonMatch[0]);
+        }
+      } else {
+        console.log('❌ No JSON found in response');
       }
+    } else {
+      console.log('❌ No text in Gemini response');
     }
     
     return res.status(500).json({ error: 'Could not analyze selected object' });
