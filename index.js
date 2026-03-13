@@ -16095,20 +16095,27 @@ app.post('/ai/analyze-image', async (req, res) => {
       return res.status(400).json({ error: 'No image provided' });
     }
     
-    // Try Gemini first (smarter), fall back to Cloud Vision
-    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_CLOUD_VISION_KEY;
+    // Check for API keys
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const visionKey = process.env.GOOGLE_CLOUD_VISION_KEY;
     
-    if (!geminiKey) {
-      console.error('❌ No AI API key configured (GEMINI_API_KEY or GOOGLE_CLOUD_VISION_KEY)');
+    console.log('🔑 API Keys status:');
+    console.log(`   GEMINI_API_KEY: ${geminiKey ? '✅ SET (' + geminiKey.substring(0, 8) + '...)' : '❌ NOT SET'}`);
+    console.log(`   GOOGLE_CLOUD_VISION_KEY: ${visionKey ? '✅ SET' : '❌ NOT SET'}`);
+    
+    if (!geminiKey && !visionKey) {
+      console.error('❌ No AI API key configured');
       return res.status(500).json({ error: 'AI API not configured' });
     }
     
-    console.log('🔍 Analyzing image with Google Gemini AI...');
+    // Try Gemini first (smarter), fall back to Cloud Vision
+    if (geminiKey) {
+      console.log('🔍 Analyzing image with Google Gemini AI...');
     
-    try {
-      // Use Gemini 1.5 Flash for fast, accurate furniture recognition
-      const geminiResponse = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
+      try {
+        // Use Gemini 1.5 Flash for fast, accurate furniture recognition
+        const geminiResponse = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
         {
           contents: [{
             parts: [
@@ -16497,16 +16504,20 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
       
       throw new Error('Could not parse Gemini response');
       
-    } catch (geminiError) {
-      console.log('⚠️ Gemini failed, trying Cloud Vision fallback:', geminiError.message);
-      
-      // Fallback to Cloud Vision if Gemini fails
-      const visionKey = process.env.GOOGLE_CLOUD_VISION_KEY;
-      if (!visionKey) {
-        throw geminiError;
+      } catch (geminiError) {
+        console.log('⚠️ Gemini failed:', geminiError.message);
+        console.log('⚠️ Full error:', geminiError.response?.data || geminiError);
       }
+    } // Close if (geminiKey)
+    
+    // Fallback to Cloud Vision
+    console.log('🔄 Falling back to Cloud Vision...');
+    // visionKey already declared at top of function
+    if (!visionKey) {
+      return res.status(500).json({ error: 'No AI API key available' });
+    }
       
-      const visionResponse = await axios.post(
+    const visionResponse = await axios.post(
         `https://vision.googleapis.com/v1/images:annotate?key=${visionKey}`,
         {
           requests: [{
@@ -16546,9 +16557,9 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
         objects,
         style: 'modern',
         confidence: 0.5,
-        searchTerms: [...new Set(searchTerms)].slice(0, 8)
+        searchTerms: [...new Set(searchTerms)].slice(0, 8),
+        _debug_source: 'Cloud Vision (Gemini not available)'
       });
-    }
     
   } catch (error) {
     console.error('❌ AI analysis error:', error.response?.data || error.message);
