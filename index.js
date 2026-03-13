@@ -17064,25 +17064,55 @@ app.post('/ai/visualize-room', async (req, res) => {
     console.log(`   Room image size: ${(roomImage.length / 1024).toFixed(1)} KB`);
     console.log(`   Product images: ${productImages?.length || 0}`);
     
-    // Step 1: Analyze the room to understand the space
-    console.log(`🔍 [VISUALIZE] Step 1: Analyzing room...`);
+    // Build parts array with room image AND product images
+    const imageParts = [
+      { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
+    ];
     
-    const roomAnalysisPrompt = `Analyze this room image for interior design placement. Identify:
-1. Room type (living room, bedroom, bathroom, kitchen, hallway, etc.)
-2. Available spaces where furniture could be placed
-3. Existing furniture and decor style
-4. Lighting conditions
-5. Color palette of the room
-6. Best location to place a "${productTitle}" (a minimalist metal product from Metallbude)
+    // Add product images so Gemini knows what the product looks like!
+    let productImageDescriptions = [];
+    if (productImages && productImages.length > 0) {
+      console.log(`📸 [VISUALIZE] Fetching ${productImages.length} product images...`);
+      for (let i = 0; i < Math.min(productImages.length, 2); i++) {
+        try {
+          const imgUrl = productImages[i];
+          const imgResponse = await axios.get(imgUrl, { 
+            responseType: 'arraybuffer',
+            timeout: 10000 
+          });
+          const base64 = Buffer.from(imgResponse.data).toString('base64');
+          imageParts.push({ inlineData: { mimeType: 'image/jpeg', data: base64 } });
+          productImageDescriptions.push(`[Product Image ${i + 1}]`);
+          console.log(`   ✅ Added product image ${i + 1}`);
+        } catch (e) {
+          console.log(`   ⚠️ Failed to fetch product image ${i + 1}: ${e.message}`);
+        }
+      }
+    }
+    
+    // Step 1: Analyze the room AND product together
+    console.log(`🔍 [VISUALIZE] Step 1: Analyzing room with product images...`);
+    
+    const roomAnalysisPrompt = `You are an interior design AI. I'm showing you:
+1. FIRST IMAGE: A room photo where the user wants to place a product
+2. ${productImageDescriptions.length > 0 ? 'ADDITIONAL IMAGES: Photos of the actual product "' + productTitle + '" that needs to be visualized' : 'Product: "' + productTitle + '" (a minimalist metal furniture piece)'}
 
-Respond in JSON format:
+Analyze the room and suggest where this specific product would look best. Consider:
+- Room type and style
+- The product's size and design (look at the product images!)
+- Available wall/floor space
+- Existing furniture and decor
+- Lighting conditions
+
+Respond in JSON:
 {
-  "roomType": "living room",
-  "style": "modern minimalist",
-  "colorPalette": ["white", "gray", "wood tones"],
-  "lighting": "natural daylight",
-  "suggestedPlacement": "description of where the product would look best",
-  "placementArea": "wall/floor/corner/shelf", 
+  "roomType": "bathroom/living room/etc",
+  "style": "modern/minimalist/etc",
+  "colorPalette": ["colors in the room"],
+  "lighting": "natural/artificial/etc",
+  "suggestedPlacement": "detailed description of WHERE and HOW to place this specific product",
+  "placementArea": "wall/floor/corner/shelf",
+  "productObservations": "what you notice about the product from its images",
   "confidence": 0.9
 }`;
 
@@ -17092,10 +17122,10 @@ Respond in JSON format:
         contents: [{
           parts: [
             { text: roomAnalysisPrompt },
-            { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
+            ...imageParts  // Room image + product images
           ]
         }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 500 }
+        generationConfig: { temperature: 0.3, maxOutputTokens: 800 }
       },
       { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
     );
@@ -17113,25 +17143,29 @@ Respond in JSON format:
     
     console.log(`✅ [VISUALIZE] Room analysis:`, roomAnalysis);
     
-    // Step 2: Create a detailed visualization description
+    // Step 2: Create a detailed visualization description (include product images!)
     console.log(`🎨 [VISUALIZE] Step 2: Creating visualization description...`);
     
-    const visualizationPrompt = `Based on the room analysis and product information, create a detailed description of how "${productTitle}" from Metallbude would look in this space.
+    const visualizationPrompt = `You're an interior designer helping a customer visualize placing a product in their room.
 
-Room Analysis: ${JSON.stringify(roomAnalysis)}
+IMAGES PROVIDED:
+- First image: The customer's room
+- ${productImageDescriptions.length > 0 ? 'Additional images: The actual product "' + productTitle + '"' : 'Product: "' + productTitle + '"'}
 
-Create a photorealistic description for image generation:
-1. Describe exactly where the product is placed
-2. How it interacts with existing furniture
-3. How the lighting falls on it
-4. The overall aesthetic impact
+ROOM ANALYSIS: ${JSON.stringify(roomAnalysis)}
+
+Based on what you see of BOTH the room AND the product, describe:
+1. Exactly WHERE the product should be placed in this specific room
+2. How it would look there (considering the product's actual design/color from its images)
+3. How well it matches the room's style
+4. Practical tips for the customer
 
 Respond in JSON:
 {
-  "visualDescription": "detailed description for image generation",
-  "designTips": ["tip 1", "tip 2"],
-  "styleMatch": "how well the product matches the room (1-10)",
-  "alternativeSpots": ["other places it could go"]
+  "visualDescription": "A vivid description of how THIS specific product would look in THIS specific room - be detailed and visual!",
+  "designTips": ["practical tip 1", "practical tip 2", "practical tip 3"],
+  "styleMatch": "8/10 - explanation of why",
+  "alternativeSpots": ["other good spots in this room"]
 }`;
 
     const descResponse = await axios.post(
@@ -17140,10 +17174,10 @@ Respond in JSON:
         contents: [{
           parts: [
             { text: visualizationPrompt },
-            { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
+            ...imageParts  // Room image + product images
           ]
         }],
-        generationConfig: { temperature: 0.5, maxOutputTokens: 800 }
+        generationConfig: { temperature: 0.5, maxOutputTokens: 1000 }
       },
       { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
     );
@@ -17159,64 +17193,12 @@ Respond in JSON:
       console.log('⚠️ Could not parse visualization:', e.message);
     }
     
-    console.log(`✅ [VISUALIZE] Visualization created`);
+    console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Step 3: Try to generate an actual image using Imagen 3
-    let generatedImageUrl = null;
+    // Note: Image generation via Imagen 3 requires Vertex AI (not available via API key)
+    // For now, we return the detailed text description which is based on actual product images
     let generatedImageBase64 = null;
-    
-    try {
-      console.log(`🖼️ [VISUALIZE] Step 3: Attempting image generation...`);
-      
-      const imagePrompt = `Photorealistic interior design photo showing a minimalist metal "${productTitle}" placed in a ${roomAnalysis.roomType || 'modern room'}. 
-Style: ${roomAnalysis.style || 'modern minimalist'}
-Placement: ${roomAnalysis.suggestedPlacement || 'appropriate location'}
-Color scheme: ${(roomAnalysis.colorPalette || ['neutral']).join(', ')}
-Lighting: ${roomAnalysis.lighting || 'natural light'}
-The product should be a sleek, minimalist metal piece that fits naturally in the space. High-quality interior design photography style.`;
-
-      console.log(`🖼️ [VISUALIZE] Prompt: ${imagePrompt.substring(0, 100)}...`);
-      
-      // Use Imagen 3 via Generative Language API
-      const imageGenResponse = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:generateImages?key=${geminiKey}`,
-        {
-          prompt: imagePrompt,
-          config: {
-            numberOfImages: 1,
-            aspectRatio: '16:9',
-            outputOptions: {
-              mimeType: 'image/jpeg'
-            }
-          }
-        },
-        { headers: { 'Content-Type': 'application/json' }, timeout: 90000 }
-      );
-      
-      console.log(`🖼️ [VISUALIZE] API Response status: ${imageGenResponse.status}`);
-      
-      // Check if we got an image back
-      const generatedImages = imageGenResponse.data?.generatedImages || [];
-      if (generatedImages.length > 0) {
-        // Imagen 3 returns images in generatedImages[].image.imageBytes (base64)
-        const imageData = generatedImages[0]?.image?.imageBytes;
-        if (imageData) {
-          generatedImageBase64 = imageData;
-          console.log(`✅ [VISUALIZE] Image generated! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-        } else {
-          console.log(`⚠️ [VISUALIZE] No image bytes in response:`, JSON.stringify(generatedImages[0]).substring(0, 200));
-        }
-      } else {
-        console.log(`⚠️ [VISUALIZE] No generated images in response:`, JSON.stringify(imageGenResponse.data).substring(0, 300));
-      }
-      
-    } catch (imageError) {
-      console.log(`⚠️ [VISUALIZE] Image generation failed:`, imageError.message);
-      if (imageError.response?.data) {
-        console.log(`⚠️ [VISUALIZE] Error details:`, JSON.stringify(imageError.response.data).substring(0, 500));
-      }
-      // Image generation may not be available - we'll return the text description instead
-    }
+    console.log(`ℹ️ [VISUALIZE] Image generation skipped (requires Vertex AI). Using text visualization.`);
     
     // Generate a unique visualization ID
     const visualizationId = `viz_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
