@@ -16127,7 +16127,9 @@ The user photographs something to find a matching Metallbude product.
 
 === STEP 1: DETECT ALL OBJECTS ===
 First, identify ALL distinct objects visible in the image.
-List every item you can see clearly (furniture, household items, accessories, etc.)
+ONLY list FURNITURE, HOME ACCESSORIES, or items that Metallbude could sell or provide storage for.
+DO NOT list consumables like toilet paper, tissues, food, drinks, plants, etc.
+List items like: furniture, shelves, holders, racks, trays, mirrors, etc.
 
 === STEP 2: DETERMINE IF CLARIFICATION NEEDED ===
 If you detect MULTIPLE distinct objects (more than 1), set needsUserSelection: true
@@ -16365,13 +16367,13 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
           let products = [];
           
           try {
-            // Build search queries for Shopify
+            // Build search queries for Shopify (Storefront API - no wildcards)
             const searchQueries = [];
             
             // 1. Search for specific product names from matchingProducts
             if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
               for (const productName of analysis.matchingProducts) {
-                searchQueries.push(`title:*${productName}*`);
+                searchQueries.push(productName);  // Simple search, no wildcards
               }
             }
             
@@ -16442,7 +16444,7 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             for (const query of searchQueries.slice(0, 5)) {
               try {
                 const shopifyResponse = await axios.post(
-                  config.adminApiUrl,
+                  config.apiUrl,  // Use Storefront API, not Admin API
                   {
                     query: shopifyQuery,
                     variables: { query }
@@ -16732,8 +16734,8 @@ Respond with JSON:
           for (const productName of analysis.matchingProducts.slice(0, 3)) {
             try {
               const shopifyResponse = await axios.post(
-                config.adminApiUrl,
-                { query: shopifyQuery, variables: { query: `title:*${productName}*` } },
+                config.apiUrl,  // Use Storefront API, not Admin API
+                { query: shopifyQuery, variables: { query: productName } },  // Simple search, no wildcards
                 {
                   headers: {
                     'Content-Type': 'application/json',
