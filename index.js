@@ -16113,9 +16113,9 @@ app.post('/ai/analyze-image', async (req, res) => {
       console.log('🔍 Analyzing image with Google Gemini AI...');
     
       try {
-        // Use Gemini 2.0 Flash for fast, accurate furniture recognition
+        // Use Gemini 2.5 Flash Preview (latest model)
         const geminiResponse = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-04-17:generateContent?key=${geminiKey}`,
         {
           contents: [{
             parts: [
@@ -16627,7 +16627,7 @@ app.post('/ai/analyze-selected-object', async (req, res) => {
     console.log(`🎯 User selected to focus on: "${focusOn}"`);
     
     const geminiResponse = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-04-17:generateContent?key=${geminiKey}`,
       {
         contents: [{
           parts: [
