@@ -17232,79 +17232,92 @@ Respond in JSON:
     
     // Step 3: Generate image with Imagen 3
     let generatedImageBase64 = null;
-    const vertexKey = process.env.VERTEX_AI_API_KEY;
-    const projectId = process.env.GOOGLE_CLOUD_PROJECT_ID;
-    const location = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+    // Create a detailed prompt for image generation based on the analysis
+    const imagePrompt = `Create a photorealistic interior design visualization:
+
+Room: A ${roomAnalysis.style || 'modern'} ${roomAnalysis.roomType || 'room'}
+Product: "${productTitle}" - a minimalist metal home decor piece from Metallbude
+Placement: ${roomAnalysis.suggestedPlacement || 'naturally integrated in the space'}
+Style notes: ${visualization.visualDescription || 'Clean, elegant integration'}
+
+Requirements:
+- Photorealistic professional interior photography
+- Natural lighting with soft shadows
+- The metal product should be clearly visible and well-placed
+- High quality, magazine-worthy composition
+- Show how the product enhances the room's aesthetic`;
     
-    // Create a detailed prompt for Imagen based on the analysis
-    const imagePrompt = `Interior design visualization: A ${roomAnalysis.style || 'modern'} ${roomAnalysis.roomType || 'room'} with the "${productTitle}" product placed ${roomAnalysis.suggestedPlacement || 'in the space'}. 
-The product is a minimalist metal piece from Metallbude. 
-${visualization.visualDescription || ''}
-Photorealistic, professional interior photography, natural lighting, high quality.`;
-    
-    // Try Generative Language API first (uses same key as Gemini)
+    // Try Gemini 2.0 Flash native image generation (uses existing GEMINI_API_KEY)
     if (geminiKey && !generatedImageBase64) {
-      console.log(`🎨 [VISUALIZE] Step 3: Trying Imagen 3 via Generative Language API...`);
+      console.log(`🎨 [VISUALIZE] Step 3: Trying Gemini 2.0 Flash image generation...`);
       console.log(`   Prompt: ${imagePrompt.substring(0, 150)}...`);
       
       try {
-        const imagenResponse = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${geminiKey}`,
+        // Use Gemini 2.0 Flash with native image generation
+        const geminiImageResponse = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${geminiKey}`,
           {
-            instances: [{ prompt: imagePrompt }],
-            parameters: {
-              sampleCount: 1,
-              aspectRatio: '4:3',
-              personGeneration: 'dont_allow',
-              safetyFilterLevel: 'block_some'
+            contents: [{
+              parts: [{ text: imagePrompt }]
+            }],
+            generationConfig: {
+              responseModalities: ["IMAGE", "TEXT"],
+              responseMimeType: "image/jpeg"
             }
           },
           { 
             headers: { 'Content-Type': 'application/json' },
-            timeout: 60000 
+            timeout: 90000 
           }
         );
         
-        if (imagenResponse.data?.predictions?.[0]?.bytesBase64Encoded) {
-          generatedImageBase64 = imagenResponse.data.predictions[0].bytesBase64Encoded;
-          console.log(`✅ [VISUALIZE] Image generated via Generative Language API! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-        } else {
-          console.log(`⚠️ [VISUALIZE] Generative Language API response:`, JSON.stringify(imagenResponse.data).substring(0, 300));
-        }
-      } catch (glError) {
-        console.log(`⚠️ [VISUALIZE] Generative Language API Imagen failed:`, glError.response?.data?.error?.message || glError.message);
-      }
-    }
-    
-    // Try Vertex AI as fallback
-    if (vertexKey && projectId && !generatedImageBase64) {
-      console.log(`🎨 [VISUALIZE] Trying Imagen 3 via Vertex AI...`);
-      
-      try {
-        const imagenResponse = await axios.post(
-          `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/imagen-3.0-generate-001:predict?key=${vertexKey}`,
-          {
-            instances: [{ prompt: imagePrompt }],
-            parameters: {
-              sampleCount: 1,
-              aspectRatio: '4:3',
-              safetyFilterLevel: 'block_some'
+        // Extract image from response
+        const candidates = geminiImageResponse.data?.candidates;
+        if (candidates && candidates[0]?.content?.parts) {
+          for (const part of candidates[0].content.parts) {
+            if (part.inlineData?.data) {
+              generatedImageBase64 = part.inlineData.data;
+              console.log(`✅ [VISUALIZE] Image generated via Gemini 2.0 Flash! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+              break;
             }
-          },
-          { 
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 60000 
           }
-        );
-        
-        if (imagenResponse.data?.predictions?.[0]?.bytesBase64Encoded) {
-          generatedImageBase64 = imagenResponse.data.predictions[0].bytesBase64Encoded;
-          console.log(`✅ [VISUALIZE] Image generated via Vertex AI! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-        } else {
-          console.log(`⚠️ [VISUALIZE] Vertex AI response:`, JSON.stringify(imagenResponse.data).substring(0, 300));
         }
-      } catch (vertexError) {
-        console.log(`⚠️ [VISUALIZE] Vertex AI Imagen failed:`, vertexError.response?.data?.error?.message || vertexError.message);
+        
+        if (!generatedImageBase64) {
+          console.log(`⚠️ [VISUALIZE] Gemini 2.0 Flash response had no image:`, JSON.stringify(geminiImageResponse.data).substring(0, 500));
+        }
+      } catch (geminiError) {
+        const errorMsg = geminiError.response?.data?.error?.message || geminiError.message;
+        console.log(`⚠️ [VISUALIZE] Gemini 2.0 Flash image generation failed:`, errorMsg);
+        
+        // If responseModalities not supported, try Imagen 3 via Generative Language API
+        if (errorMsg.includes('responseModalities') || errorMsg.includes('not supported')) {
+          console.log(`🎨 [VISUALIZE] Trying Imagen 3 via Generative Language API as fallback...`);
+          try {
+            const imagenResponse = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${geminiKey}`,
+              {
+                instances: [{ prompt: imagePrompt }],
+                parameters: {
+                  sampleCount: 1,
+                  aspectRatio: "4:3",
+                  safetyFilterLevel: "block_some"
+                }
+              },
+              { 
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 60000 
+              }
+            );
+            
+            if (imagenResponse.data?.predictions?.[0]?.bytesBase64Encoded) {
+              generatedImageBase64 = imagenResponse.data.predictions[0].bytesBase64Encoded;
+              console.log(`✅ [VISUALIZE] Image generated via Imagen 3! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+            }
+          } catch (imagenError) {
+            console.log(`⚠️ [VISUALIZE] Imagen 3 fallback failed:`, imagenError.response?.data?.error?.message || imagenError.message);
+          }
+        }
       }
     }
     
