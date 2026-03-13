@@ -240,6 +240,118 @@ const config = {
   customerEmails: new Map(),
 };
 
+// ============================================
+// 🔧 ROBUST JSON PARSER FOR AI RESPONSES
+// ============================================
+// Handles truncated/malformed JSON from Gemini API
+function robustParseAIJson(text, defaultValue = {}) {
+  if (!text) return defaultValue;
+  
+  // Strip markdown code blocks
+  let cleaned = text
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/g, '')
+    .trim();
+  
+  // Find JSON by locating first { and last }
+  const jsonStartIndex = cleaned.indexOf('{');
+  const jsonEndIndex = cleaned.lastIndexOf('}');
+  
+  if (jsonStartIndex === -1 || jsonEndIndex <= jsonStartIndex) {
+    console.log('⚠️ [JSON] No JSON object found in response');
+    return defaultValue;
+  }
+  
+  let jsonStr = cleaned.substring(jsonStartIndex, jsonEndIndex + 1);
+  
+  // === REPAIR COMMON ISSUES ===
+  
+  // 1. Fix incomplete keys: "key\n"next" -> "key": null,\n"next"
+  jsonStr = jsonStr.replace(/"([^"]+)"(\s*\n\s*")/g, '"$1": null,$2');
+  
+  // 2. Fix truncated strings (empty values): "key": "  -> "key": ""
+  jsonStr = jsonStr.replace(/":\s*"(\s*)(?=[,}\]\n])/g, '": ""');
+  
+  // 3. Fix trailing commas before } or ]
+  jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+  
+  // 4. Fix double commas
+  jsonStr = jsonStr.replace(/,\s*,/g, ',');
+  
+  // 5. Fix missing closing brackets - count and rebalance
+  const openBrackets = (jsonStr.match(/\{/g) || []).length;
+  const closeBrackets = (jsonStr.match(/\}/g) || []).length;
+  if (openBrackets > closeBrackets) {
+    jsonStr += '}'.repeat(openBrackets - closeBrackets);
+  }
+  const openSquare = (jsonStr.match(/\[/g) || []).length;
+  const closeSquare = (jsonStr.match(/\]/g) || []).length;
+  if (openSquare > closeSquare) {
+    const lastBrace = jsonStr.lastIndexOf('}');
+    const insertPos = lastBrace > 0 ? lastBrace : jsonStr.length;
+    jsonStr = jsonStr.slice(0, insertPos) + ']'.repeat(openSquare - closeSquare) + jsonStr.slice(insertPos);
+  }
+  
+  // Try to parse
+  try {
+    return JSON.parse(jsonStr);
+  } catch (parseError) {
+    console.log('⚠️ [JSON] Parse failed, extracting partial data...');
+    console.log('   Attempted JSON (first 300):', jsonStr.substring(0, 300));
+    
+    // Extract what we can with regex
+    const result = { ...defaultValue };
+    
+    // Extract arrays
+    const arrayPatterns = {
+      matchingProducts: /"matchingProducts"\s*:\s*\[([\s\S]*?)\]/,
+      searchTerms: /"searchTerms"\s*:\s*\[([\s\S]*?)\]/,
+      detectedObjects: /"detectedObjects"\s*:\s*\[([\s\S]*?)\]/,
+      labels: /"labels"\s*:\s*\[([\s\S]*?)\]/,
+      colors: /"colors"\s*:\s*\[([\s\S]*?)\]/,
+      designTips: /"designTips"\s*:\s*\[([\s\S]*?)\]/,
+      alternativeSpots: /"alternativeSpots"\s*:\s*\[([\s\S]*?)\]/
+    };
+    
+    for (const [field, pattern] of Object.entries(arrayPatterns)) {
+      const match = jsonStr.match(pattern);
+      if (match) {
+        const items = match[1].match(/"([^"]+)"/g);
+        if (items) result[field] = items.map(s => s.replace(/"/g, ''));
+      }
+    }
+    
+    // Extract string fields
+    const stringPatterns = {
+      mainObject: /"mainObject"\s*:\s*"([^"]+)"/,
+      userIntent: /"userIntent"\s*:\s*"([^"]+)"/,
+      productType: /"productType"\s*:\s*"([^"]+)"/,
+      material: /"material"\s*:\s*"([^"]+)"/,
+      roomType: /"roomType"\s*:\s*"([^"]+)"/,
+      style: /"style"\s*:\s*"([^"]+)"/,
+      suggestedPlacement: /"suggestedPlacement"\s*:\s*"([^"]+)"/,
+      visualDescription: /"visualDescription"\s*:\s*"([^"]+)"/,
+      styleMatch: /"styleMatch"\s*:\s*"([^"]+)"/
+    };
+    
+    for (const [field, pattern] of Object.entries(stringPatterns)) {
+      const match = jsonStr.match(pattern);
+      if (match) result[field] = match[1];
+    }
+    
+    // Extract confidence
+    const confMatch = jsonStr.match(/"confidence"\s*:\s*([\d.]+)/);
+    if (confMatch) result.confidence = parseFloat(confMatch[1]);
+    
+    // Extract booleans
+    const boolMatch = jsonStr.match(/"needsUserSelection"\s*:\s*(true|false)/i);
+    if (boolMatch) result.needsUserSelection = boolMatch[1].toLowerCase() === 'true';
+    
+    console.log('   Extracted:', Object.keys(result).filter(k => result[k] !== null && result[k] !== undefined).join(', '));
+    return result;
+  }
+}
+
 // Helper function to get real customer email from Shopify for public endpoints
 async function getRealCustomerEmail(customerId) {
     try {
@@ -16344,41 +16456,22 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
       if (geminiText) {
         console.log('📝 Gemini raw response:', geminiText);
         
-        // Extract JSON from response - strip markdown code fences first
-        let cleanedText = geminiText;
-        // Remove ```json and ``` markdown wrappers
-        cleanedText = cleanedText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-        // Also handle just ``` without json
-        cleanedText = cleanedText.replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+        // Use robust JSON parser to handle truncated/malformed responses
+        const analysis = robustParseAIJson(geminiText, {
+          detectedObjects: [],
+          needsUserSelection: false,
+          mainObject: null,
+          confidence: 0.8,
+          userIntent: null,
+          productType: null,
+          matchingProducts: [],
+          labels: [],
+          colors: [],
+          material: null,
+          searchTerms: []
+        });
         
-        console.log('📝 Cleaned text:', cleanedText);
-        
-        const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          let jsonStr = jsonMatch[0];
-          
-          // 🔥 FIX: Repair common JSON errors from Gemini
-          // Fix truncated strings (empty values): "key": "  -> "key": ""
-          jsonStr = jsonStr.replace(/":\s*"(\s*)(?=[,}\n])/g, '": ""');
-          // Fix trailing commas before } or ]
-          jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
-          // Fix missing closing brackets - count and rebalance
-          const openBrackets = (jsonStr.match(/\{/g) || []).length;
-          const closeBrackets = (jsonStr.match(/\}/g) || []).length;
-          if (openBrackets > closeBrackets) {
-            jsonStr += '}'.repeat(openBrackets - closeBrackets);
-          }
-          const openSquare = (jsonStr.match(/\[/g) || []).length;
-          const closeSquare = (jsonStr.match(/\]/g) || []).length;
-          if (openSquare > closeSquare) {
-            // Find position before final } to insert missing ]
-            const lastBrace = jsonStr.lastIndexOf('}');
-            const insertPos = lastBrace > 0 ? lastBrace : jsonStr.length;
-            jsonStr = jsonStr.slice(0, insertPos) + ']'.repeat(openSquare - closeSquare) + jsonStr.slice(insertPos);
-          }
-          
-          const analysis = JSON.parse(jsonStr);
-          
+        if (analysis.matchingProducts?.length > 0 || analysis.searchTerms?.length > 0) {
           console.log(`✅ Gemini analysis complete!`);
           console.log(`   Main Object: ${analysis.mainObject}`);
           console.log(`   Confidence: ${analysis.confidence}`);
@@ -16643,6 +16736,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             _debug_gemini_raw: geminiText,
             _debug_gemini_parsed: analysis
           });
+        } else {
+          console.log('⚠️ Gemini returned no useful data, falling back...');
         }
       }
       
@@ -16902,18 +16997,16 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
     if (geminiText) {
       console.log('📝 Focused Gemini response:', geminiText);
       
-      // Extract JSON from response - strip markdown code fences first
-      let cleanedText = geminiText;
-      cleanedText = cleanedText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-      cleanedText = cleanedText.replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+      // Use robust JSON parser
+      const analysis = robustParseAIJson(geminiText, {
+        focusedObject: focusOn,
+        userIntent: null,
+        productType: null,
+        matchingProducts: [],
+        searchTerms: []
+      });
       
-      console.log('📝 Cleaned text:', cleanedText);
-      
-      const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          const analysis = JSON.parse(jsonMatch[0]);
-        
+      if (analysis.matchingProducts?.length > 0 || analysis.searchTerms?.length > 0) {
         // Fetch products from Shopify with translations
         let products = [];
         if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
@@ -17011,12 +17104,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
           searchTerms: analysis.searchTerms || [],
           products: products
         });
-        } catch (parseError) {
-          console.log('❌ JSON parse error:', parseError.message);
-          console.log('❌ Raw JSON match:', jsonMatch[0]);
-        }
       } else {
-        console.log('❌ No JSON found in response');
+        console.log('⚠️ Focused analysis: No matching products found');
       }
     } else {
       console.log('❌ No text in Gemini response');
@@ -17138,26 +17227,15 @@ Respond in JSON:
       const analysisText = analysisResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       console.log(`📝 [VISUALIZE] Raw room analysis response (first 500 chars):`, analysisText.substring(0, 500));
       
-      // Extract JSON - strip markdown code blocks more aggressively
-      let jsonText = analysisText
-        .replace(/```json\s*/gi, '')
-        .replace(/```\s*/g, '')
-        .trim();
-      
-      // Find JSON by locating first { and last }
-      const jsonStartIndex = jsonText.indexOf('{');
-      const jsonEndIndex = jsonText.lastIndexOf('}');
-      
-      if (jsonStartIndex !== -1 && jsonEndIndex > jsonStartIndex) {
-        const jsonStr = jsonText.substring(jsonStartIndex, jsonEndIndex + 1);
-        roomAnalysis = JSON.parse(jsonStr);
+      // Use robust JSON parser
+      roomAnalysis = robustParseAIJson(analysisText, {});
+      if (Object.keys(roomAnalysis).length > 0) {
         console.log(`✅ [VISUALIZE] Parsed room analysis successfully`);
       } else {
         console.log(`⚠️ [VISUALIZE] No JSON found in room analysis response`);
       }
     } catch (e) {
       console.log('⚠️ [VISUALIZE] Could not parse room analysis:', e.message);
-      console.log(`📝 [VISUALIZE] Attempted to parse text starting with:`, analysisResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text?.substring(0, 200));
     }
     
     console.log(`✅ [VISUALIZE] Room analysis:`, JSON.stringify(roomAnalysis, null, 2));
@@ -17206,26 +17284,15 @@ Respond in JSON:
       const descText = descResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       console.log(`📝 [VISUALIZE] Raw visualization response (first 500 chars):`, descText.substring(0, 500));
       
-      // Extract JSON - strip markdown code blocks more aggressively
-      let jsonText = descText
-        .replace(/```json\s*/gi, '')
-        .replace(/```\s*/g, '')
-        .trim();
-      
-      // Find JSON by locating first { and last }
-      const jsonStartIndex = jsonText.indexOf('{');
-      const jsonEndIndex = jsonText.lastIndexOf('}');
-      
-      if (jsonStartIndex !== -1 && jsonEndIndex > jsonStartIndex) {
-        const jsonStr = jsonText.substring(jsonStartIndex, jsonEndIndex + 1);
-        visualization = JSON.parse(jsonStr);
+      // Use robust JSON parser
+      visualization = robustParseAIJson(descText, {});
+      if (Object.keys(visualization).length > 0) {
         console.log(`✅ [VISUALIZE] Parsed visualization successfully`);
       } else {
         console.log(`⚠️ [VISUALIZE] No JSON found in visualization response`);
       }
     } catch (e) {
       console.log('⚠️ [VISUALIZE] Could not parse visualization:', e.message);
-      console.log(`📝 [VISUALIZE] Attempted to parse text starting with:`, descResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text?.substring(0, 200));
     }
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
@@ -17247,74 +17314,93 @@ Requirements:
 - High quality, magazine-worthy composition
 - Show how the product enhances the room's aesthetic`;
     
-    // Try Gemini 2.0 Flash native image generation (uses existing GEMINI_API_KEY)
+    // Try image generation with multiple model options
     if (geminiKey && !generatedImageBase64) {
-      console.log(`🎨 [VISUALIZE] Step 3: Trying Gemini 2.0 Flash image generation...`);
+      console.log(`🎨 [VISUALIZE] Step 3: Trying image generation...`);
       console.log(`   Prompt: ${imagePrompt.substring(0, 150)}...`);
       
-      try {
-        // Use Gemini 2.0 Flash with native image generation
-        const geminiImageResponse = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${geminiKey}`,
-          {
-            contents: [{
-              parts: [{ text: imagePrompt }]
-            }],
-            generationConfig: {
-              responseModalities: ["IMAGE", "TEXT"]
-            }
-          },
-          { 
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 90000 
-          }
-        );
+      // Models to try in order (most likely to work first)
+      const imagenModels = [
+        'imagen-3.0-generate-002',
+        'imagen-3.0-generate-001', 
+        'imagen-3.0-fast-generate-001',
+        'imagegeneration@006'
+      ];
+      
+      // Try Imagen models via generateImages endpoint
+      for (const modelName of imagenModels) {
+        if (generatedImageBase64) break;
         
-        // Extract image from response
-        const candidates = geminiImageResponse.data?.candidates;
-        if (candidates && candidates[0]?.content?.parts) {
-          for (const part of candidates[0].content.parts) {
-            if (part.inlineData?.data) {
-              generatedImageBase64 = part.inlineData.data;
-              console.log(`✅ [VISUALIZE] Image generated via Gemini 2.0 Flash! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+        try {
+          console.log(`   🎨 Trying model: ${modelName}`);
+          const imagenResponse = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateImages?key=${geminiKey}`,
+            {
+              prompt: imagePrompt,
+              config: {
+                numberOfImages: 1,
+                aspectRatio: "4:3",
+                safetyFilterLevel: "BLOCK_ONLY_HIGH"
+              }
+            },
+            { 
+              headers: { 'Content-Type': 'application/json' },
+              timeout: 60000 
+            }
+          );
+          
+          // Check for image in response
+          const images = imagenResponse.data?.generatedImages || imagenResponse.data?.images;
+          if (images && images[0]) {
+            const imageData = images[0].image?.imageBytes || images[0].bytesBase64Encoded || images[0].imageBytes;
+            if (imageData) {
+              generatedImageBase64 = imageData;
+              console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
               break;
             }
           }
+        } catch (err) {
+          const msg = err.response?.data?.error?.message || err.message;
+          console.log(`   ⚠️ ${modelName}: ${msg.substring(0, 100)}`);
         }
+      }
+      
+      // Fallback: Try Gemini with native image generation (gemini-2.0-flash-preview-image-generation)
+      if (!generatedImageBase64) {
+        const geminiImageModels = ['gemini-2.0-flash-preview-image-generation', 'gemini-2.0-flash'];
         
-        if (!generatedImageBase64) {
-          console.log(`⚠️ [VISUALIZE] Gemini 2.0 Flash response had no image:`, JSON.stringify(geminiImageResponse.data).substring(0, 500));
-        }
-      } catch (geminiError) {
-        const errorMsg = geminiError.response?.data?.error?.message || geminiError.message;
-        console.log(`⚠️ [VISUALIZE] Gemini 2.0 Flash image generation failed:`, errorMsg);
-        
-        // If responseModalities not supported, try Imagen 3 via Generative Language API
-        if (errorMsg.includes('responseModalities') || errorMsg.includes('not supported')) {
-          console.log(`🎨 [VISUALIZE] Trying Imagen 3 via Generative Language API as fallback...`);
+        for (const modelName of geminiImageModels) {
+          if (generatedImageBase64) break;
+          
           try {
-            const imagenResponse = await axios.post(
-              `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${geminiKey}`,
+            console.log(`   🎨 Trying Gemini model: ${modelName}`);
+            const geminiResponse = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
               {
-                instances: [{ prompt: imagePrompt }],
-                parameters: {
-                  sampleCount: 1,
-                  aspectRatio: "4:3",
-                  safetyFilterLevel: "block_some"
+                contents: [{ parts: [{ text: `Generate an image: ${imagePrompt}` }] }],
+                generationConfig: {
+                  responseModalities: ["IMAGE", "TEXT"]
                 }
               },
               { 
                 headers: { 'Content-Type': 'application/json' },
-                timeout: 60000 
+                timeout: 90000 
               }
             );
             
-            if (imagenResponse.data?.predictions?.[0]?.bytesBase64Encoded) {
-              generatedImageBase64 = imagenResponse.data.predictions[0].bytesBase64Encoded;
-              console.log(`✅ [VISUALIZE] Image generated via Imagen 3! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+            const candidates = geminiResponse.data?.candidates;
+            if (candidates?.[0]?.content?.parts) {
+              for (const part of candidates[0].content.parts) {
+                if (part.inlineData?.data) {
+                  generatedImageBase64 = part.inlineData.data;
+                  console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+                  break;
+                }
+              }
             }
-          } catch (imagenError) {
-            console.log(`⚠️ [VISUALIZE] Imagen 3 fallback failed:`, imagenError.response?.data?.error?.message || imagenError.message);
+          } catch (err) {
+            const msg = err.response?.data?.error?.message || err.message;
+            console.log(`   ⚠️ ${modelName}: ${msg.substring(0, 100)}`);
           }
         }
       }
