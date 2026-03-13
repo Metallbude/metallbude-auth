@@ -16349,7 +16349,29 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
         
         const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
-          const analysis = JSON.parse(jsonMatch[0]);
+          let jsonStr = jsonMatch[0];
+          
+          // 🔥 FIX: Repair common JSON errors from Gemini
+          // Fix truncated strings (empty values): "key": "  -> "key": ""
+          jsonStr = jsonStr.replace(/":\s*"(\s*)(?=[,}\n])/g, '": ""');
+          // Fix trailing commas before } or ]
+          jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+          // Fix missing closing brackets - count and rebalance
+          const openBrackets = (jsonStr.match(/\{/g) || []).length;
+          const closeBrackets = (jsonStr.match(/\}/g) || []).length;
+          if (openBrackets > closeBrackets) {
+            jsonStr += '}'.repeat(openBrackets - closeBrackets);
+          }
+          const openSquare = (jsonStr.match(/\[/g) || []).length;
+          const closeSquare = (jsonStr.match(/\]/g) || []).length;
+          if (openSquare > closeSquare) {
+            // Find position before final } to insert missing ]
+            const lastBrace = jsonStr.lastIndexOf('}');
+            const insertPos = lastBrace > 0 ? lastBrace : jsonStr.length;
+            jsonStr = jsonStr.slice(0, insertPos) + ']'.repeat(openSquare - closeSquare) + jsonStr.slice(insertPos);
+          }
+          
+          const analysis = JSON.parse(jsonStr);
           
           console.log(`✅ Gemini analysis complete!`);
           console.log(`   Main Object: ${analysis.mainObject}`);
@@ -16631,18 +16653,116 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
       const labels = (response.labelAnnotations || []).map(l => l.description.toLowerCase());
       const objects = (response.localizedObjectAnnotations || []).map(o => o.name.toLowerCase());
       
-      // Smart translation for furniture terms
+      // Enhanced furniture translations for Cloud Vision fallback
       const furnitureTranslations = {
-        'chair': 'Stuhl', 'armchair': 'Sessel', 'lounge': 'Lounge',
-        'furniture': 'Möbel', 'shelf': 'Regal', 'table': 'Tisch',
-        'coat rack': 'Garderobe', 'rack': 'Regal', 'hook': 'Haken',
-        'outdoor': 'Outdoor', 'patio': 'Terrasse', 'garden': 'Garten'
+        'chair': ['Stuhl', 'Sessel', 'COSMO', 'BARNI'],
+        'office chair': ['Stuhl', 'COSMO'],
+        'armchair': ['Sessel', 'DIEGO', 'CRUZ'],
+        'lounge chair': ['Lounge', 'Sessel', 'DIEGO', 'CRUZ'],
+        'lounge': ['Lounge', 'DIEGO', 'CRUZ'],
+        'furniture': ['Möbel'],
+        'shelf': ['Regal', 'ARIS', 'THARON'],
+        'table': ['Tisch', 'RAW', 'DENYA'],
+        'side table': ['Beistelltisch', 'RAW', 'DENYA'],
+        'coffee table': ['Couchtisch', 'RAW'],
+        'coat rack': ['Garderobe', 'TAMINA'],
+        'rack': ['Regal', 'ARIS'],
+        'hook': ['Haken', 'MILO'],
+        'outdoor': ['Outdoor', 'Garten', 'DIEGO', 'CRUZ', 'LAGO'],
+        'patio': ['Terrasse', 'Garten', 'DIEGO'],
+        'garden': ['Garten', 'Outdoor', 'DIEGO', 'CRUZ'],
+        'towel rack': ['Handtuchhalter', 'STENNI', 'TENSI', 'NALI'],
+        'towel': ['Handtuch', 'STENNI', 'TENSI'],
+        'toilet paper': ['Toilettenpapierhalter', 'TUALI', 'MO'],
+        'paper towel': ['Küchenrollenhalter'],
+        'mirror': ['Spiegel', 'CALEO'],
+        'wine': ['Weinregal', 'VINIA'],
+        'planter': ['Blumenständer'],
+        'console': ['Konsole', 'RIA', 'SION'],
+        'desk': ['Schreibtisch', 'JUNO'],
+        'vase': ['Vase', 'FYONA']
       };
       
       const searchTerms = [];
+      const productNames = [];
       for (const label of [...labels, ...objects]) {
-        for (const [eng, ger] of Object.entries(furnitureTranslations)) {
-          if (label.includes(eng)) searchTerms.push(ger);
+        for (const [eng, translations] of Object.entries(furnitureTranslations)) {
+          if (label.includes(eng)) {
+            searchTerms.push(...translations);
+            // Also track product names for direct search
+            translations.forEach(t => {
+              if (t === t.toUpperCase()) productNames.push(t);
+            });
+          }
+        }
+      }
+      
+      // 🔥 NEW: Do a Shopify search with Cloud Vision results
+      let products = [];
+      if (productNames.length > 0 || searchTerms.length > 0) {
+        try {
+          const searchQuery = productNames.length > 0 
+            ? productNames.join(' OR ')
+            : [...new Set(searchTerms)].slice(0, 3).join(' OR ');
+            
+          console.log(`🔍 [Cloud Vision Fallback] Searching Shopify: "${searchQuery}"`);
+          
+          const shopifyQuery = `
+            query SearchProducts($query: String!) {
+              products(first: 10, query: $query) {
+                edges {
+                  node {
+                    id
+                    handle
+                    title
+                    description
+                    productType
+                    priceRange {
+                      minVariantPrice { amount currencyCode }
+                    }
+                    featuredImage { url }
+                    images(first: 3) { edges { node { url } } }
+                    variants(first: 1) {
+                      edges {
+                        node { availableForSale }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `;
+          
+          const shopifyResponse = await axios.post(
+            `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2024-01/graphql.json`,
+            { query: shopifyQuery, variables: { query: searchQuery } },
+            {
+              headers: {
+                'X-Shopify-Storefront-Access-Token': process.env.SHOPIFY_STOREFRONT_ACCESS_TOKEN,
+                'Content-Type': 'application/json'
+              },
+              timeout: 15000
+            }
+          );
+          
+          const shopifyProducts = shopifyResponse.data?.data?.products?.edges || [];
+          products = shopifyProducts.map(({ node: product }) => ({
+            id: product.id,
+            handle: product.handle,
+            title: product.title,
+            description: product.description,
+            productType: product.productType,
+            price: product.priceRange?.minVariantPrice?.amount,
+            currency: product.priceRange?.minVariantPrice?.currencyCode,
+            image: product.featuredImage?.url,
+            images: (product.images?.edges || []).map(e => e.node.url),
+            available: product.variants?.edges?.[0]?.node?.availableForSale,
+            relevanceScore: 0.6 // Lower score for Cloud Vision fallback
+          }));
+          
+          console.log(`✅ [Cloud Vision Fallback] Found ${products.length} products`);
+        } catch (shopifyError) {
+          console.log(`⚠️ [Cloud Vision Fallback] Shopify search failed:`, shopifyError.message);
         }
       }
       
@@ -16653,6 +16773,7 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
         style: 'modern',
         confidence: 0.5,
         searchTerms: [...new Set(searchTerms)].slice(0, 8),
+        products, // 🔥 Include products from Cloud Vision fallback
         _debug_source: 'Cloud Vision (Gemini not available)'
       });
     
@@ -16927,7 +17048,7 @@ Respond in JSON format:
 }`;
 
     const analysisResponse = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
       {
         contents: [{
           parts: [
@@ -16975,7 +17096,7 @@ Respond in JSON:
 }`;
 
     const descResponse = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
       {
         contents: [{
           parts: [
@@ -17009,38 +17130,35 @@ Respond in JSON:
     try {
       console.log(`🖼️ [VISUALIZE] Step 3: Attempting image generation...`);
       
-      // Use Gemini 2.0 with image generation capability
+      // Use Imagen 3 for image generation
       const imageGenResponse = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${geminiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${geminiKey}`,
         {
-          contents: [{
-            parts: [{
-              text: `Generate a photorealistic interior design image showing a minimalist metal "${productTitle}" placed in a ${roomAnalysis.roomType || 'modern room'}. 
+          instances: [{
+            prompt: `Photorealistic interior design photo showing a minimalist metal "${productTitle}" placed in a ${roomAnalysis.roomType || 'modern room'}. 
               
 Style: ${roomAnalysis.style || 'modern minimalist'}
 Placement: ${roomAnalysis.suggestedPlacement || 'appropriate location'}
 Color scheme: ${(roomAnalysis.colorPalette || ['neutral']).join(', ')}
 Lighting: ${roomAnalysis.lighting || 'natural light'}
 
-The product should be a sleek, minimalist metal piece that fits naturally in the space. Make it look like a high-quality interior design photo.`
-            }]
+The product should be a sleek, minimalist metal piece that fits naturally in the space. High-quality interior design photography style.`
           }],
-          generationConfig: {
-            responseModalities: ['image', 'text'],
-            responseMimeType: 'image/jpeg'
+          parameters: {
+            sampleCount: 1,
+            aspectRatio: '16:9'
           }
         },
         { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
       );
       
-      // Check if we got an image back
-      const parts = imageGenResponse.data?.candidates?.[0]?.content?.parts || [];
-      for (const part of parts) {
-        if (part.inlineData?.data) {
-          generatedImageBase64 = part.inlineData.data;
-          console.log(`✅ [VISUALIZE] Image generated! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-          break;
-        }
+      // Check if we got an image back - Imagen 3 returns predictions array
+      const predictions = imageGenResponse.data?.predictions || [];
+      if (predictions.length > 0 && predictions[0].bytesBase64Encoded) {
+        generatedImageBase64 = predictions[0].bytesBase64Encoded;
+        console.log(`✅ [VISUALIZE] Image generated! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+      } else {
+        console.log(`⚠️ [VISUALIZE] No image in response:`, JSON.stringify(imageGenResponse.data).substring(0, 200));
       }
       
     } catch (imageError) {
