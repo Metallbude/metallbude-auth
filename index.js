@@ -17062,7 +17062,10 @@ app.post('/ai/visualize-room', async (req, res) => {
     console.log(`   Product: ${productTitle} (${productHandle})`);
     console.log(`   Customer: ${customerId || 'anonymous'}`);
     console.log(`   Room image size: ${(roomImage.length / 1024).toFixed(1)} KB`);
-    console.log(`   Product images: ${productImages?.length || 0}`);
+    console.log(`   Product images received: ${productImages?.length || 0}`);
+    if (productImages && productImages.length > 0) {
+      productImages.forEach((url, i) => console.log(`   📸 Product URL ${i}: ${url?.substring(0, 80)}...`));
+    }
     
     // Build parts array with room image AND product images
     const imageParts = [
@@ -17091,7 +17094,7 @@ app.post('/ai/visualize-room', async (req, res) => {
     }
     
     // Step 1: Analyze the room AND product together
-    console.log(`🔍 [VISUALIZE] Step 1: Analyzing room with product images...`);
+    console.log(`🔍 [VISUALIZE] Step 1: Analyzing room with ${imageParts.length} images (1 room + ${imageParts.length - 1} product)...`);
     
     const roomAnalysisPrompt = `You are an interior design AI. I'm showing you:
 1. FIRST IMAGE: A room photo where the user wants to place a product
@@ -17135,23 +17138,26 @@ Respond in JSON:
       const analysisText = analysisResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       console.log(`📝 [VISUALIZE] Raw room analysis response (first 500 chars):`, analysisText.substring(0, 500));
       
-      // Extract JSON - handle markdown code blocks
-      let jsonText = analysisText;
-      // Remove markdown code blocks if present
-      const codeBlockMatch = analysisText.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (codeBlockMatch) {
-        jsonText = codeBlockMatch[1].trim();
-      }
-      // Find the JSON object
-      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        roomAnalysis = JSON.parse(jsonMatch[0]);
+      // Extract JSON - strip markdown code blocks more aggressively
+      let jsonText = analysisText
+        .replace(/```json\s*/gi, '')
+        .replace(/```\s*/g, '')
+        .trim();
+      
+      // Find JSON by locating first { and last }
+      const jsonStartIndex = jsonText.indexOf('{');
+      const jsonEndIndex = jsonText.lastIndexOf('}');
+      
+      if (jsonStartIndex !== -1 && jsonEndIndex > jsonStartIndex) {
+        const jsonStr = jsonText.substring(jsonStartIndex, jsonEndIndex + 1);
+        roomAnalysis = JSON.parse(jsonStr);
         console.log(`✅ [VISUALIZE] Parsed room analysis successfully`);
       } else {
         console.log(`⚠️ [VISUALIZE] No JSON found in room analysis response`);
       }
     } catch (e) {
       console.log('⚠️ [VISUALIZE] Could not parse room analysis:', e.message);
+      console.log(`📝 [VISUALIZE] Attempted to parse text starting with:`, analysisResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text?.substring(0, 200));
     }
     
     console.log(`✅ [VISUALIZE] Room analysis:`, JSON.stringify(roomAnalysis, null, 2));
@@ -17200,21 +17206,26 @@ Respond in JSON:
       const descText = descResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       console.log(`📝 [VISUALIZE] Raw visualization response (first 500 chars):`, descText.substring(0, 500));
       
-      // Extract JSON - handle markdown code blocks
-      let jsonText = descText;
-      const codeBlockMatch = descText.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (codeBlockMatch) {
-        jsonText = codeBlockMatch[1].trim();
-      }
-      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        visualization = JSON.parse(jsonMatch[0]);
+      // Extract JSON - strip markdown code blocks more aggressively
+      let jsonText = descText
+        .replace(/```json\s*/gi, '')
+        .replace(/```\s*/g, '')
+        .trim();
+      
+      // Find JSON by locating first { and last }
+      const jsonStartIndex = jsonText.indexOf('{');
+      const jsonEndIndex = jsonText.lastIndexOf('}');
+      
+      if (jsonStartIndex !== -1 && jsonEndIndex > jsonStartIndex) {
+        const jsonStr = jsonText.substring(jsonStartIndex, jsonEndIndex + 1);
+        visualization = JSON.parse(jsonStr);
         console.log(`✅ [VISUALIZE] Parsed visualization successfully`);
       } else {
         console.log(`⚠️ [VISUALIZE] No JSON found in visualization response`);
       }
     } catch (e) {
       console.log('⚠️ [VISUALIZE] Could not parse visualization:', e.message);
+      console.log(`📝 [VISUALIZE] Attempted to parse text starting with:`, descResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text?.substring(0, 200));
     }
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
