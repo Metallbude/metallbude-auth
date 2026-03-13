@@ -16464,27 +16464,34 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
                     // Calculate relevance score - start at 0!
                     let score = 0;
                     const titleLower = product.title.toLowerCase();
+                    const titleWords = titleLower.split(/[\s\-_]+/);  // Split title into words
                     
-                    // ONLY include if title contains a matching product name
+                    // STRICT: ONLY include if title contains EXACT product name from matchingProducts
+                    // This must be a word boundary match, not substring
                     let isRelevant = false;
+                    let matchedProductName = null;
                     for (const mp of (analysis.matchingProducts || [])) {
-                      if (titleLower.includes(mp.toLowerCase())) {
-                        score += 0.7;
+                      const mpLower = mp.toLowerCase();
+                      // Check for word boundary match (not substring)
+                      // "TUALI" should match "TUALI Black" but not "ITUAL"
+                      const wordMatch = titleWords.some(word => word === mpLower);
+                      const containsMatch = titleLower.includes(mpLower) && mpLower.length >= 2;
+                      
+                      if (wordMatch || containsMatch) {
+                        score += 0.9;
                         isRelevant = true;
+                        matchedProductName = mp;
+                        console.log(`✅ Product "${product.title}" matches "${mp}" (word: ${wordMatch}, contains: ${containsMatch})`);
+                        break;
                       }
                     }
                     
-                    // Also check product type match
-                    if (analysis.productType && 
-                        (titleLower.includes(analysis.productType.toLowerCase()) ||
-                         product.productType?.toLowerCase().includes(analysis.productType.toLowerCase()))) {
-                      score += 0.2;
-                      isRelevant = true;
-                    }
+                    // DO NOT use productType matching - it's too broad and returns irrelevant products!
+                    // The matchingProducts array should be the ONLY source of truth
                     
                     // Skip completely irrelevant products
                     if (!isRelevant) {
-                      console.log(`⏭️ Skipping irrelevant: ${product.title}`);
+                      console.log(`⏭️ Skipping irrelevant: "${product.title}" - no match in [${(analysis.matchingProducts || []).join(', ')}]`);
                       continue;
                     }
                     
@@ -16521,7 +16528,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
             products.sort((a, b) => b.relevanceScore - a.relevanceScore);
             products = products.slice(0, 15); // Top 15 results
             
-            console.log(`📦 Found ${products.length} products from Shopify`);
+            console.log(`📦 Found ${products.length} products from Shopify:`);
+            products.forEach((p, i) => console.log(`   ${i + 1}. ${p.title} (score: ${p.relevanceScore.toFixed(2)})`));
             
           } catch (shopifyError) {
             console.log('⚠️ Shopify product fetch failed:', shopifyError.message);
@@ -16768,6 +16776,28 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
               const edges = shopifyResponse.data?.data?.products?.edges || [];
               for (const edge of edges) {
                 const p = edge.node;
+                const titleLower = p.title.toLowerCase();
+                
+                // STRICT FILTERING: Only include if title matches a product name
+                let isRelevant = false;
+                for (const mp of analysis.matchingProducts) {
+                  if (titleLower.includes(mp.toLowerCase())) {
+                    isRelevant = true;
+                    console.log(`✅ Focused: "${p.title}" matches "${mp}"`);
+                    break;
+                  }
+                }
+                
+                if (!isRelevant) {
+                  console.log(`⏭️ Focused: Skipping irrelevant "${p.title}"`);
+                  continue;
+                }
+                
+                // Avoid duplicates
+                if (products.some(existing => existing.id === p.id)) {
+                  continue;
+                }
+                
                 products.push({
                   id: p.id,
                   handle: p.handle,
@@ -16783,6 +16813,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
               console.log(`Search for ${productName} failed:`, e.message);
             }
           }
+          
+          console.log(`📦 Focused analysis: Found ${products.length} relevant products`);
         }
         
         return res.json({
