@@ -16308,7 +16308,9 @@ EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
   "colors": ["white", "weiß", "brown", "braun"],
   "material": "Ceramic/Fabric",
   "searchTerms": ["KIVA", "Untersetzer", "coaster", "dessous de verre", "sottobicchiere"]
-}`
+}
+
+CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brackets are closed.`
               },
               {
                 inlineData: {
@@ -16320,7 +16322,7 @@ EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 1000
+            maxOutputTokens: 2000
           }
         },
         {
