@@ -17261,8 +17261,7 @@ Requirements:
               parts: [{ text: imagePrompt }]
             }],
             generationConfig: {
-              responseModalities: ["IMAGE", "TEXT"],
-              responseMimeType: "image/jpeg"
+              responseModalities: ["IMAGE", "TEXT"]
             }
           },
           { 
