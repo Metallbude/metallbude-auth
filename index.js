@@ -16113,9 +16113,9 @@ app.post('/ai/analyze-image', async (req, res) => {
       console.log('🔍 Analyzing image with Google Gemini AI...');
     
       try {
-        // Use Gemini 1.5 Flash for fast, accurate furniture recognition
+        // Use Gemini 2.0 Flash for fast, accurate furniture recognition
         const geminiResponse = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
         {
           contents: [{
             parts: [
@@ -16125,11 +16125,16 @@ app.post('/ai/analyze-image', async (req, res) => {
 === YOUR MAIN TASK ===
 The user photographs something to find a matching Metallbude product.
 
-=== CRITICAL THINKING LOGIC ===
+=== STEP 1: DETECT ALL OBJECTS ===
+First, identify ALL distinct objects visible in the image.
+List every item you can see clearly (furniture, household items, accessories, etc.)
 
-STEP 1: Identify what's in the photo (the main object in center/foreground)
+=== STEP 2: DETERMINE IF CLARIFICATION NEEDED ===
+If you detect MULTIPLE distinct objects (more than 1), set needsUserSelection: true
+The app will then ask the user which object they want to search for.
 
-STEP 2: Determine user intent using this logic:
+=== STEP 3: FOR THE MAIN OBJECT ===
+Determine user intent using this logic:
 
   IF the photo shows FURNITURE (chair, table, shelf, etc.)
   → User wants SIMILAR furniture from Metallbude
@@ -16147,7 +16152,7 @@ STEP 2: Determine user intent using this logic:
   - Small objects → tray, organizer, shelf
   - Baby → cradle, moses basket
 
-STEP 3: Find matching Metallbude products from the catalog below
+=== STEP 4: Find matching Metallbude products from the catalog below ===
 
 === COMPLETE METALLBUDE PRODUCT CATALOG ===
 
@@ -16236,7 +16241,9 @@ Black/Schwarz/Noir/Nero, White/Weiß/Blanc/Bianco, Cashew/Cashew/Noix de cajou/A
 Respond ONLY with JSON:
 
 {
-  "mainObject": "Description of the MAIN OBJECT",
+  "detectedObjects": ["cup", "coaster", "towel"],
+  "needsUserSelection": true,
+  "mainObject": "Description of the MAIN OBJECT (largest/center)",
   "confidence": 0.0-1.0,
   "userIntent": "What is the user looking for?",
   "productType": "Metallbude category",
@@ -16247,14 +16254,21 @@ Respond ONLY with JSON:
   "searchTerms": ["15-20 search terms in DE, EN, FR, IT that will match Metallbude products"]
 }
 
+IMPORTANT:
+- detectedObjects: List ALL distinct objects you can see in the image
+- needsUserSelection: Set to true if more than 1 object detected, false if only 1 clear object
+- If needsUserSelection is true, still fill in mainObject etc. for the most prominent object
+
 IMPORTANT for searchTerms:
 - Include product names (DIEGO, CRUZ, COSMO, etc.)
 - Include category in ALL 4 LANGUAGES (Sessel, chair, fauteuil, poltrona)
 - Include colors in all languages (schwarz, black, noir, nero)
 - Include style terms (industrial, minimalist, modern)
 
-EXAMPLE 1 - User photographs FURNITURE (find similar):
+EXAMPLE 1 - SINGLE OBJECT (no selection needed):
 {
+  "detectedObjects": ["outdoor lounge chair"],
+  "needsUserSelection": false,
   "mainObject": "Black outdoor lounge chair with metal frame and cushion",
   "confidence": 0.95,
   "userIntent": "Looking for similar outdoor seating furniture",
@@ -16266,8 +16280,10 @@ EXAMPLE 1 - User photographs FURNITURE (find similar):
   "searchTerms": ["DIEGO", "CRUZ", "Lounge", "Sessel", "chair", "fauteuil", "poltrona", "Outdoor", "extérieur", "esterno", "Garten", "garden", "jardin", "giardino", "schwarz", "black", "noir", "nero", "Metall", "metal", "métal", "metallo"]
 }
 
-EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
+EXAMPLE 2 - SINGLE ITEM (find holder/storage for it):
 {
+  "detectedObjects": ["toilet paper roll"],
+  "needsUserSelection": false,
   "mainObject": "Toilet paper roll",
   "confidence": 0.95,
   "userIntent": "Looking for a holder to store/display this item",
@@ -16277,6 +16293,21 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
   "colors": ["white", "weiß", "blanc", "bianco"],
   "material": "Paper",
   "searchTerms": ["TUALI", "MO", "Toilettenpapierhalter", "toilet paper holder", "porte-papier toilette", "portarotolo", "Bad", "bathroom", "salle de bain", "bagno", "WC", "Toilette", "minimalist", "Metall", "metal"]
+}
+
+EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
+{
+  "detectedObjects": ["coffee cup", "coaster", "towel", "table"],
+  "needsUserSelection": true,
+  "mainObject": "Coffee cup on a coaster",
+  "confidence": 0.7,
+  "userIntent": "Multiple objects detected - user should specify which one",
+  "productType": "Coaster",
+  "matchingProducts": ["KIVA"],
+  "labels": ["cup", "coaster", "towel", "table", "kitchen"],
+  "colors": ["white", "weiß", "brown", "braun"],
+  "material": "Ceramic/Fabric",
+  "searchTerms": ["KIVA", "Untersetzer", "coaster", "dessous de verre", "sottobicchiere"]
 }`
               },
               {
@@ -16289,7 +16320,7 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 800
+            maxOutputTokens: 1000
           }
         },
         {
@@ -16483,6 +16514,10 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
           allSearchTerms = [...new Set(allSearchTerms.filter(t => t && t.trim()))];
           
           return res.json({
+            // NEW: Multi-object detection
+            detectedObjects: analysis.detectedObjects || [],
+            needsUserSelection: analysis.needsUserSelection || false,
+            // Existing fields
             labels: analysis.labels || [],
             colors: analysis.colors || [],
             objects: [analysis.mainObject || analysis.productType],
@@ -16493,7 +16528,7 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
             matchingProducts: analysis.matchingProducts || [],
             mainObject: analysis.mainObject,
             userIntent: analysis.userIntent,
-            // NEW: Actual products from Shopify
+            // Actual products from Shopify
             products: products,
             // DEBUG: Raw Gemini response for testing
             _debug_gemini_raw: geminiText,
@@ -16567,6 +16602,169 @@ EXAMPLE 2 - User photographs an ITEM (find holder/storage for it):
       error: 'Image analysis failed',
       details: error.message 
     });
+  }
+});
+
+/**
+ * AI Visual Search - Analyze specific object selected by user
+ * Called when user picks "cup" from multiple detected objects
+ */
+app.post('/ai/analyze-selected-object', async (req, res) => {
+  try {
+    const { image, selectedObject, customQuery } = req.body;
+    
+    if (!image) {
+      return res.status(400).json({ error: 'No image provided' });
+    }
+    
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      return res.status(500).json({ error: 'Gemini API not configured' });
+    }
+    
+    // Determine what the user wants to focus on
+    const focusOn = customQuery || selectedObject;
+    console.log(`🎯 User selected to focus on: "${focusOn}"`);
+    
+    const geminiResponse = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      {
+        contents: [{
+          parts: [
+            {
+              text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture.
+
+The user has selected to focus on: "${focusOn}"
+
+Your task: Find Metallbude products related to this item.
+
+IF "${focusOn}" is FURNITURE → Find similar furniture
+IF "${focusOn}" is an ITEM → Find a Metallbude product to HOLD, STORE, or DISPLAY it
+
+Metallbude Product Categories:
+- Towel holders: VANA, TENSI, NALI, STENNI, MILO, DELAYA, ESTINA
+- Toilet paper holders: TUALI, MO
+- Coat racks: TAMINA, MALOU, RUBI, ENIO
+- Shoe racks: NEVA, BOVI, CAMO
+- Shelves: THARON, LENN, LINARA, ARIS, RAW L, RIVO
+- Tables: COSMO, CIRO, CUT, RAW C, LAGO, NELIO, DAMIO
+- Outdoor seating: DIEGO, CRUZ
+- Trays: DAVA, CUT, RAW T, SIVA
+- Coasters: KIVA
+- Kitchen: IVANA (paper towel), NIA (dish towel)
+- Wine rack: VINIA
+- Bookends: DARCY
+
+Respond with JSON:
+{
+  "focusedObject": "${focusOn}",
+  "userIntent": "What Metallbude product would help with this",
+  "productType": "Category name",
+  "matchingProducts": ["PRODUCT1", "PRODUCT2"],
+  "searchTerms": ["search", "terms", "in", "DE", "EN", "FR", "IT"]
+}`
+            },
+            {
+              inlineData: {
+                mimeType: 'image/jpeg',
+                data: image
+              }
+            }
+          ]
+        }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 500
+        }
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    );
+    
+    const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (geminiText) {
+      console.log('📝 Focused Gemini response:', geminiText);
+      
+      const jsonMatch = geminiText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const analysis = JSON.parse(jsonMatch[0]);
+        
+        // Fetch products from Shopify
+        let products = [];
+        if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
+          const shopifyQuery = `
+            query searchProducts($query: String!) {
+              products(first: 15, query: $query, sortKey: RELEVANCE) {
+                edges {
+                  node {
+                    id
+                    title
+                    handle
+                    description
+                    productType
+                    priceRange { minVariantPrice { amount currencyCode } }
+                    featuredImage { url }
+                    variants(first: 1) { edges { node { availableForSale } } }
+                  }
+                }
+              }
+            }
+          `;
+          
+          for (const productName of analysis.matchingProducts.slice(0, 3)) {
+            try {
+              const shopifyResponse = await axios.post(
+                config.adminApiUrl,
+                { query: shopifyQuery, variables: { query: `title:*${productName}*` } },
+                {
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'X-Shopify-Storefront-Access-Token': config.storefrontToken
+                  },
+                  timeout: 10000
+                }
+              );
+              
+              const edges = shopifyResponse.data?.data?.products?.edges || [];
+              for (const edge of edges) {
+                const p = edge.node;
+                products.push({
+                  id: p.id,
+                  handle: p.handle,
+                  title: p.title,
+                  price: p.priceRange?.minVariantPrice?.amount,
+                  currency: p.priceRange?.minVariantPrice?.currencyCode,
+                  image: p.featuredImage?.url,
+                  available: p.variants?.edges?.[0]?.node?.availableForSale,
+                  relevanceScore: 0.9
+                });
+              }
+            } catch (e) {
+              console.log(`Search for ${productName} failed:`, e.message);
+            }
+          }
+        }
+        
+        return res.json({
+          focusedObject: focusOn,
+          needsUserSelection: false,
+          productType: analysis.productType,
+          matchingProducts: analysis.matchingProducts || [],
+          userIntent: analysis.userIntent,
+          searchTerms: analysis.searchTerms || [],
+          products: products
+        });
+      }
+    }
+    
+    return res.status(500).json({ error: 'Could not analyze selected object' });
+    
+  } catch (error) {
+    console.error('❌ Focused analysis error:', error.message);
+    res.status(500).json({ error: 'Analysis failed', details: error.message });
   }
 });
 
