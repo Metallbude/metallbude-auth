@@ -17355,45 +17355,52 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Step 3: IMAGE EDITING - Take user's room photo and ADD the EXACT product into it
-    // This is NOT generation from scratch - we want the EXACT product composited!
+    // Step 3: TRUE IMAGE COMPOSITING
+    // We need to EXTRACT the exact product pixels and PASTE them onto the room
     let generatedImageBase64 = null;
     
-    // Build the editing prompt - PRODUCT IMAGES FIRST so AI focuses on them!
     const numProductImages = productImageParts.length;
-    const imageEditPrompt = `CRITICAL TASK: Composite the EXACT product into the room photo.
-
-📦 PRODUCT IMAGES (Images 1-${numProductImages}): These ${numProductImages} images show the EXACT "${productTitle}" product from different angles. Study these carefully - you MUST reproduce this EXACT product!
-
-🏠 ROOM IMAGE (Image ${numProductImages + 1}): This is the customer's room where the product needs to be placed.
-
-YOUR TASK:
-1. STUDY the product images carefully - note the EXACT:
-   - Shape and form
-   - Color (appears to be matte black metal)
-   - Material texture
-   - Size proportions
-   - Design details
-2. Take the ROOM IMAGE as your canvas
-3. Place the EXACT product from the product images INTO the room
-4. Position: ${roomAnalysis.suggestedPlacement || 'appropriate location on the wall'}
-
-⚠️ CRITICAL - DO NOT:
-- Invent or imagine a different product
-- Change the product's color, shape, or design
-- Generate a generic toilet paper holder
-- Create a completely new room
-
-✅ YOU MUST:
-- Copy the EXACT visual appearance from the product images
-- Keep the room EXACTLY as shown (same walls, colors, fixtures)
-- Only ADD the product - don't remove or change anything else
-- Match lighting and perspective realistically
-- The product should look like it was professionally photographed in this room
-
-OUTPUT: The customer's original room photo with the EXACT "${productTitle}" product (as shown in the product images) placed in it.`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: IMAGE EDITING - Adding EXACT product to room photo...`);
+    // Use a very specific "cut and paste" prompt that emphasizes pixel-level copying
+    const imageEditPrompt = `You are an image compositing tool. Your task is to CUT OUT the product from the product image and PASTE it into the room image.
+
+=== IMAGES PROVIDED ===
+IMAGE 1 (Product Photo): This shows the "${productTitle}" on a WHITE/LIGHT BACKGROUND. 
+- The product has a distinct shape that can be cleanly extracted
+- EXTRACT this exact product - every pixel, every detail, exact colors
+
+IMAGE 2 (Room Photo): This is where the extracted product must be placed.
+
+=== YOUR EXACT TASK ===
+Think of this like Photoshop:
+1. SELECT the product in Image 1 (it's on a white/light background, so the edges are clear)
+2. CUT the product out (remove the background)
+3. PASTE the exact product pixels into Image 2 (the room)
+4. POSITION it at: ${roomAnalysis.suggestedPlacement || 'a suitable wall location'}
+5. SCALE appropriately for the room
+6. BLEND edges naturally with soft shadows
+
+=== CRITICAL RULES ===
+❌ DO NOT re-draw or re-imagine the product
+❌ DO NOT generate a "similar" product  
+❌ DO NOT change colors (if it's black, keep it black)
+❌ DO NOT change the shape or design
+❌ DO NOT change the room (keep walls, colors, everything identical)
+
+✅ DO copy the EXACT product appearance from Image 1
+✅ DO preserve every visual detail of the product
+✅ DO keep the room photo exactly the same except for the added product
+✅ DO add realistic shadows where the product meets the wall
+
+=== THINK STEP BY STEP ===
+1. "I can see the product in Image 1 - it's a [describe exact appearance]"
+2. "I will extract just the product pixels, removing the white background"
+3. "I will paste these exact pixels into the room at [location]"
+4. "I will add natural shadows to blend it in"
+
+OUTPUT: The room from Image 2 with the EXACT product from Image 1 composited into it.`;
+    
+    console.log(`🎨 [VISUALIZE] Step 3: TRUE COMPOSITING - Cut product + paste into room...`);
     console.log(`   Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
     console.log(`   Product images: ${numProductImages}`);
     
@@ -17408,17 +17415,19 @@ OUTPUT: The customer's original room photo with the EXACT "${productTitle}" prod
       if (generatedImageBase64) break;
       
       try {
-        console.log(`   🖼️ Trying image edit with: ${modelName}`);
+        console.log(`   🖼️ Trying compositing with: ${modelName}`);
         
-        // Build parts: text prompt, then PRODUCT IMAGES FIRST, then room image
-        // Putting product images first helps the model focus on them!
+        // IMPORTANT: Send only the FIRST (best) product image + room
+        // Multiple product images can confuse the model
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
+        const firstProductImage = productImageParts[0];  // Just the first/best product image
+        
         const editParts = [
           { text: imageEditPrompt },
-          ...productImageParts,  // Product images FIRST - so AI studies the exact product
-          roomImagePart          // Room image LAST - this is the canvas to edit
+          firstProductImage,     // Product image FIRST (Image 1 in prompt)
+          roomImagePart          // Room image SECOND (Image 2 in prompt)
         ];
-        console.log(`   📤 Sending: ${productImageParts.length} product images + 1 room image`);
+        console.log(`   📤 Sending: 1 product image + 1 room image (simplified for accuracy)`);
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
