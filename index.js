@@ -17355,30 +17355,33 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Step 3: TRUE IMAGE COMPOSITING
-    // ROOM = customer's uploaded photo (KEEP THIS AS BACKGROUND)
-    // PRODUCT = Shopify product image (EXTRACT THIS AND ADD TO ROOM)
+    // Step 3: IMAGE EDITING - SINGLE IMAGE APPROACH
+    // Problem: When sending 2 images, AI keeps picking the wrong one as background
+    // Solution: Send ONLY the room image, describe the product via text
     let generatedImageBase64 = null;
     
     const numProductImages = productImageParts.length;
     
-    // REVERSE PSYCHOLOGY: AI keeps doing opposite, so ask for opposite
-    // We WANT: Room with product in it
-    // AI KEEPS GIVING: Product image with room furniture
-    // So ASK FOR: "Edit the product image" and maybe AI gives us the room!
-    const imageEditPrompt = `I have two images:
-- IMAGE 1: A product photo of "${productTitle}" on a white/studio background  
-- IMAGE 2: A customer's room photo
-
-Take the "${productTitle}" from IMAGE 1 and place it naturally into the room shown in IMAGE 2.
-
-The output should show the customer's room (from IMAGE 2) with "${productTitle}" placed inside it, replacing any similar existing furniture.
-
-Keep the room exactly as it is - same walls, floor, lighting. Only add the product from IMAGE 1 into that space.`;
+    // Get product description from the visualization or product title
+    const productDescription = visualization.visualDescription || 
+      `${productTitle} - a modern furniture piece from Metallbude`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: Place product into room...`);
-    console.log(`   🏪 IMAGE 1 (Product): ${numProductImages > 0 ? (productImageParts[0]?.inlineData?.data?.length / 1024).toFixed(1) + ' KB' : 'none'}`);
-    console.log(`   🏠 IMAGE 2 (Room): ${(roomImage.length / 1024).toFixed(1)} KB`);
+    // SINGLE IMAGE APPROACH: Only send the room, describe product in text
+    const imageEditPrompt = `This is a customer's room photo. 
+
+Add a "${productTitle}" to this room. The product is a piece of furniture from the Metallbude store.
+
+TASK:
+- Keep the room EXACTLY as it is (same walls, floor, lighting, perspective)
+- Find any existing similar furniture (like a ${roomAnalysis.roomType?.includes('Kitchen') ? 'bar stool or chair' : 'furniture piece'}) and REPLACE it with "${productTitle}"
+- If no similar furniture exists, ADD the product in an appropriate location
+- Make the product look like a natural part of the room with proper lighting and shadows
+
+OUTPUT: The same room photo, edited to include "${productTitle}"`;
+    
+    console.log(`🎨 [VISUALIZE] Step 3: Add product to room (single-image approach)...`);
+    console.log(`   🏠 Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
+    console.log(`   📝 Product: "${productTitle}" (described via text)`);
     
     // Models that support image editing via Generative Language API
     const imageModels = [
@@ -17391,19 +17394,16 @@ Keep the room exactly as it is - same walls, floor, lighting. Only add the produ
       if (generatedImageBase64) break;
       
       try {
-        console.log(`   🖼️ Trying compositing with: ${modelName}`);
+        console.log(`   🖼️ Trying with: ${modelName}`);
         
-        // PRODUCT FIRST (IMAGE 1), ROOM SECOND (IMAGE 2)
-        // Prompt says: Take product from IMAGE 1, place into room from IMAGE 2
+        // ONLY send the room image - product is described in text
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
-        const firstProductImage = productImageParts[0];
         
         const editParts = [
           { text: imageEditPrompt },
-          firstProductImage,     // IMAGE 1: Product (source to extract)
-          roomImagePart          // IMAGE 2: Room (destination)
+          roomImagePart          // ONLY the room image - no product image!
         ];
-        console.log(`   📤 Sending: IMAGE 1=Product, IMAGE 2=Room - "place product into room"`);
+        console.log(`   📤 Sending ONLY room image - product described via text`);
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
