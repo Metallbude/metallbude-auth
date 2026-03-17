@@ -324,31 +324,33 @@ function robustParseAIJson(text, defaultValue = {}) {
 function extractFieldsFromText(text, defaultValue = {}) {
   const result = { ...defaultValue };
   
-  // Extract arrays - use greedy matching up to ] or end of line
-  const arrayPatterns = {
-    matchingProducts: /"matchingProducts"\s*:\s*\[([^\]]*)/,
-    searchTerms: /"searchTerms"\s*:\s*\[([^\]]*)/,
-    detectedObjects: /"detectedObjects"\s*:\s*\[([^\]]*)/,
-    labels: /"labels"\s*:\s*\[([^\]]*)/,
-    colors: /"colors"\s*:\s*\[([^\]]*)/,
-    designTips: /"designTips"\s*:\s*\[([^\]]*)/,
-    alternativeSpots: /"alternativeSpots"\s*:\s*\[([^\]]*)/
-  };
+  // For arrays, we need to find the full array content including newlines
+  const arrayFields = ['matchingProducts', 'searchTerms', 'detectedObjects', 'labels', 'colors', 'designTips', 'alternativeSpots'];
   
-  for (const [field, pattern] of Object.entries(arrayPatterns)) {
-    const match = text.match(pattern);
+  for (const field of arrayFields) {
+    // Match array with content including newlines - use [\s\S]*? for non-greedy match
+    const regex = new RegExp(`"${field}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'i');
+    const match = text.match(regex);
     if (match && match[1]) {
-      // Extract quoted strings from the array content
-      const items = match[1].match(/"([^"]+)"/g);
-      if (items && items.length > 0) {
-        result[field] = items.map(s => s.replace(/"/g, ''));
-        console.log(`   ✅ Extracted ${field}: [${result[field].join(', ')}]`);
+      // Extract all quoted strings from the array content
+      const items = [];
+      const itemRegex = /"([^"]+)"/g;
+      let itemMatch;
+      while ((itemMatch = itemRegex.exec(match[1])) !== null) {
+        const item = itemMatch[1].trim();
+        if (item && item.length > 0 && !item.match(/^\s*$/)) {
+          items.push(item);
+        }
+      }
+      if (items.length > 0) {
+        result[field] = items;
+        console.log(`   ✅ Extracted ${field}: [${items.slice(0, 5).join(', ')}${items.length > 5 ? '...' : ''}]`);
       }
     }
   }
   
   // Extract string fields
-  const stringPatterns = {
+  const stringFields = {
     mainObject: /"mainObject"\s*:\s*"([^"]+)"/,
     userIntent: /"userIntent"\s*:\s*"([^"]+)"/,
     productType: /"productType"\s*:\s*"([^"]+)"/,
@@ -361,7 +363,7 @@ function extractFieldsFromText(text, defaultValue = {}) {
     styleMatch: /"styleMatch"\s*:\s*"([^"]+)"/
   };
   
-  for (const [field, pattern] of Object.entries(stringPatterns)) {
+  for (const [field, pattern] of Object.entries(stringFields)) {
     const match = text.match(pattern);
     if (match) {
       result[field] = match[1];
@@ -16471,7 +16473,7 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 2000
+            maxOutputTokens: 4000  // High to prevent truncation
           }
         },
         {
@@ -17032,7 +17034,7 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 2000  // Increased to prevent truncation
+            maxOutputTokens: 4000  // High to prevent truncation
           }
         },
         {
@@ -17478,7 +17480,7 @@ Respond in JSON:
             ...imageParts  // Room image + product images
           ]
         }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 800 }
+        generationConfig: { temperature: 0.3, maxOutputTokens: 2000 }
       },
       { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
     );
@@ -17535,7 +17537,7 @@ Respond in JSON:
             ...imageParts  // Room image + product images
           ]
         }],
-        generationConfig: { temperature: 0.5, maxOutputTokens: 1000 }
+        generationConfig: { temperature: 0.5, maxOutputTokens: 2000 }
       },
       { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
     );
@@ -17631,18 +17633,24 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
         // Prepare images
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         
-        // Determine product type for replacement logic
+        // Determine product type for replacement logic - be SPECIFIC
         const productTypeLower = (productTitle || '').toLowerCase();
         const isBarStool = productTypeLower.includes('bar stool') || productTypeLower.includes('barhocker');
-        const isChair = productTypeLower.includes('chair') || productTypeLower.includes('stuhl');
+        const isChair = productTypeLower.includes('chair') || productTypeLower.includes('stuhl') || productTypeLower.includes('sessel');
+        const isCoffeeTable = productTypeLower.includes('coffee table') || productTypeLower.includes('couchtisch') || productTypeLower.includes('couch table');
+        const isSideTable = productTypeLower.includes('side table') || productTypeLower.includes('beistelltisch');
+        const isDiningTable = productTypeLower.includes('dining table') || productTypeLower.includes('esstisch');
         const isTable = productTypeLower.includes('table') || productTypeLower.includes('tisch');
         const isShelf = productTypeLower.includes('shelf') || productTypeLower.includes('regal');
         
         let furnitureTypeToReplace = '';
         if (isBarStool) furnitureTypeToReplace = 'bar stools, counter stools, or high chairs';
-        else if (isChair) furnitureTypeToReplace = 'chairs or seating';
-        else if (isTable) furnitureTypeToReplace = 'tables of similar type';
-        else if (isShelf) furnitureTypeToReplace = 'shelves or storage units';
+        else if (isChair) furnitureTypeToReplace = 'chairs, armchairs, or seating';
+        else if (isCoffeeTable) furnitureTypeToReplace = 'coffee tables (the low table in front of sofas/chairs)';
+        else if (isSideTable) furnitureTypeToReplace = 'side tables or end tables';
+        else if (isDiningTable) furnitureTypeToReplace = 'dining tables';
+        else if (isTable) furnitureTypeToReplace = 'tables of similar size and type';
+        else if (isShelf) furnitureTypeToReplace = 'shelves, wall shelves, or storage units';
         
         // MULTI-TURN CONVERSATION APPROACH
         // This forces the AI to understand each image's role before editing
@@ -17655,55 +17663,67 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
             {
               role: "user",
               parts: [
-                { text: `You are an AI image editor. I'm giving you TWO images:
+                { text: `⚠️ IMPORTANT: You are an AI IMAGE EDITOR. You will receive 2 images.
 
-🏠 IMAGE 1 (ROOM): A customer's room - this is the image you will EDIT
-🛋️ IMAGE 2 (PRODUCT): The "${productTitle}" product from Metallbude - this is your DESIGN REFERENCE
+IMAGE #1 = ROOM (edit this!)
+IMAGE #2 = PRODUCT REFERENCE (copy this design!)
 
-Here is the ROOM to edit:` },
+‼️ YOUR EXACT TASK:
+1. Look at the ROOM image
+2. Find ANY existing ${furnitureTypeToReplace || 'coffee tables, side tables, or similar furniture'}
+3. DELETE them completely from the image
+4. Draw the PRODUCT from IMAGE #2 in their place
+5. The product MUST look IDENTICAL to IMAGE #2 - same colors, same design, same everything
+
+Here is IMAGE #1 - THE ROOM (this is what you will modify):` },
                 roomImagePart,
-                { text: `Here is the PRODUCT to place in the room (study this carefully - you must replicate its EXACT design):` },
+                { text: `
+
+Here is IMAGE #2 - THE PRODUCT "${productTitle}" (COPY THIS EXACT DESIGN):` },
                 productImageParts[0],
                 ...(productImageParts.length > 1 ? [
-                  { text: `Here is another angle of the same product:` }, 
+                  { text: `Another angle of the same product:` }, 
                   productImageParts[1]
                 ] : []),
                 { text: `
-YOUR TASK: Edit IMAGE 1 (the room) by placing the "${productTitle}" from IMAGE 2.
 
-⚠️ CRITICAL - REPLACEMENT RULES:
-${furnitureTypeToReplace ? `- FIND all ${furnitureTypeToReplace} in the room (count them - could be 1, 2, 3, 4 or more!)
-- REMOVE every single one of them
-- REPLACE each one with the ${productTitle} in the EXACT same position
-- Do NOT leave any old furniture behind` : `- If similar furniture exists, REPLACE ALL of it with the ${productTitle}
-- If no similar furniture, ADD the ${productTitle} in an appropriate location`}
+🚨 CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
-🎨 DESIGN ACCURACY - ANALYZE THE PRODUCT IMAGE:
-- Study IMAGE 2 carefully - what color is the frame? What material is the surface?
-- The furniture you place MUST look IDENTICAL to IMAGE 2
-- Copy the EXACT design: same colors, same textures, same proportions
-- DO NOT invent a generic design - replicate what you see in the product image
+1️⃣ REMOVE OLD FURNITURE:
+   - Find ALL ${furnitureTypeToReplace || 'tables'} in the ROOM image
+   - Count them (there may be 1, 2, or more)
+   - ERASE them completely - no traces left
 
-${productDimensions ? `📐 PRODUCT DIMENSIONS:
-${productDimensions.height ? `- Height: ${productDimensions.height}` : ''}
-${productDimensions.width ? `- Width: ${productDimensions.width}` : ''}
-${productDimensions.depth ? `- Depth: ${productDimensions.depth}` : ''}
-${productDimensions.seatHeight ? `- Seat height: ${productDimensions.seatHeight}` : ''}
-` : ''}
-📏 SCALE REFERENCES:
-- Door height: ~200cm | Countertop: ~90cm | Dining table: ~75cm | Bar stool: ~65-80cm
+2️⃣ ADD NEW FURNITURE:
+   - Place the ${productTitle} from IMAGE #2 where the old furniture was
+   - If there were 2 tables, add 2 of the new product
+   - Position them naturally in the same spots
 
-✅ OUTPUT REQUIREMENTS:
-- Return the EDITED ROOM (IMAGE 1) with furniture replaced
-- Keep walls, floor, lighting, and unrelated furniture unchanged
-- Add realistic shadows and lighting for the new furniture
-- Size the product correctly relative to room elements
-- DO NOT return IMAGE 2 - only the edited room` }
+3️⃣ MATCH THE DESIGN EXACTLY:
+   - Look at IMAGE #2 right now
+   - What COLOR is it? Copy that exact color
+   - What MATERIAL is it? Copy that exact material
+   - What SHAPE is it? Copy that exact shape
+   - DO NOT invent a different design!
+
+${productDimensions ? `4️⃣ SIZE THE PRODUCT CORRECTLY:
+   - Height: ${productDimensions.height || 'standard'}
+   - Width: ${productDimensions.width || 'standard'}
+   - Use doors (~200cm) and counters (~90cm) as references` : ''}
+
+📤 OUTPUT:
+Return ONLY the edited room image with:
+- Old furniture REMOVED
+- New ${productTitle} (from IMAGE #2) ADDED in its place
+- Realistic lighting and shadows
+- Everything else unchanged (walls, floor, other furniture)
+
+DO NOT return IMAGE #2. DO NOT add furniture in random places. DO NOT change the design.` }
               ]
             }
           ];
-          console.log(`   📤 Single prompt with ${productImageParts.length} product image(s) - AI analyzes everything`);
-          console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace || 'similar items'}`);
+          console.log(`   📤 Single prompt with ${productImageParts.length} product image(s) - explicit REMOVE + ADD instructions`);
+          console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace || 'similar tables'}`);
         } else {
           // Single turn fallback if no product image
           contents = [{
