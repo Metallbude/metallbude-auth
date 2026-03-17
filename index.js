@@ -17362,46 +17362,25 @@ Respond in JSON:
     
     const numProductImages = productImageParts.length;
     
-    // CRITICAL: Describe images by their VISUAL CONTENT, not just order
-    // Product image = has WHITE/STUDIO background
-    // Room image = has REAL ROOM with walls, floor, furniture
-    const imageEditPrompt = `You have TWO images. Identify them by their CONTENT:
+    // ULTRA-SIMPLE APPROACH: Room first, Product second, direct instructions
+    const imageEditPrompt = `IMAGE 1 = Customer's room photo
+IMAGE 2 = "${productTitle}" product photo (white background)
 
-🏷️ THE PRODUCT IMAGE (has WHITE or STUDIO BACKGROUND):
-- This image shows "${productTitle}" on a clean white/light studio background
-- This is a PRODUCT PHOTO from an e-commerce store
-- EXTRACT this product - you will ADD it to the room
+TASK: Edit IMAGE 1 (the room) by replacing the existing furniture with the product from IMAGE 2.
 
-🏠 THE ROOM IMAGE (has REAL WALLS, FLOOR, FURNITURE):
-- This image shows a real customer's room (${roomAnalysis.roomType || 'living space'})
-- It has actual walls, floors, windows, existing furniture
-- This is the BACKGROUND you must KEEP - do NOT change this room
-- Find the similar existing item in this room that needs to be REPLACED
+OUTPUT REQUIREMENTS:
+- Output must be IMAGE 1 (the room) edited
+- Keep the room's walls, floor, lighting, and layout exactly the same
+- Replace the existing similar furniture in the room with "${productTitle}"
+- Remove the white background from the product and blend it naturally into the room
+- Add realistic shadows matching the room's lighting
 
-=== YOUR TASK ===
-1. IDENTIFY which image is the product (white background) vs room (real space)
-2. KEEP the room image exactly as it is (walls, floor, lighting, other furniture)
-3. FIND the existing similar item in the room (e.g., their current ${roomAnalysis.roomType || 'furniture'})
-4. REMOVE that existing item from the room
-5. EXTRACT the "${productTitle}" from the product image (remove the white background)
-6. PLACE the extracted product WHERE THE OLD ITEM WAS in the room
-7. Add realistic shadows and lighting
-
-=== OUTPUT ===
-The room image (the one with real walls/floor) with the old item REPLACED by "${productTitle}" (from the white background product image).
-
-=== CRITICAL ===
-✅ Output must be the REAL ROOM with walls and floor, not a white background
-✅ The room must look IDENTICAL except the replaced item
-✅ Product must look exactly like it does in the product photo
-
-❌ DO NOT output the white background product image
-❌ DO NOT generate a completely new room
-❌ DO NOT just add the product somewhere random - REPLACE the existing similar item`;
+DO NOT CHANGE THE ROOM - only swap the furniture piece.
+DO NOT OUTPUT A WHITE BACKGROUND - the output must show the room.`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: REPLACE item in room...`);
-    console.log(`   🏪 Product (WHITE BG): ${numProductImages > 0 ? (productImageParts[0]?.inlineData?.data?.length / 1024).toFixed(1) + ' KB' : 'none'}`);
-    console.log(`   🏠 Room (REAL SPACE): ${(roomImage.length / 1024).toFixed(1)} KB`);
+    console.log(`🎨 [VISUALIZE] Step 3: Edit room image (replace furniture)...`);
+    console.log(`   🏠 IMAGE 1 (Room to edit): ${(roomImage.length / 1024).toFixed(1)} KB`);
+    console.log(`   🏪 IMAGE 2 (Product source): ${numProductImages > 0 ? (productImageParts[0]?.inlineData?.data?.length / 1024).toFixed(1) + ' KB' : 'none'}`);
     
     // Models that support image editing via Generative Language API
     const imageModels = [
@@ -17416,17 +17395,17 @@ The room image (the one with real walls/floor) with the old item REPLACED by "${
       try {
         console.log(`   🖼️ Trying compositing with: ${modelName}`);
         
-        // CRITICAL: AI keeps the SECOND image as background!
-        // So send: Product FIRST (to extract), Room SECOND (to keep as background)
+        // SEND ROOM FIRST (IMAGE 1), PRODUCT SECOND (IMAGE 2)
+        // This matches the prompt: IMAGE 1 = room, IMAGE 2 = product
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         const firstProductImage = productImageParts[0];
         
         const editParts = [
           { text: imageEditPrompt },
-          firstProductImage,     // IMAGE 1: Product (EXTRACT from this)
-          roomImagePart          // IMAGE 2: Room (KEEP this as background!)
+          roomImagePart,         // IMAGE 1: Room (the base to edit)
+          firstProductImage      // IMAGE 2: Product (extract from this)
         ];
-        console.log(`   📤 Sending both images - AI will identify by content (white bg = product, real room = keep)`);
+        console.log(`   📤 Sending: IMAGE 1=Room, IMAGE 2=Product - asking to EDIT the room`);
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
