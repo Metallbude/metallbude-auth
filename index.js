@@ -17190,12 +17190,128 @@ app.get('/ai/list-models', async (req, res) => {
 });
 
 /**
+ * Standard furniture dimensions for scale reference
+ * Used by AI to estimate proper sizing in room visualizations
+ */
+const FURNITURE_DIMENSIONS = {
+  // Bar stools
+  'bar stool': { height: '65-80cm', seatHeight: '65-75cm', width: '35-45cm', depth: '35-45cm' },
+  'barhocker': { height: '65-80cm', seatHeight: '65-75cm', width: '35-45cm', depth: '35-45cm' },
+  // Dining chairs
+  'chair': { height: '75-95cm', seatHeight: '45cm', width: '40-50cm', depth: '40-50cm' },
+  'stuhl': { height: '75-95cm', seatHeight: '45cm', width: '40-50cm', depth: '40-50cm' },
+  // Tables
+  'dining table': { height: '72-76cm', width: '80-200cm', depth: '80-100cm' },
+  'esstisch': { height: '72-76cm', width: '80-200cm', depth: '80-100cm' },
+  'coffee table': { height: '40-50cm', width: '80-140cm', depth: '50-80cm' },
+  'couchtisch': { height: '40-50cm', width: '80-140cm', depth: '50-80cm' },
+  'side table': { height: '50-65cm', width: '40-60cm', depth: '40-60cm' },
+  'beistelltisch': { height: '50-65cm', width: '40-60cm', depth: '40-60cm' },
+  // Shelves and storage
+  'shelf': { height: '80-200cm', width: '60-150cm', depth: '25-40cm' },
+  'regal': { height: '80-200cm', width: '60-150cm', depth: '25-40cm' },
+  'wardrobe': { height: '180-220cm', width: '80-250cm', depth: '50-65cm' },
+  'kleiderschrank': { height: '180-220cm', width: '80-250cm', depth: '50-65cm' },
+  // Beds
+  'bed': { height: '45-55cm', width: '90-180cm', length: '200cm' },
+  'bett': { height: '45-55cm', width: '90-180cm', length: '200cm' },
+  // Reference objects in rooms
+  'door': { height: '200-210cm', width: '80-90cm' },
+  'window': { height: '100-150cm', width: '80-150cm' },
+  'countertop': { height: '85-95cm' },
+  'ceiling': { height: '240-280cm' },
+};
+
+/**
+ * Extract dimensions from product description HTML
+ */
+function extractDimensionsFromDescription(descriptionHtml) {
+  if (!descriptionHtml) {
+    console.log(`📐 [DIMENSIONS] No description provided`);
+    return null;
+  }
+  
+  console.log(`📐 [DIMENSIONS] Parsing description (${descriptionHtml.length} chars)`);
+  
+  const dimensions = {};
+  const text = descriptionHtml.replace(/<[^>]*>/g, ' ').toLowerCase();
+  
+  // Log cleaned text for debugging (first 500 chars)
+  console.log(`📐 [DIMENSIONS] Cleaned text: "${text.substring(0, 500)}${text.length > 500 ? '...' : ''}"`);
+  
+  // Common dimension patterns (supports cm/mm/m and German/English)
+  const patterns = [
+    // Height patterns
+    { key: 'height', name: 'height (prefix)', regex: /(?:höhe|height|h)[:\s]*(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)/gi },
+    { key: 'height', name: 'height (suffix)', regex: /(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)\s*(?:höhe|height|hoch|tall)/gi },
+    // Width patterns  
+    { key: 'width', name: 'width (prefix)', regex: /(?:breite|width|b|w)[:\s]*(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)/gi },
+    { key: 'width', name: 'width (suffix)', regex: /(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)\s*(?:breite|width|breit|wide)/gi },
+    // Depth patterns
+    { key: 'depth', name: 'depth (prefix)', regex: /(?:tiefe|depth|t|d)[:\s]*(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)/gi },
+    { key: 'depth', name: 'depth (suffix)', regex: /(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)\s*(?:tiefe|depth|tief|deep)/gi },
+    // Seat height
+    { key: 'seatHeight', name: 'seat height', regex: /(?:sitzhöhe|seat\s*height)[:\s]*(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)/gi },
+    // Diameter (for round items)
+    { key: 'diameter', name: 'diameter', regex: /(?:durchmesser|diameter|ø)[:\s]*(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)/gi },
+    // General "L x B x H" or "W x D x H" format
+    { key: 'dimensions', name: 'LxWxH format', regex: /(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(?:cm|mm|m)/gi },
+  ];
+  
+  for (const { key, name, regex } of patterns) {
+    const match = regex.exec(text);
+    if (match) {
+      console.log(`📐 [DIMENSIONS] ✅ Pattern "${name}" matched: "${match[0]}"`);
+      if (key === 'dimensions' && match[1] && match[2] && match[3]) {
+        // Parse L x W x H format
+        dimensions.width = match[1].replace(',', '.') + 'cm';
+        dimensions.depth = match[2].replace(',', '.') + 'cm';
+        dimensions.height = match[3].replace(',', '.') + 'cm';
+        console.log(`📐 [DIMENSIONS]    → width=${dimensions.width}, depth=${dimensions.depth}, height=${dimensions.height}`);
+      } else if (match[1]) {
+        dimensions[key] = match[1].replace(',', '.') + 'cm';
+        console.log(`📐 [DIMENSIONS]    → ${key}=${dimensions[key]}`);
+      }
+    }
+  }
+  
+  if (Object.keys(dimensions).length > 0) {
+    console.log(`📐 [DIMENSIONS] Final extracted:`, dimensions);
+    return dimensions;
+  }
+  
+  console.log(`📐 [DIMENSIONS] ❌ No dimensions found in description`);
+  return null;
+}
+
+/**
+ * Get standard dimensions based on product type/name
+ */
+function getStandardDimensions(productTitle, productType) {
+  const titleLower = (productTitle || '').toLowerCase();
+  const typeLower = (productType || '').toLowerCase();
+  const combined = titleLower + ' ' + typeLower;
+  
+  console.log(`📐 [DIMENSIONS] Looking up standard dims for: "${combined}"`);
+  
+  for (const [key, dims] of Object.entries(FURNITURE_DIMENSIONS)) {
+    if (combined.includes(key)) {
+      console.log(`📐 [DIMENSIONS] ✅ Matched standard type: "${key}"`);
+      return { standard: true, type: key, ...dims };
+    }
+  }
+  
+  console.log(`📐 [DIMENSIONS] ❌ No standard type match found`);
+  return null;
+}
+
+/**
  * Generate a room visualization showing a product in user's space
  * This is a BETA feature - unlimited during testing
  */
 app.post('/ai/visualize-room', async (req, res) => {
   try {
-    const { roomImage, productHandle, productTitle, productImages, customerId } = req.body;
+    const { roomImage, productHandle, productTitle, productImages, customerId, productDescription } = req.body;
     
     if (!roomImage || !productHandle) {
       return res.status(400).json({ 
@@ -17212,11 +17328,43 @@ app.post('/ai/visualize-room', async (req, res) => {
       });
     }
     
+    // Try to extract/estimate product dimensions
+    let productDimensions = null;
+    
+    console.log(`📐 [VISUALIZE] === DIMENSION EXTRACTION START ===`);
+    console.log(`📐 [VISUALIZE] Description received: ${productDescription ? `YES (${productDescription.length} chars)` : 'NO'}`);
+    
+    // 1. Try to extract from product description (if provided)
+    if (productDescription) {
+      console.log(`📐 [VISUALIZE] Step 1: Trying to extract from description...`);
+      productDimensions = extractDimensionsFromDescription(productDescription);
+      if (productDimensions) {
+        console.log(`📐 [VISUALIZE] ✅ Dimensions extracted from description:`, productDimensions);
+      } else {
+        console.log(`📐 [VISUALIZE] ❌ No dimensions found in description`);
+      }
+    }
+    
+    // 2. If no dimensions found, use standard furniture dimensions
+    if (!productDimensions) {
+      console.log(`📐 [VISUALIZE] Step 2: Falling back to standard dimensions lookup...`);
+      productDimensions = getStandardDimensions(productTitle, null);
+      if (productDimensions) {
+        console.log(`📐 [VISUALIZE] ✅ Using standard dimensions for "${productDimensions.type}":`, productDimensions);
+      } else {
+        console.log(`📐 [VISUALIZE] ❌ No standard dimensions found for product type`);
+      }
+    }
+    
+    console.log(`📐 [VISUALIZE] === DIMENSION EXTRACTION END ===`);
+    console.log(`📐 [VISUALIZE] Final dimensions: ${productDimensions ? JSON.stringify(productDimensions) : 'NONE (AI will estimate from image)'}`);
+    
     console.log(`🏠 [VISUALIZE] Request received:`);
     console.log(`   Product: ${productTitle} (${productHandle})`);
     console.log(`   Customer: ${customerId || 'anonymous'}`);
     console.log(`   Room image size: ${(roomImage.length / 1024).toFixed(1)} KB`);
     console.log(`   Product images received: ${productImages?.length || 0}`);
+    console.log(`   Product dimensions: ${productDimensions ? JSON.stringify(productDimensions) : 'unknown (AI will estimate)'}`);
     if (productImages && productImages.length > 0) {
       productImages.forEach((url, i) => console.log(`   📸 Product URL ${i}: ${url?.substring(0, 80)}...`));
     }
@@ -17376,12 +17524,14 @@ Respond in JSON:
     const numProductImages = productImageParts.length;
     
     // Get product description from the visualization or product title
-    const productDescription = visualization.visualDescription || 
+    const productDescForPrompt = visualization.visualDescription || 
       `${productTitle} - a modern furniture piece from Metallbude`;
     
     // TWO IMAGE APPROACH: Room image to EDIT, Product image as REFERENCE for exact design
     const hasProductImage = productImageParts.length > 0;
     
+    // Note: This prompt is used as a fallback for single-turn approach only
+    // The multi-turn approach (below) uses inline prompts with REPLACEMENT logic
     const imageEditPrompt = hasProductImage ? 
       `You are receiving TWO images:
 
@@ -17389,32 +17539,37 @@ IMAGE 1 (FIRST IMAGE): A customer's room photo - THIS IS THE BACKGROUND TO EDIT
 IMAGE 2 (SECOND IMAGE): A product photo showing "${productTitle}" - THIS IS THE DESIGN REFERENCE
 
 YOUR TASK:
-1. Take IMAGE 1 (the room) - keep it EXACTLY as is (walls, floor, lighting, perspective, furniture placement)
+1. Take IMAGE 1 (the room) - IDENTIFY any similar furniture (e.g., existing bar stools, chairs, tables)
 2. Look at IMAGE 2 (the product) - memorize its EXACT design, shape, colors, materials, style
-3. ADD the product from IMAGE 2 into IMAGE 1's room in an appropriate location
-4. The product must look EXACTLY like IMAGE 2 - same design, same colors, same proportions
+3. REPLACE any similar furniture in IMAGE 1 with the product from IMAGE 2
+4. If no similar furniture exists, ADD the product in an appropriate location
+5. The product must look EXACTLY like IMAGE 2 - same design, same colors, same proportions
 
 CRITICAL RULES:
-- OUTPUT must be IMAGE 1 (the room) with the product added
+- OUTPUT must be IMAGE 1 (the room) with furniture REPLACED
 - Do NOT output IMAGE 2 or use it as background
-- Do NOT change the room's walls, floor, or existing furniture
-- The added product must match IMAGE 2's design PRECISELY
+- Keep walls, floor, and other unrelated furniture unchanged
+- The replacement product must match IMAGE 2's design PRECISELY
 - Add realistic shadows and lighting to make it look natural
 
-OUTPUT: The room from IMAGE 1, now containing the product shown in IMAGE 2` :
+OUTPUT: The room from IMAGE 1, with similar furniture REPLACED by the product shown in IMAGE 2` :
       // Fallback if no product image
       `This is a customer's room photo. 
 
-Add a "${productTitle}" to this room. The product is a piece of furniture from the Metallbude store.
+REPLACE any existing ${productTitle.toLowerCase().includes('stool') ? 'bar stools or counter stools' : 
+                       productTitle.toLowerCase().includes('chair') ? 'chairs' :
+                       productTitle.toLowerCase().includes('table') ? 'tables' : 'similar furniture'} 
+with a "${productTitle}" from the Metallbude store.
 
 TASK:
-- Keep the room EXACTLY as it is (same walls, floor, lighting, perspective)
-- ADD the product in an appropriate location
+- FIND and REMOVE any similar furniture in the room
+- REPLACE it with "${productTitle}" in the same location
+- Keep the room EXACTLY as it is otherwise (same walls, floor, lighting, perspective)
 - Make the product look like a natural part of the room with proper lighting and shadows
 
-OUTPUT: The same room photo, edited to include "${productTitle}"`;
+OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}"`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: Add product to room...`);
+    console.log(`🎨 [VISUALIZE] Step 3: REPLACE furniture in room...`);
     console.log(`   🏠 Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
     console.log(`   📦 Product reference image: ${hasProductImage ? 'YES - will use exact design' : 'NO - text description only'}`);
     
@@ -17434,6 +17589,19 @@ OUTPUT: The same room photo, edited to include "${productTitle}"`;
         // Prepare images
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         
+        // Determine product type for replacement logic
+        const productTypeLower = (productTitle || '').toLowerCase();
+        const isBarStool = productTypeLower.includes('bar stool') || productTypeLower.includes('barhocker');
+        const isChair = productTypeLower.includes('chair') || productTypeLower.includes('stuhl');
+        const isTable = productTypeLower.includes('table') || productTypeLower.includes('tisch');
+        const isShelf = productTypeLower.includes('shelf') || productTypeLower.includes('regal');
+        
+        let furnitureTypeToReplace = '';
+        if (isBarStool) furnitureTypeToReplace = 'bar stools, counter stools, or high chairs';
+        else if (isChair) furnitureTypeToReplace = 'chairs or seating';
+        else if (isTable) furnitureTypeToReplace = 'tables of similar type';
+        else if (isShelf) furnitureTypeToReplace = 'shelves or storage units';
+        
         // MULTI-TURN CONVERSATION APPROACH
         // This forces the AI to understand each image's role before editing
         let contents;
@@ -17445,45 +17613,67 @@ OUTPUT: The same room photo, edited to include "${productTitle}"`;
             {
               role: "user",
               parts: [
-                { text: "This is a customer's room photo. I want to add furniture to THIS room. Remember this room - you will edit it." },
+                { text: "This is a customer's room photo. I want to REPLACE existing furniture in THIS room with a new product. Remember this room - you will edit it." },
                 roomImagePart
               ]
             },
             // Turn 2: AI acknowledges (simulated)
             {
               role: "model", 
-              parts: [{ text: "I understand. This is the customer's room that I will edit to add furniture. I've noted the room's style, lighting, and layout. What furniture would you like me to add?" }]
+              parts: [{ text: "I understand. This is the customer's room that I will edit. I've noted the room's style, lighting, layout, and existing furniture. What furniture would you like me to replace?" }]
             },
             // Turn 3: Show the product - this is the REFERENCE only
             {
               role: "user",
               parts: [
-                { text: `Here is the product "${productTitle}" - this is just a REFERENCE IMAGE showing what the product looks like. DO NOT edit this product image. Instead, use it to understand the exact design, colors, and style of the product.` },
+                { text: `Here is the product "${productTitle}" - this is just a REFERENCE IMAGE showing what the NEW product looks like. DO NOT edit this product image. Instead, use it to understand the exact design, colors, and style of the replacement product.` },
                 productImageParts[0]
               ]
             },
             // Turn 4: AI acknowledges (simulated)
             {
               role: "model",
-              parts: [{ text: `I see the ${productTitle}. I understand this is just a reference to show me what the product looks like. I will NOT edit this image - I will use it only as a design reference.` }]
+              parts: [{ text: `I see the ${productTitle}. I understand this is the new product that will REPLACE existing similar furniture in the room. I will NOT edit this image - I will use it only as a design reference for the replacement.` }]
             },
-            // Turn 5: Final instruction to edit the ROOM
+            // Turn 5: Final instruction to edit the ROOM - REPLACE not just ADD
             {
               role: "user",
               parts: [
-                { text: `Now EDIT THE ROOM (the first image I showed you) to include the ${productTitle}. 
+                { text: `Now EDIT THE ROOM (the first image I showed you) by REPLACING existing furniture with the ${productTitle}. 
 
-IMPORTANT:
-- Output the ROOM photo with the product added
-- Keep the room exactly as it was (same walls, floor, furniture layout)
-- Add the ${productTitle} in an appropriate location in the room
-- The product must look EXACTLY like the reference image I showed you
-- Add realistic shadows and lighting
+🔄 REPLACEMENT INSTRUCTIONS:
+${furnitureTypeToReplace ? `- FIND all existing ${furnitureTypeToReplace} in the room
+- REMOVE them completely
+- REPLACE them with the ${productTitle} in the SAME locations` : `- If there is existing similar furniture in the room, REPLACE it with the ${productTitle}
+- If no similar furniture exists, ADD the ${productTitle} in an appropriate location`}
+
+${productDimensions ? `📐 PRODUCT DIMENSIONS:
+${productDimensions.height ? `- Height: ${productDimensions.height}` : ''}
+${productDimensions.width ? `- Width: ${productDimensions.width}` : ''}
+${productDimensions.depth ? `- Depth: ${productDimensions.depth}` : ''}
+${productDimensions.seatHeight ? `- Seat height: ${productDimensions.seatHeight}` : ''}
+${productDimensions.standard ? `(Standard ${productDimensions.type} dimensions)` : ''}
+` : ''}
+📏 SCALE REFERENCE (use these to size the product correctly):
+- Standard door height: 200-210cm
+- Standard countertop height: 90cm  
+- Standard dining table height: 75cm
+- Standard chair seat height: 45cm
+- Standard bar stool height: 65-80cm
+
+✅ CRITICAL REQUIREMENTS:
+- Output the ROOM photo with furniture REPLACED (not just added)
+- Keep everything else exactly as it was (walls, floor, lighting, other furniture)
+- The replacement product must look EXACTLY like the reference image (same design, colors, style)
+- SIZE THE PRODUCT CORRECTLY relative to doors, counters, and other furniture
+- Place each ${productTitle} in the SAME position where old furniture was removed
+- Add realistic shadows and lighting to match the room
 - DO NOT output the product photo - output the EDITED ROOM` }
               ]
             }
           ];
-          console.log(`   📤 Multi-turn conversation: Room → Product ref → Edit instruction`);
+          console.log(`   📤 Multi-turn conversation: Room → Product ref → REPLACE instruction`);
+          console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace || 'similar items'}`);
         } else {
           // Single turn fallback if no product image
           contents = [{
