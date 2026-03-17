@@ -17645,13 +17645,16 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
     console.log(`🎨 [VISUALIZE] Step 3: REPLACE furniture in room...`);
     console.log(`   🏠 Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
     console.log(`   📦 Product reference image: ${hasProductImage ? 'YES - will use exact design' : 'NO - text description only'}`);
+    console.log(`   🔧 Sharp available: ${sharp ? 'YES' : 'NO'}`);
+    console.log(`   🔧 Product images URLs: ${productImages?.length || 0}`);
     
     // ======================================================================
     // METHOD 1: IMAGE COMPOSITING (uses ACTUAL product image - most reliable)
     // Instead of asking AI to "draw" the product, we paste the real image
     // ======================================================================
-    if (sharp && hasProductImage && productImageUrls.length > 0) {
+    if (sharp && hasProductImage && productImages && productImages.length > 0) {
       console.log(`   🎯 [COMPOSITING] Attempting image compositing with sharp...`);
+      console.log(`   🎯 [COMPOSITING] Will use ACTUAL product photo, not AI-generated!`);
       
       try {
         // Step 3A: Ask AI ONLY for placement coordinates (not to generate image)
@@ -17715,7 +17718,7 @@ IMPORTANT:
           console.log(`   📍 [COMPOSITING] Placement: x=${x}, y=${y}, size=${width}x${height}, anchor=${anchor}`);
           
           // Step 3B: Download and process product image
-          const productUrl = productImageUrls[0];
+          const productUrl = productImages[0];
           console.log(`   📥 [COMPOSITING] Downloading product image...`);
           
           const productResponse = await axios.get(productUrl, { 
@@ -17777,6 +17780,16 @@ IMPORTANT:
         console.log(`   ❌ [COMPOSITING] Failed: ${compError.message}`);
         console.log(`   🔄 Falling back to AI image generation...`);
       }
+    } else {
+      // Log why compositing is skipped
+      if (!sharp) {
+        console.log(`   ⚠️ [COMPOSITING] SKIPPED: Sharp library not installed (npm install sharp)`);
+      } else if (!hasProductImage) {
+        console.log(`   ⚠️ [COMPOSITING] SKIPPED: No product image data available`);
+      } else if (!productImages || productImages.length === 0) {
+        console.log(`   ⚠️ [COMPOSITING] SKIPPED: No product image URLs provided`);
+      }
+      console.log(`   🤖 Will use AI image generation instead...`);
     }
     
     // ======================================================================
