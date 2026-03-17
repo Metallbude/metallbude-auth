@@ -17649,85 +17649,61 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
         let contents;
         
         if (hasProductImage && productImageParts.length > 0) {
-          // Multi-turn: establish context first, then ask for edit
+          // SINGLE COMPREHENSIVE PROMPT - Let AI analyze everything itself
+          // No fake "model" responses - just clear instructions with both images
           contents = [
-            // Turn 1: Show the room - this is what we want to EDIT
             {
               role: "user",
               parts: [
-                { text: "This is a customer's room photo. I want to REPLACE existing furniture in THIS room with a new product. Remember this room - you will edit it." },
-                roomImagePart
-              ]
-            },
-            // Turn 2: AI acknowledges (simulated)
-            {
-              role: "model", 
-              parts: [{ text: "I understand. This is the customer's room that I will edit. I've noted the room's style, lighting, layout, and existing furniture. What furniture would you like me to replace?" }]
-            },
-            // Turn 3: Show the product - this is the REFERENCE only
-            {
-              role: "user",
-              parts: [
-                { text: `Here is the product "${productTitle}" - this is just a REFERENCE IMAGE showing what the NEW product looks like. Study this image carefully. DO NOT edit this product image. Instead, memorize every detail: the frame color, the seat material, the wood grain pattern, the exact proportions.` },
+                { text: `You are an AI image editor. I'm giving you TWO images:
+
+🏠 IMAGE 1 (ROOM): A customer's room - this is the image you will EDIT
+🛋️ IMAGE 2 (PRODUCT): The "${productTitle}" product from Metallbude - this is your DESIGN REFERENCE
+
+Here is the ROOM to edit:` },
+                roomImagePart,
+                { text: `Here is the PRODUCT to place in the room (study this carefully - you must replicate its EXACT design):` },
                 productImageParts[0],
-                ...(productImageParts.length > 1 ? [{ text: `Here is another angle of the same product:` }, productImageParts[1]] : [])
-              ]
-            },
-            // Turn 4: AI acknowledges (generic - let it describe what IT sees)
-            {
-              role: "model",
-              parts: [{ text: `I have carefully studied the ${productTitle} reference image. I noted its exact design: the metal frame finish, the surface texture and color, the proportions, and the minimalist industrial style typical of Metallbude. I will replicate this EXACT design - not a generic version - when placing it in the room.` }]
-            },
-            // Turn 5: Final instruction to edit the ROOM - REPLACE not just ADD
-            // CRITICAL: Include the product image AGAIN so it's fresh in context!
-            {
-              role: "user",
-              parts: [
-                { text: `HERE IS THE PRODUCT IMAGE AGAIN for reference:` },
-                productImageParts[0],  // Include product image in the edit prompt!
-                { text: `Now EDIT THE ROOM (the first image I showed you) by REPLACING existing furniture with the ${productTitle} shown above. 
+                ...(productImageParts.length > 1 ? [
+                  { text: `Here is another angle of the same product:` }, 
+                  productImageParts[1]
+                ] : []),
+                { text: `
+YOUR TASK: Edit IMAGE 1 (the room) by placing the "${productTitle}" from IMAGE 2.
 
-⚠️ CRITICAL - REPLACE ALL INSTANCES:
-${furnitureTypeToReplace ? `- COUNT how many ${furnitureTypeToReplace} are in the room (could be 1, 2, 3, 4 or more!)
-- REMOVE ALL of them completely - do not leave any old ones behind
-- REPLACE EVERY SINGLE ONE with the ${productTitle}
-- PUT the new ${productTitle} in the EXACT SAME positions as the old furniture` : `- If there is existing similar furniture, REPLACE ALL instances with the ${productTitle}
-- If no similar furniture exists, ADD the ${productTitle} in an appropriate location`}
+⚠️ CRITICAL - REPLACEMENT RULES:
+${furnitureTypeToReplace ? `- FIND all ${furnitureTypeToReplace} in the room (count them - could be 1, 2, 3, 4 or more!)
+- REMOVE every single one of them
+- REPLACE each one with the ${productTitle} in the EXACT same position
+- Do NOT leave any old furniture behind` : `- If similar furniture exists, REPLACE ALL of it with the ${productTitle}
+- If no similar furniture, ADD the ${productTitle} in an appropriate location`}
 
-🎨 DESIGN MATCHING - ULTRA IMPORTANT:
-- Look ONLY at the reference image I showed you (IMAGE 2)
-- The new furniture MUST be IDENTICAL to that reference
-- Same frame color, same wood color, same proportions, same style
-- DO NOT invent a different design - copy the reference EXACTLY
+🎨 DESIGN ACCURACY - ANALYZE THE PRODUCT IMAGE:
+- Study IMAGE 2 carefully - what color is the frame? What material is the surface?
+- The furniture you place MUST look IDENTICAL to IMAGE 2
+- Copy the EXACT design: same colors, same textures, same proportions
+- DO NOT invent a generic design - replicate what you see in the product image
 
 ${productDimensions ? `📐 PRODUCT DIMENSIONS:
 ${productDimensions.height ? `- Height: ${productDimensions.height}` : ''}
 ${productDimensions.width ? `- Width: ${productDimensions.width}` : ''}
 ${productDimensions.depth ? `- Depth: ${productDimensions.depth}` : ''}
 ${productDimensions.seatHeight ? `- Seat height: ${productDimensions.seatHeight}` : ''}
-${productDimensions.standard ? `(Standard ${productDimensions.type} dimensions)` : ''}
 ` : ''}
-📏 SCALE REFERENCE (use these to size the product correctly):
-- Standard door height: 200-210cm
-- Standard countertop height: 90cm  
-- Standard dining table height: 75cm
-- Standard chair seat height: 45cm
-- Standard bar stool height: 65-80cm
+📏 SCALE REFERENCES:
+- Door height: ~200cm | Countertop: ~90cm | Dining table: ~75cm | Bar stool: ~65-80cm
 
-✅ CRITICAL REQUIREMENTS:
-- Output the ROOM photo with furniture REPLACED (not just added)
-- Keep everything else exactly as it was (walls, floor, lighting, other furniture)
-- The replacement product must look EXACTLY like the reference image (same design, colors, style)
-- SIZE THE PRODUCT CORRECTLY relative to doors, counters, and other furniture
-- Place each ${productTitle} in the SAME position where old furniture was removed
-- Add realistic shadows and lighting to match the room
-- DO NOT output the product photo - output the EDITED ROOM` }
+✅ OUTPUT REQUIREMENTS:
+- Return the EDITED ROOM (IMAGE 1) with furniture replaced
+- Keep walls, floor, lighting, and unrelated furniture unchanged
+- Add realistic shadows and lighting for the new furniture
+- Size the product correctly relative to room elements
+- DO NOT return IMAGE 2 - only the edited room` }
               ]
             }
           ];
-          console.log(`   📤 Multi-turn conversation: Room → Product ref → Product reminder → REPLACE`);
+          console.log(`   📤 Single prompt with ${productImageParts.length} product image(s) - AI analyzes everything`);
           console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace || 'similar items'}`);
-          console.log(`   📸 Product image included in EDIT prompt: YES (for accurate design copy)`);
         } else {
           // Single turn fallback if no product image
           contents = [{
