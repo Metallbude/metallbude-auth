@@ -257,12 +257,20 @@ function robustParseAIJson(text, defaultValue = {}) {
   const jsonStartIndex = cleaned.indexOf('{');
   const jsonEndIndex = cleaned.lastIndexOf('}');
   
-  if (jsonStartIndex === -1 || jsonEndIndex <= jsonStartIndex) {
+  if (jsonStartIndex === -1) {
     console.log('⚠️ [JSON] No JSON object found in response');
-    return defaultValue;
+    // Still try regex extraction on the raw text
+    return extractFieldsFromText(text, defaultValue);
   }
   
-  let jsonStr = cleaned.substring(jsonStartIndex, jsonEndIndex + 1);
+  // If no closing brace, add one
+  let jsonStr;
+  if (jsonEndIndex <= jsonStartIndex) {
+    jsonStr = cleaned.substring(jsonStartIndex) + '}';
+    console.log('⚠️ [JSON] JSON truncated - adding closing brace');
+  } else {
+    jsonStr = cleaned.substring(jsonStartIndex, jsonEndIndex + 1);
+  }
   
   // === REPAIR COMMON ISSUES ===
   
@@ -278,7 +286,10 @@ function robustParseAIJson(text, defaultValue = {}) {
   // 4. Fix double commas
   jsonStr = jsonStr.replace(/,\s*,/g, ',');
   
-  // 5. Fix missing closing brackets - count and rebalance
+  // 5. Fix incomplete array items (truncated strings in arrays)
+  jsonStr = jsonStr.replace(/"([^"]*)\s*$/gm, '"$1"');
+  
+  // 6. Fix missing closing brackets - count and rebalance
   const openBrackets = (jsonStr.match(/\{/g) || []).length;
   const closeBrackets = (jsonStr.match(/\}/g) || []).length;
   if (openBrackets > closeBrackets) {
@@ -287,6 +298,7 @@ function robustParseAIJson(text, defaultValue = {}) {
   const openSquare = (jsonStr.match(/\[/g) || []).length;
   const closeSquare = (jsonStr.match(/\]/g) || []).length;
   if (openSquare > closeSquare) {
+    // Find where to insert the closing brackets
     const lastBrace = jsonStr.lastIndexOf('}');
     const insertPos = lastBrace > 0 ? lastBrace : jsonStr.length;
     jsonStr = jsonStr.slice(0, insertPos) + ']'.repeat(openSquare - closeSquare) + jsonStr.slice(insertPos);
@@ -294,62 +306,79 @@ function robustParseAIJson(text, defaultValue = {}) {
   
   // Try to parse
   try {
-    return JSON.parse(jsonStr);
+    const result = JSON.parse(jsonStr);
+    console.log('✅ [JSON] Parsed successfully');
+    return result;
   } catch (parseError) {
     console.log('⚠️ [JSON] Parse failed, extracting partial data...');
-    console.log('   Attempted JSON (first 300):', jsonStr.substring(0, 300));
+    console.log('   Attempted JSON (first 400):', jsonStr.substring(0, 400));
     
-    // Extract what we can with regex
-    const result = { ...defaultValue };
-    
-    // Extract arrays
-    const arrayPatterns = {
-      matchingProducts: /"matchingProducts"\s*:\s*\[([\s\S]*?)\]/,
-      searchTerms: /"searchTerms"\s*:\s*\[([\s\S]*?)\]/,
-      detectedObjects: /"detectedObjects"\s*:\s*\[([\s\S]*?)\]/,
-      labels: /"labels"\s*:\s*\[([\s\S]*?)\]/,
-      colors: /"colors"\s*:\s*\[([\s\S]*?)\]/,
-      designTips: /"designTips"\s*:\s*\[([\s\S]*?)\]/,
-      alternativeSpots: /"alternativeSpots"\s*:\s*\[([\s\S]*?)\]/
-    };
-    
-    for (const [field, pattern] of Object.entries(arrayPatterns)) {
-      const match = jsonStr.match(pattern);
-      if (match) {
-        const items = match[1].match(/"([^"]+)"/g);
-        if (items) result[field] = items.map(s => s.replace(/"/g, ''));
+    // Fall back to regex extraction
+    return extractFieldsFromText(jsonStr, defaultValue);
+  }
+}
+
+/**
+ * Extract fields from text using regex when JSON parsing fails
+ */
+function extractFieldsFromText(text, defaultValue = {}) {
+  const result = { ...defaultValue };
+  
+  // Extract arrays - use greedy matching up to ] or end of line
+  const arrayPatterns = {
+    matchingProducts: /"matchingProducts"\s*:\s*\[([^\]]*)/,
+    searchTerms: /"searchTerms"\s*:\s*\[([^\]]*)/,
+    detectedObjects: /"detectedObjects"\s*:\s*\[([^\]]*)/,
+    labels: /"labels"\s*:\s*\[([^\]]*)/,
+    colors: /"colors"\s*:\s*\[([^\]]*)/,
+    designTips: /"designTips"\s*:\s*\[([^\]]*)/,
+    alternativeSpots: /"alternativeSpots"\s*:\s*\[([^\]]*)/
+  };
+  
+  for (const [field, pattern] of Object.entries(arrayPatterns)) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      // Extract quoted strings from the array content
+      const items = match[1].match(/"([^"]+)"/g);
+      if (items && items.length > 0) {
+        result[field] = items.map(s => s.replace(/"/g, ''));
+        console.log(`   ✅ Extracted ${field}: [${result[field].join(', ')}]`);
       }
     }
-    
-    // Extract string fields
-    const stringPatterns = {
-      mainObject: /"mainObject"\s*:\s*"([^"]+)"/,
-      userIntent: /"userIntent"\s*:\s*"([^"]+)"/,
-      productType: /"productType"\s*:\s*"([^"]+)"/,
-      material: /"material"\s*:\s*"([^"]+)"/,
-      roomType: /"roomType"\s*:\s*"([^"]+)"/,
-      style: /"style"\s*:\s*"([^"]+)"/,
-      suggestedPlacement: /"suggestedPlacement"\s*:\s*"([^"]+)"/,
-      visualDescription: /"visualDescription"\s*:\s*"([^"]+)"/,
-      styleMatch: /"styleMatch"\s*:\s*"([^"]+)"/
-    };
-    
-    for (const [field, pattern] of Object.entries(stringPatterns)) {
-      const match = jsonStr.match(pattern);
-      if (match) result[field] = match[1];
-    }
-    
-    // Extract confidence
-    const confMatch = jsonStr.match(/"confidence"\s*:\s*([\d.]+)/);
-    if (confMatch) result.confidence = parseFloat(confMatch[1]);
-    
-    // Extract booleans
-    const boolMatch = jsonStr.match(/"needsUserSelection"\s*:\s*(true|false)/i);
-    if (boolMatch) result.needsUserSelection = boolMatch[1].toLowerCase() === 'true';
-    
-    console.log('   Extracted:', Object.keys(result).filter(k => result[k] !== null && result[k] !== undefined).join(', '));
-    return result;
   }
+  
+  // Extract string fields
+  const stringPatterns = {
+    mainObject: /"mainObject"\s*:\s*"([^"]+)"/,
+    userIntent: /"userIntent"\s*:\s*"([^"]+)"/,
+    productType: /"productType"\s*:\s*"([^"]+)"/,
+    focusedObject: /"focusedObject"\s*:\s*"([^"]+)"/,
+    material: /"material"\s*:\s*"([^"]+)"/,
+    roomType: /"roomType"\s*:\s*"([^"]+)"/,
+    style: /"style"\s*:\s*"([^"]+)"/,
+    suggestedPlacement: /"suggestedPlacement"\s*:\s*"([^"]+)"/,
+    visualDescription: /"visualDescription"\s*:\s*"([^"]+)"/,
+    styleMatch: /"styleMatch"\s*:\s*"([^"]+)"/
+  };
+  
+  for (const [field, pattern] of Object.entries(stringPatterns)) {
+    const match = text.match(pattern);
+    if (match) {
+      result[field] = match[1];
+      console.log(`   ✅ Extracted ${field}: "${result[field].substring(0, 50)}..."`);
+    }
+  }
+  
+  // Extract confidence
+  const confMatch = text.match(/"confidence"\s*:\s*([\d.]+)/);
+  if (confMatch) result.confidence = parseFloat(confMatch[1]);
+  
+  // Extract booleans
+  const boolMatch = text.match(/"needsUserSelection"\s*:\s*(true|false)/i);
+  if (boolMatch) result.needsUserSelection = boolMatch[1].toLowerCase() === 'true';
+  
+  console.log('   Regex extraction complete. Fields found:', Object.keys(result).filter(k => result[k] !== null && result[k] !== undefined && (Array.isArray(result[k]) ? result[k].length > 0 : true)).join(', '));
+  return result;
 }
 
 // Helper function to get real customer email from Shopify for public endpoints
@@ -16956,20 +16985,26 @@ Your task: Find Metallbude products related to this item.
 IF "${focusOn}" is FURNITURE → Find similar furniture
 IF "${focusOn}" is an ITEM → Find a Metallbude product to HOLD, STORE, or DISPLAY it
 
-Metallbude Product Categories:
-- Towel holders: VANA, TENSI, NALI, STENNI, MILO, DELAYA, ESTINA
-- Toilet paper holders: TUALI, MO
-- Coat racks: TAMINA, MALOU, RUBI, ENIO
-- Shoe racks: NEVA, BOVI, CAMO
-- Shelves: THARON, LENN, LINARA, ARIS, RAW L, RIVO
-- Tables: COSMO, CIRO, CUT, RAW C, LAGO, NELIO, DAMIO
-- Outdoor seating: DIEGO, CRUZ
+COMPLETE Metallbude Product Catalog:
+- Towel holders: VANA, TENSI, NALI, STENNI, MILO, DELAYA, ESTINA, VALI
+- Toilet paper holders: TUALI, MO, TOVA
+- Coat racks: TAMINA, MALOU, RUBI, ENIO, GARDO, LENNY
+- Shoe racks: NEVA, BOVI, CAMO, CUBO
+- Wall shelves: THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
+- Coffee tables: CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X, COSMO, LAGO, NELIO
+- Side tables: CIRO, DAMIO, RAW S, MELA
+- Dining tables: ZENO, NERO
 - Bar stools: BARNI
+- Outdoor seating: DIEGO, CRUZ
 - Trays: DAVA, CUT, RAW T, SIVA
 - Coasters: KIVA
-- Kitchen: IVANA (paper towel), NIA (dish towel)
-- Wine rack: VINIA
+- Kitchen: IVANA (paper towel), NIA (dish towel), KENA
+- Wine rack: VINIA, VINO
 - Bookends: DARCY
+- Vases: RAW V
+- Umbrella stands: PAREO
+
+IMPORTANT: Return ALL matching product names from this catalog
 
 Respond with JSON:
 {
@@ -16992,7 +17027,7 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 1000
+            maxOutputTokens: 2000  // Increased to prevent truncation
           }
         },
         {
@@ -17626,14 +17661,15 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
             {
               role: "user",
               parts: [
-                { text: `Here is the product "${productTitle}" - this is just a REFERENCE IMAGE showing what the NEW product looks like. DO NOT edit this product image. Instead, use it to understand the exact design, colors, and style of the replacement product.` },
-                productImageParts[0]
+                { text: `Here is the product "${productTitle}" - this is just a REFERENCE IMAGE showing what the NEW product looks like. Study this image carefully. DO NOT edit this product image. Instead, memorize every detail: the frame color, the seat material, the wood grain pattern, the exact proportions.` },
+                productImageParts[0],
+                ...(productImageParts.length > 1 ? [{ text: `Here is another angle of the same product:` }, productImageParts[1]] : [])
               ]
             },
-            // Turn 4: AI acknowledges (simulated)
+            // Turn 4: AI acknowledges AND describes the product (forces it to actually look)
             {
               role: "model",
-              parts: [{ text: `I see the ${productTitle}. I understand this is the new product that will REPLACE existing similar furniture in the room. I will NOT edit this image - I will use it only as a design reference for the replacement.` }]
+              parts: [{ text: `I have carefully studied the ${productTitle}. I can see it has: a black metal frame, a wooden seat with natural wood grain, clean minimalist lines, and industrial-modern style. I will replicate this EXACT design when I add it to the room. I will NOT edit this reference image - I will use it only as a design template for the replacement furniture.` }]
             },
             // Turn 5: Final instruction to edit the ROOM - REPLACE not just ADD
             {
@@ -17641,11 +17677,18 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
               parts: [
                 { text: `Now EDIT THE ROOM (the first image I showed you) by REPLACING existing furniture with the ${productTitle}. 
 
-🔄 REPLACEMENT INSTRUCTIONS:
-${furnitureTypeToReplace ? `- FIND all existing ${furnitureTypeToReplace} in the room
-- REMOVE them completely
-- REPLACE them with the ${productTitle} in the SAME locations` : `- If there is existing similar furniture in the room, REPLACE it with the ${productTitle}
+⚠️ CRITICAL - REPLACE ALL INSTANCES:
+${furnitureTypeToReplace ? `- COUNT how many ${furnitureTypeToReplace} are in the room (could be 1, 2, 3, 4 or more!)
+- REMOVE ALL of them completely - do not leave any old ones behind
+- REPLACE EVERY SINGLE ONE with the ${productTitle}
+- PUT the new ${productTitle} in the EXACT SAME positions as the old furniture` : `- If there is existing similar furniture, REPLACE ALL instances with the ${productTitle}
 - If no similar furniture exists, ADD the ${productTitle} in an appropriate location`}
+
+🎨 DESIGN MATCHING - ULTRA IMPORTANT:
+- Look ONLY at the reference image I showed you (IMAGE 2)
+- The new furniture MUST be IDENTICAL to that reference
+- Same frame color, same wood color, same proportions, same style
+- DO NOT invent a different design - copy the reference EXACTLY
 
 ${productDimensions ? `📐 PRODUCT DIMENSIONS:
 ${productDimensions.height ? `- Height: ${productDimensions.height}` : ''}
@@ -17674,6 +17717,7 @@ ${productDimensions.standard ? `(Standard ${productDimensions.type} dimensions)`
           ];
           console.log(`   📤 Multi-turn conversation: Room → Product ref → REPLACE instruction`);
           console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace || 'similar items'}`);
+          console.log(`   📸 Product images in conversation: ${productImageParts.length > 1 ? '2 (main + extra angle)' : '1'}`);
         } else {
           // Single turn fallback if no product image
           contents = [{
