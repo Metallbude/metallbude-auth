@@ -19,6 +19,15 @@ try {
 }
 const path = require('path');
 
+// Sharp for image compositing (optional - for reliable product visualization)
+let sharp = null;
+try {
+  sharp = require('sharp');
+  console.log('🖼️ Sharp image library loaded - compositing available');
+} catch (e) {
+  console.log('⚠️ Sharp not installed - will use AI image generation (less reliable)');
+}
+
 // Firebase services (optional)
 let initializeFirebase = null;
 let isFirebaseReady = () => false;
@@ -17636,6 +17645,143 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
     console.log(`🎨 [VISUALIZE] Step 3: REPLACE furniture in room...`);
     console.log(`   🏠 Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
     console.log(`   📦 Product reference image: ${hasProductImage ? 'YES - will use exact design' : 'NO - text description only'}`);
+    
+    // ======================================================================
+    // METHOD 1: IMAGE COMPOSITING (uses ACTUAL product image - most reliable)
+    // Instead of asking AI to "draw" the product, we paste the real image
+    // ======================================================================
+    if (sharp && hasProductImage && productImageUrls.length > 0) {
+      console.log(`   🎯 [COMPOSITING] Attempting image compositing with sharp...`);
+      
+      try {
+        // Step 3A: Ask AI ONLY for placement coordinates (not to generate image)
+        const placementPrompt = `You are analyzing a room image to determine WHERE to place a product.
+
+The product is: "${productTitle}"
+${visualization.suggestedPlacement ? `Suggested placement: ${visualization.suggestedPlacement}` : ''}
+
+Analyze this room image and return the EXACT pixel coordinates where the product should be placed.
+
+Return ONLY valid JSON in this exact format:
+{
+  "placement": {
+    "x": <number - x coordinate from left edge of image>,
+    "y": <number - y coordinate from top edge of image>,
+    "width": <number - how wide the product should appear in pixels>,
+    "height": <number - how tall the product should appear in pixels>
+  },
+  "anchor": "<string - where on the product to anchor: 'center', 'bottom-center', 'top-center'>",
+  "confidence": <number 0-1>
+}
+
+IMPORTANT:
+- The coordinates should be where you would naturally place this type of product
+- Consider the room's perspective and scale
+- Use realistic proportions (e.g., a toilet paper holder is small, a sofa is large)
+- If replacing existing furniture, use its location`;
+
+        const roomBuffer = Buffer.from(roomImage, 'base64');
+        const roomMetadata = await sharp(roomBuffer).metadata();
+        console.log(`   📐 Room dimensions: ${roomMetadata.width}x${roomMetadata.height}`);
+
+        const placementResponse = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+          {
+            contents: [{
+              role: "user",
+              parts: [
+                { text: placementPrompt },
+                { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
+              ]
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 500
+            }
+          },
+          { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
+        );
+
+        const placementText = placementResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        console.log(`   📍 [COMPOSITING] Placement response: ${placementText.substring(0, 200)}...`);
+        
+        // Parse placement coordinates
+        const placementData = robustParseAIJson(placementText, {});
+        
+        if (placementData.placement && placementData.placement.x !== undefined) {
+          const { x, y, width, height } = placementData.placement;
+          const anchor = placementData.anchor || 'center';
+          
+          console.log(`   📍 [COMPOSITING] Placement: x=${x}, y=${y}, size=${width}x${height}, anchor=${anchor}`);
+          
+          // Step 3B: Download and process product image
+          const productUrl = productImageUrls[0];
+          console.log(`   📥 [COMPOSITING] Downloading product image...`);
+          
+          const productResponse = await axios.get(productUrl, { 
+            responseType: 'arraybuffer',
+            timeout: 15000 
+          });
+          const productBuffer = Buffer.from(productResponse.data);
+          
+          // Resize product to specified dimensions
+          const resizedProduct = await sharp(productBuffer)
+            .resize(Math.round(width), Math.round(height), { 
+              fit: 'contain',
+              background: { r: 0, g: 0, b: 0, alpha: 0 }  // Transparent background
+            })
+            .png()  // Use PNG to preserve any transparency
+            .toBuffer();
+          
+          console.log(`   🔧 [COMPOSITING] Product resized to ${Math.round(width)}x${Math.round(height)}`);
+          
+          // Step 3C: Calculate composite position based on anchor
+          let compositeX = Math.round(x);
+          let compositeY = Math.round(y);
+          
+          if (anchor === 'center' || anchor === 'bottom-center' || anchor === 'top-center') {
+            compositeX = Math.round(x - width / 2);
+          }
+          if (anchor === 'center') {
+            compositeY = Math.round(y - height / 2);
+          } else if (anchor === 'bottom-center') {
+            compositeY = Math.round(y - height);
+          }
+          
+          // Ensure coordinates are within bounds
+          compositeX = Math.max(0, Math.min(compositeX, roomMetadata.width - width));
+          compositeY = Math.max(0, Math.min(compositeY, roomMetadata.height - height));
+          
+          // Step 3D: Composite product onto room
+          console.log(`   🖼️ [COMPOSITING] Placing product at (${compositeX}, ${compositeY})...`);
+          
+          const compositedImage = await sharp(roomBuffer)
+            .composite([{
+              input: resizedProduct,
+              left: compositeX,
+              top: compositeY,
+              blend: 'over'  // Place on top
+            }])
+            .jpeg({ quality: 90 })
+            .toBuffer();
+          
+          generatedImageBase64 = compositedImage.toString('base64');
+          console.log(`✅ [COMPOSITING] SUCCESS! Composited image: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+          console.log(`   ✨ Used ACTUAL product image (not AI-generated)`);
+          
+        } else {
+          console.log(`   ⚠️ [COMPOSITING] Could not get placement coordinates, falling back to AI generation`);
+        }
+        
+      } catch (compError) {
+        console.log(`   ❌ [COMPOSITING] Failed: ${compError.message}`);
+        console.log(`   🔄 Falling back to AI image generation...`);
+      }
+    }
+    
+    // ======================================================================
+    // METHOD 2: AI IMAGE GENERATION (fallback if compositing fails)
+    // ======================================================================
     
     // Models that support image editing via Generative Language API
     const imageModels = [
