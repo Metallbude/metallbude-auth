@@ -17363,40 +17363,45 @@ Respond in JSON:
     const numProductImages = productImageParts.length;
     
     // CRITICAL: Room is IMAGE 1 (the background to preserve), Product is IMAGE 2 (item to add)
-    const imageEditPrompt = `TASK: Add a product into a customer's room photo.
+    const imageEditPrompt = `TASK: Replace an existing item in the customer's room with a new product.
 
-=== IMAGE 1: CUSTOMER'S ROOM (BACKGROUND - DO NOT CHANGE!) ===
-This is the customer's actual room photo. This is your CANVAS.
-- KEEP this image EXACTLY as it is
-- Same walls, floor, lighting, furniture, colors
-- You will ADD something to this image, not recreate it
+=== IMAGE 1: CUSTOMER'S ROOM ===
+This is the customer's actual room photo. They have an existing ${roomAnalysis.roomType || 'item'} that needs to be REPLACED.
+- KEEP the room exactly as it is (walls, floor, lighting, other furniture)
+- FIND the existing similar item (e.g., their current toilet paper holder, bar stool, etc.)
+- REMOVE that existing item
+- The space where it was should now have the new product
 
-=== IMAGE 2: PRODUCT TO ADD ("${productTitle}") ===
-This shows the Metallbude product on a white/studio background.
-- EXTRACT this product from its white background
-- This is what you will ADD into the room
+=== IMAGE 2: NEW PRODUCT ("${productTitle}") ===
+This is the Metallbude product that should REPLACE the existing item in the room.
+- This product is shown on a white/studio background
+- Extract this product and place it WHERE THE OLD ITEM WAS
 
 === YOUR TASK ===
-1. Start with IMAGE 1 (the customer's room) as your base
-2. Look at IMAGE 2 to see the exact product appearance
-3. Extract/cut out the product from IMAGE 2 (removing white background)
-4. Paste/place the product INTO IMAGE 1 (the room)
-5. Position: ${roomAnalysis.suggestedPlacement || 'appropriate location in the room'}
-6. Scale the product realistically for the room
-7. Add natural shadows so it blends in
+1. Look at IMAGE 1 - find the existing similar item (the one the customer wants to replace)
+2. Look at IMAGE 2 - this is the new "${productTitle}" product
+3. REMOVE the old item from IMAGE 1
+4. PLACE the new product (from IMAGE 2) in the SAME LOCATION where the old item was
+5. Scale the new product appropriately
+6. Add natural shadows so it looks realistic
+
+=== EXAMPLE ===
+- If customer has a chrome toilet paper holder → REPLACE it with the Metallbude toilet paper holder
+- If customer has old bar stools → REPLACE them with the Metallbude bar stools
+- Same position, same function, just the NEW product instead
 
 === CRITICAL REQUIREMENTS ===
-✅ OUTPUT = Customer's room (Image 1) + Product (from Image 2) added
-✅ The room must look IDENTICAL to Image 1 (same walls, colors, everything)
-✅ Only ADDITION is the product from Image 2
+✅ OUTPUT = Customer's room with OLD item REPLACED by NEW product
+✅ The room must look IDENTICAL except the replaced item
+✅ New product goes in the SAME SPOT as the old one
 ✅ Product must match Image 2 exactly (same color, shape, design)
 
-❌ DO NOT generate a new/different room
-❌ DO NOT change the room's walls, floor, or existing furniture  
-❌ DO NOT reimagine or redesign the product
-❌ DO NOT change the product's color or shape
+❌ DO NOT just add the product somewhere random
+❌ DO NOT keep the old item AND add the new one
+❌ DO NOT generate a completely new room
+❌ DO NOT change the product's appearance
 
-OUTPUT: The customer's original room photo (Image 1) with the "${productTitle}" product (from Image 2) realistically placed inside it.`;
+OUTPUT: The customer's room photo with the existing item REPLACED by the "${productTitle}" from Image 2.`;
     
     console.log(`🎨 [VISUALIZE] Step 3: COMPOSITING - Add product to customer's room...`);
     console.log(`   Room image (KEEP): ${(roomImage.length / 1024).toFixed(1)} KB`);
