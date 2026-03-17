@@ -17653,24 +17653,90 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
         // Prepare images
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         
-        // Determine product type for replacement logic - be SPECIFIC
+        // Determine product type for replacement logic - be VERY SPECIFIC to each product category
         const productTypeLower = (productTitle || '').toLowerCase();
+        
+        // === SEATING ===
         const isBarStool = productTypeLower.includes('bar stool') || productTypeLower.includes('barhocker');
         const isChair = productTypeLower.includes('chair') || productTypeLower.includes('stuhl') || productTypeLower.includes('sessel');
+        const isBench = productTypeLower.includes('bench') || productTypeLower.includes('bank');
+        
+        // === TABLES ===
         const isCoffeeTable = productTypeLower.includes('coffee table') || productTypeLower.includes('couchtisch') || productTypeLower.includes('couch table');
         const isSideTable = productTypeLower.includes('side table') || productTypeLower.includes('beistelltisch');
         const isDiningTable = productTypeLower.includes('dining table') || productTypeLower.includes('esstisch');
+        const isNightstand = productTypeLower.includes('nightstand') || productTypeLower.includes('nachttisch') || productTypeLower.includes('night stand');
+        const isConsoleTable = productTypeLower.includes('console') || productTypeLower.includes('konsolentisch');
         const isTable = productTypeLower.includes('table') || productTypeLower.includes('tisch');
-        const isShelf = productTypeLower.includes('shelf') || productTypeLower.includes('regal');
         
+        // === STORAGE / SHELVING ===
+        const isShelf = productTypeLower.includes('shelf') || productTypeLower.includes('regal');
+        const isRack = productTypeLower.includes('rack') || productTypeLower.includes('ständer');
+        const isHook = productTypeLower.includes('hook') || productTypeLower.includes('haken');
+        const isHanger = productTypeLower.includes('hanger') || productTypeLower.includes('garderobe') || productTypeLower.includes('coat');
+        
+        // === BATHROOM ACCESSORIES ===
+        const isToiletPaperHolder = productTypeLower.includes('toilet paper') || productTypeLower.includes('klopapier') || productTypeLower.includes('toilettenpapier');
+        const isTowelHolder = productTypeLower.includes('towel') || productTypeLower.includes('handtuch');
+        const isSoapDispenser = productTypeLower.includes('soap') || productTypeLower.includes('seife');
+        const isToothbrushHolder = productTypeLower.includes('toothbrush') || productTypeLower.includes('zahnbürste');
+        const isBathroomAccessory = isToiletPaperHolder || isTowelHolder || isSoapDispenser || isToothbrushHolder;
+        
+        // === LIGHTING ===
+        const isLamp = productTypeLower.includes('lamp') || productTypeLower.includes('lampe') || productTypeLower.includes('light') || productTypeLower.includes('leuchte');
+        
+        // === DECOR ===
+        const isMirror = productTypeLower.includes('mirror') || productTypeLower.includes('spiegel');
+        const isClock = productTypeLower.includes('clock') || productTypeLower.includes('uhr');
+        const isVase = productTypeLower.includes('vase');
+        const isPlanter = productTypeLower.includes('planter') || productTypeLower.includes('plant stand') || productTypeLower.includes('blumen');
+        
+        // === BEDROOM ===
+        const isBedFrame = productTypeLower.includes('bed frame') || productTypeLower.includes('bett');
+        const isHeadboard = productTypeLower.includes('headboard') || productTypeLower.includes('kopfteil');
+        
+        // Build the specific replacement instruction
         let furnitureTypeToReplace = '';
         if (isBarStool) furnitureTypeToReplace = 'bar stools, counter stools, or high chairs';
         else if (isChair) furnitureTypeToReplace = 'chairs, armchairs, or seating';
+        else if (isBench) furnitureTypeToReplace = 'benches or seating benches';
         else if (isCoffeeTable) furnitureTypeToReplace = 'coffee tables (the low table in front of sofas/chairs)';
         else if (isSideTable) furnitureTypeToReplace = 'side tables or end tables';
         else if (isDiningTable) furnitureTypeToReplace = 'dining tables';
+        else if (isNightstand) furnitureTypeToReplace = 'nightstands or bedside tables';
+        else if (isConsoleTable) furnitureTypeToReplace = 'console tables or entry tables';
         else if (isTable) furnitureTypeToReplace = 'tables of similar size and type';
         else if (isShelf) furnitureTypeToReplace = 'shelves, wall shelves, or storage units';
+        else if (isRack) furnitureTypeToReplace = 'racks, stands, or similar storage';
+        else if (isHook) furnitureTypeToReplace = 'wall hooks or hanging hooks';
+        else if (isHanger) furnitureTypeToReplace = 'coat hangers, coat racks, or garment hooks';
+        // BATHROOM
+        else if (isToiletPaperHolder) furnitureTypeToReplace = 'toilet paper holders or similar bathroom accessories';
+        else if (isTowelHolder) furnitureTypeToReplace = 'towel holders, towel racks, or towel bars';
+        else if (isSoapDispenser) furnitureTypeToReplace = 'soap dispensers or bathroom accessories';
+        else if (isToothbrushHolder) furnitureTypeToReplace = 'toothbrush holders or bathroom accessories';
+        else if (isBathroomAccessory) furnitureTypeToReplace = 'bathroom accessories';
+        // LIGHTING
+        else if (isLamp) furnitureTypeToReplace = 'lamps, light fixtures, or lighting';
+        // DECOR
+        else if (isMirror) furnitureTypeToReplace = 'mirrors or wall mirrors';
+        else if (isClock) furnitureTypeToReplace = 'clocks or wall clocks';
+        else if (isVase) furnitureTypeToReplace = 'vases or decorative objects';
+        else if (isPlanter) furnitureTypeToReplace = 'planters, plant stands, or similar';
+        // BEDROOM
+        else if (isBedFrame) furnitureTypeToReplace = 'bed frames or beds';
+        else if (isHeadboard) furnitureTypeToReplace = 'headboards';
+        // FALLBACK: Use the product title itself (cleaned up)
+        else {
+          // Extract meaningful type from product title - e.g. "TOILET PAPER HOLDER TUALI" -> "toilet paper holder"
+          const cleanTitle = (productTitle || '').toLowerCase()
+            .replace(/metallbude/gi, '')
+            .replace(/[a-z]+\d+/gi, '')  // Remove model numbers
+            .trim();
+          furnitureTypeToReplace = `similar items to the ${cleanTitle} (or existing similar objects in the room)`;
+        }
+        
+        console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace}`);
         
         // MULTI-TURN CONVERSATION APPROACH
         // This forces the AI to understand each image's role before editing
@@ -17690,7 +17756,7 @@ IMAGE #2 = PRODUCT REFERENCE (copy this design!)
 
 ‼️ YOUR EXACT TASK:
 1. Look at the ROOM image
-2. Find ANY existing ${furnitureTypeToReplace || 'coffee tables, side tables, or similar furniture'}
+2. Find ANY existing ${furnitureTypeToReplace}
 3. DELETE them completely from the image
 4. Draw the PRODUCT from IMAGE #2 in their place
 5. The product MUST look IDENTICAL to IMAGE #2 - same colors, same design, same everything
@@ -17710,13 +17776,13 @@ Here is IMAGE #2 - THE PRODUCT "${productTitle}" (COPY THIS EXACT DESIGN):` },
 🚨 CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
 1️⃣ REMOVE OLD FURNITURE:
-   - Find ALL ${furnitureTypeToReplace || 'tables'} in the ROOM image
+   - Find ALL ${furnitureTypeToReplace} in the ROOM image
    - Count them (there may be 1, 2, or more)
    - ERASE them completely - no traces left
 
 2️⃣ ADD NEW FURNITURE:
    - Place the ${productTitle} from IMAGE #2 where the old furniture was
-   - If there were 2 tables, add 2 of the new product
+   - If there were 2 similar items, add 2 of the new product
    - Position them naturally in the same spots
 
 3️⃣ MATCH THE DESIGN EXACTLY:
@@ -17743,7 +17809,6 @@ DO NOT return IMAGE #2. DO NOT add furniture in random places. DO NOT change the
             }
           ];
           console.log(`   📤 Single prompt with ${productImageParts.length} product image(s) - explicit REMOVE + ADD instructions`);
-          console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace || 'similar tables'}`);
         } else {
           // Single turn fallback if no product image
           contents = [{
