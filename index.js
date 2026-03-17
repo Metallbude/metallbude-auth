@@ -17362,25 +17362,23 @@ Respond in JSON:
     
     const numProductImages = productImageParts.length;
     
-    // ULTRA-SIMPLE APPROACH: Room first, Product second, direct instructions
-    const imageEditPrompt = `IMAGE 1 = Customer's room photo
-IMAGE 2 = "${productTitle}" product photo (white background)
+    // REVERSE PSYCHOLOGY: AI keeps doing opposite, so ask for opposite
+    // We WANT: Room with product in it
+    // AI KEEPS GIVING: Product image with room furniture
+    // So ASK FOR: "Edit the product image" and maybe AI gives us the room!
+    const imageEditPrompt = `I have two images:
+- IMAGE 1: A product photo of "${productTitle}" on a white/studio background  
+- IMAGE 2: A customer's room photo
 
-TASK: Edit IMAGE 1 (the room) by replacing the existing furniture with the product from IMAGE 2.
+Take the "${productTitle}" from IMAGE 1 and place it naturally into the room shown in IMAGE 2.
 
-OUTPUT REQUIREMENTS:
-- Output must be IMAGE 1 (the room) edited
-- Keep the room's walls, floor, lighting, and layout exactly the same
-- Replace the existing similar furniture in the room with "${productTitle}"
-- Remove the white background from the product and blend it naturally into the room
-- Add realistic shadows matching the room's lighting
+The output should show the customer's room (from IMAGE 2) with "${productTitle}" placed inside it, replacing any similar existing furniture.
 
-DO NOT CHANGE THE ROOM - only swap the furniture piece.
-DO NOT OUTPUT A WHITE BACKGROUND - the output must show the room.`;
+Keep the room exactly as it is - same walls, floor, lighting. Only add the product from IMAGE 1 into that space.`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: Edit room image (replace furniture)...`);
-    console.log(`   🏠 IMAGE 1 (Room to edit): ${(roomImage.length / 1024).toFixed(1)} KB`);
-    console.log(`   🏪 IMAGE 2 (Product source): ${numProductImages > 0 ? (productImageParts[0]?.inlineData?.data?.length / 1024).toFixed(1) + ' KB' : 'none'}`);
+    console.log(`🎨 [VISUALIZE] Step 3: Place product into room...`);
+    console.log(`   🏪 IMAGE 1 (Product): ${numProductImages > 0 ? (productImageParts[0]?.inlineData?.data?.length / 1024).toFixed(1) + ' KB' : 'none'}`);
+    console.log(`   🏠 IMAGE 2 (Room): ${(roomImage.length / 1024).toFixed(1)} KB`);
     
     // Models that support image editing via Generative Language API
     const imageModels = [
@@ -17395,17 +17393,17 @@ DO NOT OUTPUT A WHITE BACKGROUND - the output must show the room.`;
       try {
         console.log(`   🖼️ Trying compositing with: ${modelName}`);
         
-        // SEND ROOM FIRST (IMAGE 1), PRODUCT SECOND (IMAGE 2)
-        // This matches the prompt: IMAGE 1 = room, IMAGE 2 = product
+        // PRODUCT FIRST (IMAGE 1), ROOM SECOND (IMAGE 2)
+        // Prompt says: Take product from IMAGE 1, place into room from IMAGE 2
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         const firstProductImage = productImageParts[0];
         
         const editParts = [
           { text: imageEditPrompt },
-          roomImagePart,         // IMAGE 1: Room (the base to edit)
-          firstProductImage      // IMAGE 2: Product (extract from this)
+          firstProductImage,     // IMAGE 1: Product (source to extract)
+          roomImagePart          // IMAGE 2: Room (destination)
         ];
-        console.log(`   📤 Sending: IMAGE 1=Room, IMAGE 2=Product - asking to EDIT the room`);
+        console.log(`   📤 Sending: IMAGE 1=Product, IMAGE 2=Room - "place product into room"`);
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
