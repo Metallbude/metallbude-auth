@@ -16920,26 +16920,34 @@ app.post('/ai/analyze-selected-object', async (req, res) => {
     const shopifyLanguage = (language || 'DE').toUpperCase();
     const shopifyCountry = (country || 'DE').toUpperCase();
     
+    console.log(`🎯 [SELECTED] Analyzing selected object: "${selectedObject || customQuery}"`);
+    console.log(`   Language: ${shopifyLanguage}, Country: ${shopifyCountry}`);
+    console.log(`   Image provided: ${image ? 'yes (' + (image.length / 1024).toFixed(1) + ' KB)' : 'NO'}`);
+    
     if (!image) {
+      console.log(`❌ [SELECTED] No image provided`);
       return res.status(400).json({ error: 'No image provided' });
     }
     
     const geminiKey = process.env.GEMINI_API_KEY;
     if (!geminiKey) {
+      console.log(`❌ [SELECTED] Gemini API key missing`);
       return res.status(500).json({ error: 'Gemini API not configured' });
     }
     
     // Determine what the user wants to focus on
     const focusOn = customQuery || selectedObject;
-    console.log(`🎯 User selected to focus on: "${focusOn}"`);
+    console.log(`🎯 [SELECTED] User selected to focus on: "${focusOn}"`);
     
-    const geminiResponse = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
-      {
-        contents: [{
-          parts: [
-            {
-              text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture.
+    let geminiResponse;
+    try {
+      geminiResponse = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        {
+          contents: [{
+            parts: [
+              {
+                text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture.
 
 The user has selected to focus on: "${focusOn}"
 
@@ -16956,6 +16964,7 @@ Metallbude Product Categories:
 - Shelves: THARON, LENN, LINARA, ARIS, RAW L, RIVO
 - Tables: COSMO, CIRO, CUT, RAW C, LAGO, NELIO, DAMIO
 - Outdoor seating: DIEGO, CRUZ
+- Bar stools: BARNI
 - Trays: DAVA, CUT, RAW T, SIVA
 - Coasters: KIVA
 - Kitchen: IVANA (paper towel), NIA (dish towel)
@@ -16972,149 +16981,153 @@ Respond with JSON:
 }
 
 CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
-            },
-            {
-              inlineData: {
-                mimeType: 'image/jpeg',
-                data: image
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: image
+                }
               }
-            }
-          ]
-        }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 1000
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 1000
+          }
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 30000
         }
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000
-      }
-    );
+      );
+    } catch (geminiErr) {
+      console.log(`❌ [SELECTED] Gemini API call failed: ${geminiErr.message}`);
+      return res.status(500).json({ error: 'AI analysis failed', details: geminiErr.message });
+    }
     
     const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
     
-    if (geminiText) {
-      console.log('📝 Focused Gemini response:', geminiText);
-      
-      // Use robust JSON parser
-      const analysis = robustParseAIJson(geminiText, {
-        focusedObject: focusOn,
-        userIntent: null,
-        productType: null,
-        matchingProducts: [],
-        searchTerms: []
-      });
-      
-      if (analysis.matchingProducts?.length > 0 || analysis.searchTerms?.length > 0) {
-        // Fetch products from Shopify with translations
-        let products = [];
-        if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
-          const shopifyQuery = `
-            query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
-              products(first: 15, query: $query, sortKey: RELEVANCE) {
-                edges {
-                  node {
-                    id
-                    title
-                    handle
-                    description
-                    productType
-                    priceRange { minVariantPrice { amount currencyCode } }
-                    featuredImage { url }
-                    variants(first: 1) { edges { node { availableForSale } } }
-                  }
-                }
-              }
-            }
-          `;
-          
-          for (const productName of analysis.matchingProducts.slice(0, 3)) {
-            try {
-              const shopifyResponse = await axios.post(
-                config.apiUrl,  // Use Storefront API, not Admin API
-                { 
-                  query: shopifyQuery, 
-                  variables: { 
-                    query: productName,
-                    lang: shopifyLanguage,
-                    country: shopifyCountry
-                  } 
-                },
-                {
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'X-Shopify-Storefront-Access-Token': config.storefrontToken,
-                    'Accept-Language': shopifyLanguage.toLowerCase()
-                  },
-                  timeout: 10000
-                }
-              );
-              
-              const edges = shopifyResponse.data?.data?.products?.edges || [];
-              for (const edge of edges) {
-                const p = edge.node;
-                const titleLower = p.title.toLowerCase();
-                
-                // STRICT FILTERING: Only include if title matches a product name
-                let isRelevant = false;
-                for (const mp of analysis.matchingProducts) {
-                  if (titleLower.includes(mp.toLowerCase())) {
-                    isRelevant = true;
-                    console.log(`✅ Focused: "${p.title}" matches "${mp}"`);
-                    break;
-                  }
-                }
-                
-                if (!isRelevant) {
-                  console.log(`⏭️ Focused: Skipping irrelevant "${p.title}"`);
-                  continue;
-                }
-                
-                // Avoid duplicates
-                if (products.some(existing => existing.id === p.id)) {
-                  continue;
-                }
-                
-                products.push({
-                  id: p.id,
-                  handle: p.handle,
-                  title: p.title,
-                  price: p.priceRange?.minVariantPrice?.amount,
-                  currency: p.priceRange?.minVariantPrice?.currencyCode,
-                  image: p.featuredImage?.url,
-                  available: p.variants?.edges?.[0]?.node?.availableForSale,
-                  relevanceScore: 0.9
-                });
-              }
-            } catch (e) {
-              console.log(`Search for ${productName} failed:`, e.message);
-            }
-          }
-          
-          console.log(`📦 Focused analysis: Found ${products.length} relevant products`);
-        }
-        
-        return res.json({
-          focusedObject: focusOn,
-          needsUserSelection: false,
-          productType: analysis.productType,
-          matchingProducts: analysis.matchingProducts || [],
-          userIntent: analysis.userIntent,
-          searchTerms: analysis.searchTerms || [],
-          products: products
-        });
-      } else {
-        console.log('⚠️ Focused analysis: No matching products found');
-      }
-    } else {
-      console.log('❌ No text in Gemini response');
+    if (!geminiText) {
+      console.log('❌ [SELECTED] No text in Gemini response');
+      return res.status(500).json({ error: 'AI returned empty response' });
     }
     
-    return res.status(500).json({ error: 'Could not analyze selected object' });
+    console.log('📝 [SELECTED] Gemini response:', geminiText.substring(0, 300));
+    
+    // Use robust JSON parser
+    const analysis = robustParseAIJson(geminiText, {
+      focusedObject: focusOn,
+      userIntent: null,
+      productType: null,
+      matchingProducts: [],
+      searchTerms: []
+    });
+    
+    console.log(`📊 [SELECTED] Parsed analysis:`, JSON.stringify(analysis, null, 2).substring(0, 500));
+    
+    // Fetch products from Shopify with translations
+    let products = [];
+    
+    if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
+      const shopifyQuery = `
+        query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
+          products(first: 15, query: $query, sortKey: RELEVANCE) {
+            edges {
+              node {
+                id
+                title
+                handle
+                description
+                productType
+                priceRange { minVariantPrice { amount currencyCode } }
+                featuredImage { url }
+                variants(first: 1) { edges { node { availableForSale } } }
+              }
+            }
+          }
+        }
+      `;
+      
+      for (const productName of analysis.matchingProducts.slice(0, 3)) {
+        try {
+          const shopifyResponse = await axios.post(
+            config.apiUrl,  // Use Storefront API, not Admin API
+            { 
+              query: shopifyQuery, 
+              variables: { 
+                query: productName,
+                lang: shopifyLanguage,
+                country: shopifyCountry
+              } 
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+                'Accept-Language': shopifyLanguage.toLowerCase()
+              },
+              timeout: 10000
+            }
+          );
+          
+          const edges = shopifyResponse.data?.data?.products?.edges || [];
+          for (const edge of edges) {
+            const p = edge.node;
+            const titleLower = p.title.toLowerCase();
+            
+            // STRICT FILTERING: Only include if title matches a product name
+            let isRelevant = false;
+            for (const mp of analysis.matchingProducts) {
+              if (titleLower.includes(mp.toLowerCase())) {
+                isRelevant = true;
+                console.log(`✅ [SELECTED] "${p.title}" matches "${mp}"`);
+                break;
+              }
+            }
+            
+            if (!isRelevant) {
+              console.log(`⏭️ [SELECTED] Skipping irrelevant "${p.title}"`);
+              continue;
+            }
+            
+            // Avoid duplicates
+            if (products.some(existing => existing.id === p.id)) {
+              continue;
+            }
+            
+            products.push({
+              id: p.id,
+              handle: p.handle,
+              title: p.title,
+              price: p.priceRange?.minVariantPrice?.amount,
+              currency: p.priceRange?.minVariantPrice?.currencyCode,
+              image: p.featuredImage?.url,
+              available: p.variants?.edges?.[0]?.node?.availableForSale,
+              relevanceScore: 0.9
+            });
+          }
+        } catch (e) {
+          console.log(`[SELECTED] Search for ${productName} failed:`, e.message);
+        }
+      }
+      
+      console.log(`📦 [SELECTED] Found ${products.length} relevant products`);
+    }
+    
+    // Always return what we found, even if empty
+    console.log(`✅ [SELECTED] Returning response with ${products.length} products`);
+    return res.json({
+      focusedObject: focusOn,
+      needsUserSelection: false,
+      productType: analysis.productType || null,
+      matchingProducts: analysis.matchingProducts || [],
+      userIntent: analysis.userIntent || null,
+      searchTerms: analysis.searchTerms || [],
+      products: products
+    });
     
   } catch (error) {
-    console.error('❌ Focused analysis error:', error.message);
+    console.error('❌ [SELECTED] Error:', error.message);
     res.status(500).json({ error: 'Analysis failed', details: error.message });
   }
 });
