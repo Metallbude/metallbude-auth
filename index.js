@@ -16280,6 +16280,24 @@ ONLY list FURNITURE, HOME ACCESSORIES, or items that Metallbude could sell or pr
 DO NOT list consumables like toilet paper, tissues, food, drinks, plants, etc.
 List items like: furniture, shelves, holders, racks, trays, mirrors, etc.
 
+⚠️ IMPORTANT FOR FURNITURE - BE SPECIFIC:
+- For TABLES: Don't just say "table" - specify the TYPE:
+  * "coffee table" (low table in front of sofa/chairs)
+  * "side table" / "end table" (small table next to sofa/armchair)
+  * "dining table" (tall table for eating)
+  * "nightstand" (table next to bed)
+  * "desk" (work table)
+  * "console table" (narrow table against wall)
+- For CHAIRS: Don't just say "chair" - specify:
+  * "bar stool" (tall stool for counter/bar)
+  * "dining chair" (chair at dining table)
+  * "lounge chair" (comfy armchair)
+  * "office chair" (desk chair)
+- For SHELVES: Don't just say "shelf" - specify:
+  * "wall shelf" (mounted on wall)
+  * "standing shelf" (free-standing bookcase)
+  * "shoe rack" (for shoes)
+
 === STEP 2: DETERMINE IF CLARIFICATION NEEDED ===
 If you detect MULTIPLE distinct objects (more than 1), set needsUserSelection: true
 The app will then ask the user which object they want to search for.
@@ -16406,7 +16424,9 @@ Respond ONLY with JSON:
 }
 
 IMPORTANT:
-- detectedObjects: List ALL distinct objects you can see in the image
+- detectedObjects: List ALL distinct objects - be SPECIFIC about furniture types!
+  * Good: ["coffee table", "lounge chairs", "side table", "wall shelf"]
+  * Bad: ["table", "chairs", "table", "shelf"]
 - needsUserSelection: Set to true if more than 1 object detected, false if only 1 clear object
 - If needsUserSelection is true, still fill in mainObject etc. for the most prominent object
 
@@ -16448,16 +16468,16 @@ EXAMPLE 2 - SINGLE ITEM (find holder/storage for it):
 
 EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
 {
-  "detectedObjects": ["coffee cup", "coaster", "towel", "table"],
+  "detectedObjects": ["coffee table", "side table", "lounge chairs", "wall shelf"],
   "needsUserSelection": true,
-  "mainObject": "Coffee cup on a coaster",
+  "mainObject": "Large coffee table in front of seating",
   "confidence": 0.7,
-  "userIntent": "Multiple objects detected - user should specify which one",
-  "productType": "Coaster",
-  "matchingProducts": ["KIVA"],
-  "labels": ["cup", "coaster", "towel", "table", "kitchen"],
-  "colors": ["white", "weiß", "brown", "braun"],
-  "material": "Ceramic/Fabric",
+  "userIntent": "Multiple furniture pieces detected - user should specify which one",
+  "productType": "Coffee table",
+  "matchingProducts": ["CUT", "RAW C", "RAW C SQUARE", "LIVIA", "VESINA X"],
+  "labels": ["coffee table", "living room", "lounge", "furniture", "metal"],
+  "colors": ["black", "schwarz", "grey", "grau"],
+  "material": "Metal",
   "searchTerms": ["KIVA", "Untersetzer", "coaster", "dessous de verre", "sottobicchiere"]
 }
 
