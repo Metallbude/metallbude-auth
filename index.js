@@ -17125,6 +17125,58 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
 // ============================================================================
 
 /**
+ * Diagnostic endpoint to list available Gemini/Imagen models
+ * Helps debug image generation issues
+ */
+app.get('/ai/list-models', async (req, res) => {
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY not configured' });
+  }
+  
+  try {
+    console.log('📋 [MODELS] Listing available Gemini models...');
+    const response = await axios.get(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`,
+      { timeout: 15000 }
+    );
+    
+    const models = response.data?.models || [];
+    const modelInfo = models.map(m => ({
+      name: m.name,
+      displayName: m.displayName,
+      supportedMethods: m.supportedGenerationMethods,
+      outputModes: m.supportedOutputModes || [],
+      inputTokenLimit: m.inputTokenLimit,
+      outputTokenLimit: m.outputTokenLimit
+    }));
+    
+    // Find image-capable models
+    const imageModels = modelInfo.filter(m => 
+      m.name?.includes('imagen') || 
+      m.name?.includes('image') ||
+      m.supportedMethods?.includes('generateImages') ||
+      m.outputModes?.includes('image')
+    );
+    
+    console.log(`📋 [MODELS] Found ${models.length} total models, ${imageModels.length} image-capable`);
+    
+    res.json({
+      success: true,
+      totalModels: models.length,
+      imageCapableModels: imageModels,
+      allModels: modelInfo.map(m => m.name)
+    });
+  } catch (err) {
+    console.error('❌ [MODELS] Error listing models:', err.response?.data || err.message);
+    res.status(500).json({ 
+      error: 'Failed to list models',
+      details: err.response?.data?.error?.message || err.message
+    });
+  }
+});
+
+/**
  * Generate a room visualization showing a product in user's space
  * This is a BETA feature - unlimited during testing
  */
@@ -17314,88 +17366,191 @@ Requirements:
 - High quality, magazine-worthy composition
 - Show how the product enhances the room's aesthetic`;
     
-    // Try Gemini native image generation FIRST (most reliable with standard API key)
-    // Per docs: https://ai.google.dev/gemini-api/docs/image-generation
+    // Try Gemini native image generation
     if (geminiKey && !generatedImageBase64) {
       console.log(`🎨 [VISUALIZE] Step 3: Trying image generation...`);
       console.log(`   Prompt: ${imagePrompt.substring(0, 150)}...`);
       
+      // First, list available models to find one that supports image generation
+      let imageGenModel = null;
       try {
-        console.log(`   🎨 Trying Gemini native image gen: gemini-2.0-flash-exp`);
-        const geminiResponse = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${geminiKey}`,
-          {
-            contents: [{ 
-              parts: [{ 
-                text: imagePrompt 
-              }] 
-            }],
-            generationConfig: {
-              responseModalities: ["image", "text"]  // lowercase per docs
+        console.log(`   📋 Listing available Gemini models...`);
+        const modelsResponse = await axios.get(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`,
+          { timeout: 10000 }
+        );
+        
+        const models = modelsResponse.data?.models || [];
+        // Find models that support image generation (look for "image" in supportedGenerationMethods or name contains "image")
+        const imageModels = models.filter(m => {
+          const name = m.name || '';
+          const methods = m.supportedGenerationMethods || [];
+          const outputModes = m.supportedOutputModes || [];
+          return name.includes('imagen') || 
+                 name.includes('image') || 
+                 methods.includes('generateImages') ||
+                 outputModes.includes('image');
+        });
+        
+        if (imageModels.length > 0) {
+          console.log(`   ✅ Found ${imageModels.length} image-capable models:`);
+          imageModels.forEach(m => console.log(`      - ${m.name}`));
+          // Prefer imagen models, then experimental, then any image model
+          imageGenModel = imageModels.find(m => m.name?.includes('imagen-3')) ||
+                          imageModels.find(m => m.name?.includes('imagen')) ||
+                          imageModels.find(m => m.name?.includes('exp')) ||
+                          imageModels[0];
+          console.log(`   🎯 Selected model: ${imageGenModel.name}`);
+        } else {
+          // Log all available models for debugging
+          console.log(`   ⚠️ No image models found. Available models: ${models.map(m => m.name).join(', ')}`);
+        }
+      } catch (err) {
+        console.log(`   ⚠️ Could not list models: ${err.message}`);
+      }
+      
+      // Try multiple model names (Google keeps changing them)
+      const modelsToTry = [
+        // From discovered models
+        ...(imageGenModel ? [imageGenModel.name?.replace('models/', '')] : []),
+        // Known model names (try all variants)
+        'gemini-2.0-flash-preview-image-generation',
+        'gemini-2.0-flash-exp-image-generation', 
+        'gemini-2.0-flash-exp',
+        'gemini-2.5-flash-preview-image-generation',
+        'gemini-2.5-flash',
+        'gemini-exp-image-generation'
+      ].filter((v, i, a) => v && a.indexOf(v) === i); // Remove duplicates and nulls
+      
+      for (const modelName of modelsToTry) {
+        if (generatedImageBase64) break;
+        
+        try {
+          console.log(`   🎨 Trying Gemini model: ${modelName}`);
+          const geminiResponse = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
+            {
+              contents: [{ 
+                parts: [{ 
+                  text: imagePrompt 
+                }] 
+              }],
+              generationConfig: {
+                responseModalities: ["image", "text"]
+              }
+            },
+            { 
+              headers: { 'Content-Type': 'application/json' },
+              timeout: 90000 
+            }
+          );
+          
+          const candidates = geminiResponse.data?.candidates;
+          if (candidates?.[0]?.content?.parts) {
+            for (const part of candidates[0].content.parts) {
+              if (part.inlineData?.data) {
+                generatedImageBase64 = part.inlineData.data;
+                console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+                break;
+              }
+            }
+          }
+          if (generatedImageBase64) break;
+        } catch (err) {
+          const msg = err.response?.data?.error?.message || err.message;
+          console.log(`   ⚠️ ${modelName}: ${msg.substring(0, 120)}`);
+        }
+      }
+      
+      // Try Imagen 3 models with multiple endpoint formats
+      if (!generatedImageBase64) {
+        console.log(`   🖼️ Trying Imagen 3 models...`);
+        
+        const imagenConfigs = [
+          // Format 1: generateImages endpoint (AI Studio style)
+          { 
+            model: 'imagen-3.0-generate-001',
+            endpoint: 'generateImages',
+            body: {
+              prompt: imagePrompt,
+              config: { numberOfImages: 1, aspectRatio: "4:3", safetyFilterLevel: "BLOCK_ONLY_HIGH" }
             }
           },
           { 
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 90000 
-          }
-        );
-        
-        const candidates = geminiResponse.data?.candidates;
-        if (candidates?.[0]?.content?.parts) {
-          for (const part of candidates[0].content.parts) {
-            if (part.inlineData?.data) {
-              generatedImageBase64 = part.inlineData.data;
-              console.log(`✅ [VISUALIZE] Image generated via gemini-2.0-flash-exp! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-              break;
+            model: 'imagen-3.0-fast-generate-001',
+            endpoint: 'generateImages', 
+            body: {
+              prompt: imagePrompt,
+              config: { numberOfImages: 1, aspectRatio: "4:3" }
+            }
+          },
+          // Format 2: predict endpoint (Vertex AI style)
+          {
+            model: 'imagen-3.0-generate-001',
+            endpoint: 'predict',
+            body: {
+              instances: [{ prompt: imagePrompt }],
+              parameters: { sampleCount: 1, aspectRatio: "4:3" }
+            }
+          },
+          // Format 3: generateContent with image request (newer API)
+          {
+            model: 'imagen-3.0-generate-001',
+            endpoint: 'generateContent',
+            body: {
+              contents: [{ parts: [{ text: imagePrompt }] }],
+              generationConfig: { responseModalities: ["image"] }
             }
           }
-        }
-      } catch (err) {
-        const msg = err.response?.data?.error?.message || err.message;
-        console.log(`   ⚠️ gemini-2.0-flash-exp: ${msg.substring(0, 150)}`);
-      }
-      
-      // Fallback: Try Imagen models via generateImages endpoint (requires paid/Vertex access)
-      if (!generatedImageBase64) {
-        const imagenModels = [
-          'imagen-3.0-generate-001', 
-          'imagen-3.0-fast-generate-001'
         ];
         
-        for (const modelName of imagenModels) {
+        for (const config of imagenConfigs) {
           if (generatedImageBase64) break;
         
           try {
-            console.log(`   🎨 Trying Imagen fallback: ${modelName}`);
+            console.log(`   🎨 Trying Imagen: ${config.model} via :${config.endpoint}`);
             const imagenResponse = await axios.post(
-              `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateImages?key=${geminiKey}`,
-              {
-                prompt: imagePrompt,
-                config: {
-                  numberOfImages: 1,
-                  aspectRatio: "4:3",
-                  safetyFilterLevel: "BLOCK_ONLY_HIGH"
-                }
-              },
+              `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:${config.endpoint}?key=${geminiKey}`,
+              config.body,
               { 
                 headers: { 'Content-Type': 'application/json' },
                 timeout: 60000 
               }
             );
             
-            // Check for image in response
-            const images = imagenResponse.data?.generatedImages || imagenResponse.data?.images;
-            if (images && images[0]) {
-              const imageData = images[0].image?.imageBytes || images[0].bytesBase64Encoded || images[0].imageBytes;
-              if (imageData) {
-                generatedImageBase64 = imageData;
-                console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-                break;
+            // Check multiple response formats
+            let imageData = null;
+            
+            // Format 1: generatedImages array
+            const genImages = imagenResponse.data?.generatedImages || imagenResponse.data?.images;
+            if (genImages?.[0]) {
+              imageData = genImages[0].image?.imageBytes || genImages[0].bytesBase64Encoded || genImages[0].imageBytes;
+            }
+            
+            // Format 2: predictions array (Vertex style)
+            const predictions = imagenResponse.data?.predictions;
+            if (!imageData && predictions?.[0]) {
+              imageData = predictions[0].bytesBase64Encoded || predictions[0].image?.imageBytes;
+            }
+            
+            // Format 3: candidates with inlineData
+            const candidates = imagenResponse.data?.candidates;
+            if (!imageData && candidates?.[0]?.content?.parts) {
+              for (const part of candidates[0].content.parts) {
+                if (part.inlineData?.data) {
+                  imageData = part.inlineData.data;
+                  break;
+                }
               }
+            }
+            
+            if (imageData) {
+              generatedImageBase64 = imageData;
+              console.log(`✅ [VISUALIZE] Image generated via ${config.model}:${config.endpoint}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
             }
           } catch (err) {
             const msg = err.response?.data?.error?.message || err.message;
-            console.log(`   ⚠️ ${modelName}: ${msg.substring(0, 100)}`);
+            console.log(`   ⚠️ ${config.model}:${config.endpoint}: ${msg.substring(0, 100)}`);
           }
         }
       }
