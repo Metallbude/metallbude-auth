@@ -17213,11 +17213,14 @@ app.post('/ai/visualize-room', async (req, res) => {
       { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
     ];
     
-    // Add product images so Gemini knows what the product looks like!
+    // Fetch product images - we need MULTIPLE angles for accurate placement!
+    let productImageParts = [];  // Separate array for product images
     let productImageDescriptions = [];
     if (productImages && productImages.length > 0) {
-      console.log(`📸 [VISUALIZE] Fetching ${productImages.length} product images...`);
-      for (let i = 0; i < Math.min(productImages.length, 2); i++) {
+      // Fetch up to 4 product images for better accuracy
+      const maxProductImages = Math.min(productImages.length, 4);
+      console.log(`📸 [VISUALIZE] Fetching ${maxProductImages} of ${productImages.length} product images...`);
+      for (let i = 0; i < maxProductImages; i++) {
         try {
           const imgUrl = productImages[i];
           const imgResponse = await axios.get(imgUrl, { 
@@ -17225,14 +17228,17 @@ app.post('/ai/visualize-room', async (req, res) => {
             timeout: 10000 
           });
           const base64 = Buffer.from(imgResponse.data).toString('base64');
-          imageParts.push({ inlineData: { mimeType: 'image/jpeg', data: base64 } });
+          const productPart = { inlineData: { mimeType: 'image/jpeg', data: base64 } };
+          productImageParts.push(productPart);
+          imageParts.push(productPart);  // Also add to imageParts for analysis steps
           productImageDescriptions.push(`[Product Image ${i + 1}]`);
-          console.log(`   ✅ Added product image ${i + 1}`);
+          console.log(`   ✅ Added product image ${i + 1} (${(base64.length / 1024).toFixed(1)} KB)`);
         } catch (e) {
           console.log(`   ⚠️ Failed to fetch product image ${i + 1}: ${e.message}`);
         }
       }
     }
+    console.log(`   📦 Total product images loaded: ${productImageParts.length}`);
     
     // Step 1: Analyze the room AND product together
     console.log(`🔍 [VISUALIZE] Step 1: Analyzing room with ${imageParts.length} images (1 room + ${imageParts.length - 1} product)...`);
@@ -17349,37 +17355,47 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Step 3: IMAGE EDITING - Take user's room photo and ADD the product into it
-    // This is NOT generation from scratch - it's editing the uploaded image!
+    // Step 3: IMAGE EDITING - Take user's room photo and ADD the EXACT product into it
+    // This is NOT generation from scratch - we want the EXACT product composited!
     let generatedImageBase64 = null;
     
-    // Build the editing prompt - we're asking Gemini to MODIFY the room photo
-    const imageEditPrompt = `TASK: Edit this room photo to add the product into it.
+    // Build the editing prompt - PRODUCT IMAGES FIRST so AI focuses on them!
+    const numProductImages = productImageParts.length;
+    const imageEditPrompt = `CRITICAL TASK: Composite the EXACT product into the room photo.
 
-IMAGE 1 (Room Photo): This is the customer's actual room. PRESERVE THIS IMAGE - do not create a new room!
-IMAGE 2+ (Product Photos): This is the "${productTitle}" product that needs to be placed in the room.
+📦 PRODUCT IMAGES (Images 1-${numProductImages}): These ${numProductImages} images show the EXACT "${productTitle}" product from different angles. Study these carefully - you MUST reproduce this EXACT product!
 
-INSTRUCTIONS:
-1. Take the FIRST IMAGE (room photo) as your canvas
-2. Look at the PRODUCT IMAGES to see exactly what the product looks like
-3. Digitally place/composite the product INTO the room photo
-4. Place it ${roomAnalysis.suggestedPlacement || 'in a natural, logical location'}
-5. Match the lighting, perspective and scale of the room
-6. Make it look like a professional interior photo where the product was already there
+🏠 ROOM IMAGE (Image ${numProductImages + 1}): This is the customer's room where the product needs to be placed.
 
-CRITICAL REQUIREMENTS:
-- The OUTPUT must be the user's ORIGINAL ROOM with the product added
-- Do NOT generate a completely different room
-- Keep the same walls, floor, furniture from the original
-- The product should look naturally integrated
-- Realistic shadows and lighting to match the scene
-- Professional quality photo editing result
+YOUR TASK:
+1. STUDY the product images carefully - note the EXACT:
+   - Shape and form
+   - Color (appears to be matte black metal)
+   - Material texture
+   - Size proportions
+   - Design details
+2. Take the ROOM IMAGE as your canvas
+3. Place the EXACT product from the product images INTO the room
+4. Position: ${roomAnalysis.suggestedPlacement || 'appropriate location on the wall'}
 
-OUTPUT: The edited room photo showing the "${productTitle}" placed in the space.`;
+⚠️ CRITICAL - DO NOT:
+- Invent or imagine a different product
+- Change the product's color, shape, or design
+- Generate a generic toilet paper holder
+- Create a completely new room
+
+✅ YOU MUST:
+- Copy the EXACT visual appearance from the product images
+- Keep the room EXACTLY as shown (same walls, colors, fixtures)
+- Only ADD the product - don't remove or change anything else
+- Match lighting and perspective realistically
+- The product should look like it was professionally photographed in this room
+
+OUTPUT: The customer's original room photo with the EXACT "${productTitle}" product (as shown in the product images) placed in it.`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: IMAGE EDITING - Adding product to room photo...`);
+    console.log(`🎨 [VISUALIZE] Step 3: IMAGE EDITING - Adding EXACT product to room photo...`);
     console.log(`   Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
-    console.log(`   Product images: ${imageParts.length - 1}`);
+    console.log(`   Product images: ${numProductImages}`);
     
     // Models that support image editing via Generative Language API
     const imageModels = [
@@ -17394,11 +17410,15 @@ OUTPUT: The edited room photo showing the "${productTitle}" placed in the space.
       try {
         console.log(`   🖼️ Trying image edit with: ${modelName}`);
         
-        // Build parts: text prompt FIRST, then all images (room + product)
+        // Build parts: text prompt, then PRODUCT IMAGES FIRST, then room image
+        // Putting product images first helps the model focus on them!
+        const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         const editParts = [
           { text: imageEditPrompt },
-          ...imageParts  // This includes room image + product images
+          ...productImageParts,  // Product images FIRST - so AI studies the exact product
+          roomImagePart          // Room image LAST - this is the canvas to edit
         ];
+        console.log(`   📤 Sending: ${productImageParts.length} product images + 1 room image`);
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
