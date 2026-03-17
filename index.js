@@ -17355,9 +17355,9 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Step 3: IMAGE EDITING - SINGLE IMAGE APPROACH
-    // Problem: When sending 2 images, AI keeps picking the wrong one as background
-    // Solution: Send ONLY the room image, describe the product via text
+    // Step 3: IMAGE EDITING - TWO IMAGE APPROACH WITH CLEAR ROLES
+    // Problem before: AI confused which image is background vs product
+    // Solution: Send BOTH images but with CRYSTAL CLEAR instructions about their roles
     let generatedImageBase64 = null;
     
     const numProductImages = productImageParts.length;
@@ -17366,22 +17366,44 @@ Respond in JSON:
     const productDescription = visualization.visualDescription || 
       `${productTitle} - a modern furniture piece from Metallbude`;
     
-    // SINGLE IMAGE APPROACH: Only send the room, describe product in text
-    const imageEditPrompt = `This is a customer's room photo. 
+    // TWO IMAGE APPROACH: Room image to EDIT, Product image as REFERENCE for exact design
+    const hasProductImage = productImageParts.length > 0;
+    
+    const imageEditPrompt = hasProductImage ? 
+      `You are receiving TWO images:
+
+IMAGE 1 (FIRST IMAGE): A customer's room photo - THIS IS THE BACKGROUND TO EDIT
+IMAGE 2 (SECOND IMAGE): A product photo showing "${productTitle}" - THIS IS THE DESIGN REFERENCE
+
+YOUR TASK:
+1. Take IMAGE 1 (the room) - keep it EXACTLY as is (walls, floor, lighting, perspective, furniture placement)
+2. Look at IMAGE 2 (the product) - memorize its EXACT design, shape, colors, materials, style
+3. ADD the product from IMAGE 2 into IMAGE 1's room in an appropriate location
+4. The product must look EXACTLY like IMAGE 2 - same design, same colors, same proportions
+
+CRITICAL RULES:
+- OUTPUT must be IMAGE 1 (the room) with the product added
+- Do NOT output IMAGE 2 or use it as background
+- Do NOT change the room's walls, floor, or existing furniture
+- The added product must match IMAGE 2's design PRECISELY
+- Add realistic shadows and lighting to make it look natural
+
+OUTPUT: The room from IMAGE 1, now containing the product shown in IMAGE 2` :
+      // Fallback if no product image
+      `This is a customer's room photo. 
 
 Add a "${productTitle}" to this room. The product is a piece of furniture from the Metallbude store.
 
 TASK:
 - Keep the room EXACTLY as it is (same walls, floor, lighting, perspective)
-- Find any existing similar furniture (like a ${roomAnalysis.roomType?.includes('Kitchen') ? 'bar stool or chair' : 'furniture piece'}) and REPLACE it with "${productTitle}"
-- If no similar furniture exists, ADD the product in an appropriate location
+- ADD the product in an appropriate location
 - Make the product look like a natural part of the room with proper lighting and shadows
 
 OUTPUT: The same room photo, edited to include "${productTitle}"`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: Add product to room (single-image approach)...`);
+    console.log(`🎨 [VISUALIZE] Step 3: Add product to room...`);
     console.log(`   🏠 Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
-    console.log(`   📝 Product: "${productTitle}" (described via text)`);
+    console.log(`   📦 Product reference image: ${hasProductImage ? 'YES - will use exact design' : 'NO - text description only'}`);
     
     // Models that support image editing via Generative Language API
     const imageModels = [
@@ -17396,14 +17418,22 @@ OUTPUT: The same room photo, edited to include "${productTitle}"`;
       try {
         console.log(`   🖼️ Trying with: ${modelName}`);
         
-        // ONLY send the room image - product is described in text
+        // Prepare images: Room FIRST (to edit), Product SECOND (as design reference)
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         
+        // Build parts array: prompt, then room image, then product image (if available)
         const editParts = [
           { text: imageEditPrompt },
-          roomImagePart          // ONLY the room image - no product image!
+          roomImagePart          // IMAGE 1: The room to edit
         ];
-        console.log(`   📤 Sending ONLY room image - product described via text`);
+        
+        // Add product image as design reference if available
+        if (hasProductImage && productImageParts.length > 0) {
+          editParts.push(productImageParts[0]);  // IMAGE 2: Product design reference
+          console.log(`   📤 Sending: Room (IMAGE 1) + Product reference (IMAGE 2)`);
+        } else {
+          console.log(`   📤 Sending: Room only - product described via text`);
+        }
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
