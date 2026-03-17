@@ -17366,161 +17366,65 @@ Requirements:
 - High quality, magazine-worthy composition
 - Show how the product enhances the room's aesthetic`;
     
-    // Get API keys
-    const vertexKey = process.env.VERTEX_API_KEY;  // New Vertex AI key
-    
-    // Try image generation
+    // Try image generation with available models
     console.log(`🎨 [VISUALIZE] Step 3: Trying image generation...`);
     console.log(`   Prompt: ${imagePrompt.substring(0, 150)}...`);
-    console.log(`   🔑 VERTEX_API_KEY: ${vertexKey ? '✅ SET' : '❌ NOT SET'}`);
-    console.log(`   🔑 GEMINI_API_KEY: ${geminiKey ? '✅ SET' : '❌ NOT SET'}`);
     
-    // ==============================================
-    // METHOD 1: Vertex AI endpoint with Gemini 2.5 Flash Image (Nano Banana)
-    // ==============================================
-    if (vertexKey && !generatedImageBase64) {
-      const vertexModels = [
-        'gemini-2.5-flash-image',       // Nano Banana! 🍌
-        'gemini-2.5-flash-image-preview',
-        'imagen-4.0-fast-generate-001', // Imagen 4 Fast
-        'imagen-4.0-generate-001',      // Imagen 4
-        'imagen-3.0-generate-002',      // Imagen 3
-      ];
+    // Models to try via Generative Language API (in order of preference)
+    // Based on ListModels response, these are available with GEMINI_API_KEY:
+    const imageModels = [
+      'gemini-2.5-flash-image',           // Nano Banana 🍌 - AVAILABLE!
+      'gemini-3.1-flash-image-preview',   // Newer model
+      'gemini-3-pro-image-preview',       // Pro model
+    ];
+    
+    for (const modelName of imageModels) {
+      if (generatedImageBase64) break;
       
-      for (const modelName of vertexModels) {
+      try {
+        console.log(`   🍌 Trying: ${modelName}`);
+        
+        const response = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
+          {
+            contents: [{ 
+              role: "user",
+              parts: [{ text: imagePrompt }] 
+            }],
+            generationConfig: {
+              responseModalities: ["image", "text"]
+            }
+          },
+          { 
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 120000  // 2 minutes for image generation
+          }
+        );
+        
+        // Extract image from response
+        const candidates = response.data?.candidates;
+        if (candidates?.[0]?.content?.parts) {
+          for (const part of candidates[0].content.parts) {
+            if (part.inlineData?.data) {
+              generatedImageBase64 = part.inlineData.data;
+              console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+              break;
+            }
+          }
+        }
+        
         if (generatedImageBase64) break;
         
-        try {
-          console.log(`   🍌 Trying Vertex AI: ${modelName}`);
-          
-          // Determine endpoint based on model type
-          const isImagen = modelName.includes('imagen');
-          const endpoint = isImagen ? 'predict' : 'generateContent';
-          
-          let requestBody;
-          if (isImagen) {
-            // Imagen models use predict endpoint with instances/parameters
-            requestBody = {
-              instances: [{ prompt: imagePrompt }],
-              parameters: { 
-                sampleCount: 1, 
-                aspectRatio: "4:3",
-                safetyFilterLevel: "BLOCK_ONLY_HIGH"
-              }
-            };
-          } else {
-            // Gemini models use generateContent with responseModalities
-            requestBody = {
-              contents: [{ 
-                role: "user",
-                parts: [{ text: imagePrompt }] 
-              }],
-              generationConfig: {
-                responseModalities: ["image", "text"]
-              }
-            };
-          }
-          
-          const response = await axios.post(
-            `https://aiplatform.googleapis.com/v1/publishers/google/models/${modelName}:${endpoint}?key=${vertexKey}`,
-            requestBody,
-            { 
-              headers: { 'Content-Type': 'application/json' },
-              timeout: 90000 
-            }
-          );
-          
-          // Extract image from response (different formats)
-          let imageData = null;
-          
-          // Format 1: Gemini style - candidates with inlineData
-          const candidates = response.data?.candidates;
-          if (candidates?.[0]?.content?.parts) {
-            for (const part of candidates[0].content.parts) {
-              if (part.inlineData?.data) {
-                imageData = part.inlineData.data;
-                break;
-              }
-            }
-          }
-          
-          // Format 2: Imagen style - predictions array
-          const predictions = response.data?.predictions;
-          if (!imageData && predictions?.[0]) {
-            imageData = predictions[0].bytesBase64Encoded || 
-                       predictions[0].image?.bytesBase64Encoded ||
-                       predictions[0].image?.imageBytes;
-          }
-          
-          // Format 3: generatedImages array
-          const genImages = response.data?.generatedImages || response.data?.images;
-          if (!imageData && genImages?.[0]) {
-            imageData = genImages[0].image?.imageBytes || 
-                       genImages[0].bytesBase64Encoded || 
-                       genImages[0].imageBytes;
-          }
-          
-          if (imageData) {
-            generatedImageBase64 = imageData;
-            console.log(`✅ [VISUALIZE] Image generated via Vertex AI ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-            break;
-          }
-        } catch (err) {
-          const msg = err.response?.data?.error?.message || err.message;
-          console.log(`   ⚠️ Vertex ${modelName}: ${msg.substring(0, 120)}`);
+      } catch (err) {
+        const errData = err.response?.data?.error;
+        const msg = errData?.message || err.message;
+        console.log(`   ⚠️ ${modelName}: ${msg.substring(0, 150)}`);
+        
+        // Log full error for debugging if needed
+        if (errData?.details) {
+          console.log(`      Details: ${JSON.stringify(errData.details).substring(0, 200)}`);
         }
       }
-    }
-    
-    // ==============================================
-    // METHOD 2: Fallback to Generative Language API (if Vertex fails or no Vertex key)
-    // ==============================================
-    if (geminiKey && !generatedImageBase64) {
-      console.log(`   📋 Trying Generative Language API fallback...`);
-      
-      const glModels = [
-        'gemini-2.0-flash-exp',
-        'gemini-2.0-flash-preview-image-generation',
-        'gemini-2.5-flash',
-      ];
-    
-      for (const modelName of glModels) {
-        if (generatedImageBase64) break;
-        
-        try {
-          console.log(`   🎨 Trying GL API: ${modelName}`);
-            const geminiResponse = await axios.post(
-              `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
-              {
-                contents: [{ 
-                  parts: [{ text: imagePrompt }] 
-                }],
-                generationConfig: {
-                  responseModalities: ["image", "text"]
-                }
-              },
-              { 
-                headers: { 'Content-Type': 'application/json' },
-                timeout: 90000 
-              }
-            );
-            
-            const candidates = geminiResponse.data?.candidates;
-            if (candidates?.[0]?.content?.parts) {
-              for (const part of candidates[0].content.parts) {
-                if (part.inlineData?.data) {
-                  generatedImageBase64 = part.inlineData.data;
-                  console.log(`✅ [VISUALIZE] Image generated via GL API ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-                  break;
-                }
-              }
-            }
-            if (generatedImageBase64) break;
-          } catch (err) {
-            const msg = err.response?.data?.error?.message || err.message;
-            console.log(`   ⚠️ GL ${modelName}: ${msg.substring(0, 120)}`);
-          }
-        }
     }
     
     if (!generatedImageBase64) {
