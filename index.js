@@ -17356,53 +17356,51 @@ Respond in JSON:
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
     // Step 3: TRUE IMAGE COMPOSITING
-    // We need to EXTRACT the exact product pixels and PASTE them onto the room
+    // ROOM = customer's uploaded photo (KEEP THIS AS BACKGROUND)
+    // PRODUCT = Shopify product image (EXTRACT THIS AND ADD TO ROOM)
     let generatedImageBase64 = null;
     
     const numProductImages = productImageParts.length;
     
-    // Use a very specific "cut and paste" prompt that emphasizes pixel-level copying
-    const imageEditPrompt = `You are an image compositing tool. Your task is to CUT OUT the product from the product image and PASTE it into the room image.
+    // CRITICAL: Room is IMAGE 1 (the background to preserve), Product is IMAGE 2 (item to add)
+    const imageEditPrompt = `TASK: Add a product into a customer's room photo.
 
-=== IMAGES PROVIDED ===
-IMAGE 1 (Product Photo): This shows the "${productTitle}" on a WHITE/LIGHT BACKGROUND. 
-- The product has a distinct shape that can be cleanly extracted
-- EXTRACT this exact product - every pixel, every detail, exact colors
+=== IMAGE 1: CUSTOMER'S ROOM (BACKGROUND - DO NOT CHANGE!) ===
+This is the customer's actual room photo. This is your CANVAS.
+- KEEP this image EXACTLY as it is
+- Same walls, floor, lighting, furniture, colors
+- You will ADD something to this image, not recreate it
 
-IMAGE 2 (Room Photo): This is where the extracted product must be placed.
+=== IMAGE 2: PRODUCT TO ADD ("${productTitle}") ===
+This shows the Metallbude product on a white/studio background.
+- EXTRACT this product from its white background
+- This is what you will ADD into the room
 
-=== YOUR EXACT TASK ===
-Think of this like Photoshop:
-1. SELECT the product in Image 1 (it's on a white/light background, so the edges are clear)
-2. CUT the product out (remove the background)
-3. PASTE the exact product pixels into Image 2 (the room)
-4. POSITION it at: ${roomAnalysis.suggestedPlacement || 'a suitable wall location'}
-5. SCALE appropriately for the room
-6. BLEND edges naturally with soft shadows
+=== YOUR TASK ===
+1. Start with IMAGE 1 (the customer's room) as your base
+2. Look at IMAGE 2 to see the exact product appearance
+3. Extract/cut out the product from IMAGE 2 (removing white background)
+4. Paste/place the product INTO IMAGE 1 (the room)
+5. Position: ${roomAnalysis.suggestedPlacement || 'appropriate location in the room'}
+6. Scale the product realistically for the room
+7. Add natural shadows so it blends in
 
-=== CRITICAL RULES ===
-❌ DO NOT re-draw or re-imagine the product
-❌ DO NOT generate a "similar" product  
-❌ DO NOT change colors (if it's black, keep it black)
-❌ DO NOT change the shape or design
-❌ DO NOT change the room (keep walls, colors, everything identical)
+=== CRITICAL REQUIREMENTS ===
+✅ OUTPUT = Customer's room (Image 1) + Product (from Image 2) added
+✅ The room must look IDENTICAL to Image 1 (same walls, colors, everything)
+✅ Only ADDITION is the product from Image 2
+✅ Product must match Image 2 exactly (same color, shape, design)
 
-✅ DO copy the EXACT product appearance from Image 1
-✅ DO preserve every visual detail of the product
-✅ DO keep the room photo exactly the same except for the added product
-✅ DO add realistic shadows where the product meets the wall
+❌ DO NOT generate a new/different room
+❌ DO NOT change the room's walls, floor, or existing furniture  
+❌ DO NOT reimagine or redesign the product
+❌ DO NOT change the product's color or shape
 
-=== THINK STEP BY STEP ===
-1. "I can see the product in Image 1 - it's a [describe exact appearance]"
-2. "I will extract just the product pixels, removing the white background"
-3. "I will paste these exact pixels into the room at [location]"
-4. "I will add natural shadows to blend it in"
-
-OUTPUT: The room from Image 2 with the EXACT product from Image 1 composited into it.`;
+OUTPUT: The customer's original room photo (Image 1) with the "${productTitle}" product (from Image 2) realistically placed inside it.`;
     
-    console.log(`🎨 [VISUALIZE] Step 3: TRUE COMPOSITING - Cut product + paste into room...`);
-    console.log(`   Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
-    console.log(`   Product images: ${numProductImages}`);
+    console.log(`🎨 [VISUALIZE] Step 3: COMPOSITING - Add product to customer's room...`);
+    console.log(`   Room image (KEEP): ${(roomImage.length / 1024).toFixed(1)} KB`);
+    console.log(`   Product image (ADD): ${numProductImages > 0 ? (productImageParts[0]?.inlineData?.data?.length / 1024).toFixed(1) + ' KB' : 'none'}`);
     
     // Models that support image editing via Generative Language API
     const imageModels = [
@@ -17417,17 +17415,16 @@ OUTPUT: The room from Image 2 with the EXACT product from Image 1 composited int
       try {
         console.log(`   🖼️ Trying compositing with: ${modelName}`);
         
-        // IMPORTANT: Send only the FIRST (best) product image + room
-        // Multiple product images can confuse the model
+        // CRITICAL ORDER: ROOM FIRST (Image 1 = background), PRODUCT SECOND (Image 2 = item to add)
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
-        const firstProductImage = productImageParts[0];  // Just the first/best product image
+        const firstProductImage = productImageParts[0];
         
         const editParts = [
           { text: imageEditPrompt },
-          firstProductImage,     // Product image FIRST (Image 1 in prompt)
-          roomImagePart          // Room image SECOND (Image 2 in prompt)
+          roomImagePart,         // IMAGE 1: Customer's room (KEEP THIS!)
+          firstProductImage      // IMAGE 2: Product to extract and add
         ];
-        console.log(`   📤 Sending: 1 product image + 1 room image (simplified for accuracy)`);
+        console.log(`   📤 Sending: Image 1 = Room (keep), Image 2 = Product (add)`);
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
