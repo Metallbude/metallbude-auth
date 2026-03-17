@@ -17349,31 +17349,41 @@ Respond in JSON:
     
     console.log(`✅ [VISUALIZE] Visualization created:`, visualization.visualDescription?.substring(0, 100) || 'N/A');
     
-    // Step 3: Generate image using Gemini native image generation
+    // Step 3: IMAGE EDITING - Take user's room photo and ADD the product into it
+    // This is NOT generation from scratch - it's editing the uploaded image!
     let generatedImageBase64 = null;
-    // Create a detailed prompt for image generation based on the analysis
-    const imagePrompt = `Create a photorealistic interior design visualization:
-
-Room: A ${roomAnalysis.style || 'modern'} ${roomAnalysis.roomType || 'room'}
-Product: "${productTitle}" - a minimalist metal home decor piece from Metallbude
-Placement: ${roomAnalysis.suggestedPlacement || 'naturally integrated in the space'}
-Style notes: ${visualization.visualDescription || 'Clean, elegant integration'}
-
-Requirements:
-- Photorealistic professional interior photography
-- Natural lighting with soft shadows
-- The metal product should be clearly visible and well-placed
-- High quality, magazine-worthy composition
-- Show how the product enhances the room's aesthetic`;
     
-    // Try image generation with available models
-    console.log(`🎨 [VISUALIZE] Step 3: Trying image generation...`);
-    console.log(`   Prompt: ${imagePrompt.substring(0, 150)}...`);
+    // Build the editing prompt - we're asking Gemini to MODIFY the room photo
+    const imageEditPrompt = `TASK: Edit this room photo to add the product into it.
+
+IMAGE 1 (Room Photo): This is the customer's actual room. PRESERVE THIS IMAGE - do not create a new room!
+IMAGE 2+ (Product Photos): This is the "${productTitle}" product that needs to be placed in the room.
+
+INSTRUCTIONS:
+1. Take the FIRST IMAGE (room photo) as your canvas
+2. Look at the PRODUCT IMAGES to see exactly what the product looks like
+3. Digitally place/composite the product INTO the room photo
+4. Place it ${roomAnalysis.suggestedPlacement || 'in a natural, logical location'}
+5. Match the lighting, perspective and scale of the room
+6. Make it look like a professional interior photo where the product was already there
+
+CRITICAL REQUIREMENTS:
+- The OUTPUT must be the user's ORIGINAL ROOM with the product added
+- Do NOT generate a completely different room
+- Keep the same walls, floor, furniture from the original
+- The product should look naturally integrated
+- Realistic shadows and lighting to match the scene
+- Professional quality photo editing result
+
+OUTPUT: The edited room photo showing the "${productTitle}" placed in the space.`;
     
-    // Models to try via Generative Language API (in order of preference)
-    // Based on ListModels response, these are available with GEMINI_API_KEY:
+    console.log(`🎨 [VISUALIZE] Step 3: IMAGE EDITING - Adding product to room photo...`);
+    console.log(`   Room image: ${(roomImage.length / 1024).toFixed(1)} KB`);
+    console.log(`   Product images: ${imageParts.length - 1}`);
+    
+    // Models that support image editing via Generative Language API
     const imageModels = [
-      'gemini-2.5-flash-image',           // Nano Banana 🍌 - AVAILABLE!
+      'gemini-2.5-flash-image',           // Nano Banana 🍌 - supports image editing!
       'gemini-3.1-flash-image-preview',   // Newer model
       'gemini-3-pro-image-preview',       // Pro model
     ];
@@ -17382,14 +17392,20 @@ Requirements:
       if (generatedImageBase64) break;
       
       try {
-        console.log(`   🍌 Trying: ${modelName}`);
+        console.log(`   🖼️ Trying image edit with: ${modelName}`);
+        
+        // Build parts: text prompt FIRST, then all images (room + product)
+        const editParts = [
+          { text: imageEditPrompt },
+          ...imageParts  // This includes room image + product images
+        ];
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
           {
             contents: [{ 
               role: "user",
-              parts: [{ text: imagePrompt }] 
+              parts: editParts
             }],
             generationConfig: {
               responseModalities: ["image", "text"]
@@ -17397,18 +17413,27 @@ Requirements:
           },
           { 
             headers: { 'Content-Type': 'application/json' },
-            timeout: 120000  // 2 minutes for image generation
+            timeout: 180000  // 3 minutes for image editing (can be slower)
           }
         );
         
-        // Extract image from response
+        // Extract edited image from response
         const candidates = response.data?.candidates;
         if (candidates?.[0]?.content?.parts) {
           for (const part of candidates[0].content.parts) {
             if (part.inlineData?.data) {
               generatedImageBase64 = part.inlineData.data;
-              console.log(`✅ [VISUALIZE] Image generated via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+              console.log(`✅ [VISUALIZE] Image EDITED via ${modelName}! Size: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
               break;
+            }
+          }
+        }
+        
+        // Also log any text response for debugging
+        if (candidates?.[0]?.content?.parts) {
+          for (const part of candidates[0].content.parts) {
+            if (part.text) {
+              console.log(`   📝 Model response: ${part.text.substring(0, 200)}`);
             }
           }
         }
@@ -17420,7 +17445,6 @@ Requirements:
         const msg = errData?.message || err.message;
         console.log(`   ⚠️ ${modelName}: ${msg.substring(0, 150)}`);
         
-        // Log full error for debugging if needed
         if (errData?.details) {
           console.log(`      Details: ${JSON.stringify(errData.details).substring(0, 200)}`);
         }
@@ -17428,7 +17452,7 @@ Requirements:
     }
     
     if (!generatedImageBase64) {
-      console.log(`ℹ️ [VISUALIZE] No image generated. Using text visualization only.`);
+      console.log(`ℹ️ [VISUALIZE] Image editing not available. Using text visualization only.`);
     }
     
     // Generate a unique visualization ID
