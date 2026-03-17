@@ -17418,30 +17418,75 @@ OUTPUT: The same room photo, edited to include "${productTitle}"`;
       try {
         console.log(`   🖼️ Trying with: ${modelName}`);
         
-        // Prepare images: Room FIRST (to edit), Product SECOND (as design reference)
+        // Prepare images
         const roomImagePart = { inlineData: { mimeType: 'image/jpeg', data: roomImage } };
         
-        // Build parts array: prompt, then room image, then product image (if available)
-        const editParts = [
-          { text: imageEditPrompt },
-          roomImagePart          // IMAGE 1: The room to edit
-        ];
+        // MULTI-TURN CONVERSATION APPROACH
+        // This forces the AI to understand each image's role before editing
+        let contents;
         
-        // Add product image as design reference if available
         if (hasProductImage && productImageParts.length > 0) {
-          editParts.push(productImageParts[0]);  // IMAGE 2: Product design reference
-          console.log(`   📤 Sending: Room (IMAGE 1) + Product reference (IMAGE 2)`);
+          // Multi-turn: establish context first, then ask for edit
+          contents = [
+            // Turn 1: Show the room - this is what we want to EDIT
+            {
+              role: "user",
+              parts: [
+                { text: "This is a customer's room photo. I want to add furniture to THIS room. Remember this room - you will edit it." },
+                roomImagePart
+              ]
+            },
+            // Turn 2: AI acknowledges (simulated)
+            {
+              role: "model", 
+              parts: [{ text: "I understand. This is the customer's room that I will edit to add furniture. I've noted the room's style, lighting, and layout. What furniture would you like me to add?" }]
+            },
+            // Turn 3: Show the product - this is the REFERENCE only
+            {
+              role: "user",
+              parts: [
+                { text: `Here is the product "${productTitle}" - this is just a REFERENCE IMAGE showing what the product looks like. DO NOT edit this product image. Instead, use it to understand the exact design, colors, and style of the product.` },
+                productImageParts[0]
+              ]
+            },
+            // Turn 4: AI acknowledges (simulated)
+            {
+              role: "model",
+              parts: [{ text: `I see the ${productTitle}. I understand this is just a reference to show me what the product looks like. I will NOT edit this image - I will use it only as a design reference.` }]
+            },
+            // Turn 5: Final instruction to edit the ROOM
+            {
+              role: "user",
+              parts: [
+                { text: `Now EDIT THE ROOM (the first image I showed you) to include the ${productTitle}. 
+
+IMPORTANT:
+- Output the ROOM photo with the product added
+- Keep the room exactly as it was (same walls, floor, furniture layout)
+- Add the ${productTitle} in an appropriate location in the room
+- The product must look EXACTLY like the reference image I showed you
+- Add realistic shadows and lighting
+- DO NOT output the product photo - output the EDITED ROOM` }
+              ]
+            }
+          ];
+          console.log(`   📤 Multi-turn conversation: Room → Product ref → Edit instruction`);
         } else {
-          console.log(`   📤 Sending: Room only - product described via text`);
+          // Single turn fallback if no product image
+          contents = [{
+            role: "user",
+            parts: [
+              { text: imageEditPrompt },
+              roomImagePart
+            ]
+          }];
+          console.log(`   📤 Single turn: Room only with text description`);
         }
         
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`,
           {
-            contents: [{ 
-              role: "user",
-              parts: editParts
-            }],
+            contents: contents,
             generationConfig: {
               responseModalities: ["image", "text"]
             }
