@@ -17004,14 +17004,19 @@ COMPLETE Metallbude Product Catalog:
 - Vases: RAW V
 - Umbrella stands: PAREO
 
-IMPORTANT: Return ALL matching product names from this catalog
+IMPORTANT: Return ALL matching product names from this catalog!
+If looking for coffee tables → return ALL coffee tables: CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X, COSMO, LAGO, NELIO
+If looking for wall shelves → return ALL: THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
+If looking for bar stools → return: BARNI
+If looking for side tables → return ALL: CIRO, DAMIO, RAW S, MELA
+Do NOT limit to just 2-3 products - return the COMPLETE list!
 
 Respond with JSON:
 {
   "focusedObject": "${focusOn}",
   "userIntent": "What Metallbude product would help with this",
   "productType": "Category name",
-  "matchingProducts": ["PRODUCT1", "PRODUCT2"],
+  "matchingProducts": ["ALL", "MATCHING", "PRODUCT", "NAMES"],
   "searchTerms": ["search", "terms", "in", "DE", "EN", "FR", "IT"]
 }
 
@@ -17064,9 +17069,10 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
     let products = [];
     
     if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
+      console.log(`🎯 [SELECTED] AI returned ${analysis.matchingProducts.length} matching products: ${analysis.matchingProducts.join(', ')}`);
       const shopifyQuery = `
         query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
-          products(first: 15, query: $query, sortKey: RELEVANCE) {
+          products(first: 20, query: $query, sortKey: RELEVANCE) {
             edges {
               node {
                 id
@@ -17083,7 +17089,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
         }
       `;
       
-      for (const productName of analysis.matchingProducts.slice(0, 3)) {
+      // Search for UP TO 10 products (to cover all coffee tables, shelves, etc.)
+      for (const productName of analysis.matchingProducts.slice(0, 10)) {
         try {
           const shopifyResponse = await axios.post(
             config.apiUrl,  // Use Storefront API, not Admin API
@@ -17666,16 +17673,19 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
                 ...(productImageParts.length > 1 ? [{ text: `Here is another angle of the same product:` }, productImageParts[1]] : [])
               ]
             },
-            // Turn 4: AI acknowledges AND describes the product (forces it to actually look)
+            // Turn 4: AI acknowledges (generic - let it describe what IT sees)
             {
               role: "model",
-              parts: [{ text: `I have carefully studied the ${productTitle}. I can see it has: a black metal frame, a wooden seat with natural wood grain, clean minimalist lines, and industrial-modern style. I will replicate this EXACT design when I add it to the room. I will NOT edit this reference image - I will use it only as a design template for the replacement furniture.` }]
+              parts: [{ text: `I have carefully studied the ${productTitle} reference image. I noted its exact design: the metal frame finish, the surface texture and color, the proportions, and the minimalist industrial style typical of Metallbude. I will replicate this EXACT design - not a generic version - when placing it in the room.` }]
             },
             // Turn 5: Final instruction to edit the ROOM - REPLACE not just ADD
+            // CRITICAL: Include the product image AGAIN so it's fresh in context!
             {
               role: "user",
               parts: [
-                { text: `Now EDIT THE ROOM (the first image I showed you) by REPLACING existing furniture with the ${productTitle}. 
+                { text: `HERE IS THE PRODUCT IMAGE AGAIN for reference:` },
+                productImageParts[0],  // Include product image in the edit prompt!
+                { text: `Now EDIT THE ROOM (the first image I showed you) by REPLACING existing furniture with the ${productTitle} shown above. 
 
 ⚠️ CRITICAL - REPLACE ALL INSTANCES:
 ${furnitureTypeToReplace ? `- COUNT how many ${furnitureTypeToReplace} are in the room (could be 1, 2, 3, 4 or more!)
@@ -17715,9 +17725,9 @@ ${productDimensions.standard ? `(Standard ${productDimensions.type} dimensions)`
               ]
             }
           ];
-          console.log(`   📤 Multi-turn conversation: Room → Product ref → REPLACE instruction`);
+          console.log(`   📤 Multi-turn conversation: Room → Product ref → Product reminder → REPLACE`);
           console.log(`   🔄 Furniture type to replace: ${furnitureTypeToReplace || 'similar items'}`);
-          console.log(`   📸 Product images in conversation: ${productImageParts.length > 1 ? '2 (main + extra angle)' : '1'}`);
+          console.log(`   📸 Product image included in EDIT prompt: YES (for accurate design copy)`);
         } else {
           // Single turn fallback if no product image
           contents = [{
