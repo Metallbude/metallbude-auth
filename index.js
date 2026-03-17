@@ -17715,11 +17715,50 @@ That's it. Just 4 lines with numbers. No other text.`;
         const wMatch = placementText.match(/W\s*=\s*(\d+)/i);
         const hMatch = placementText.match(/H\s*=\s*(\d+)/i);
         
+        // If AI returned values, use them. Otherwise use smart defaults.
+        let x, y, width, height;
+        
         if (xMatch && yMatch && wMatch && hMatch) {
-          const x = parseInt(xMatch[1], 10);
-          const y = parseInt(yMatch[1], 10);
-          const width = parseInt(wMatch[1], 10);
-          const height = parseInt(hMatch[1], 10);
+          x = parseInt(xMatch[1], 10);
+          y = parseInt(yMatch[1], 10);
+          width = parseInt(wMatch[1], 10);
+          height = parseInt(hMatch[1], 10);
+          console.log(`   ✅ [COMPOSITING] AI provided coordinates`);
+        } else {
+          // AI failed to return coordinates - use smart defaults based on product type
+          console.log(`   ⚠️ [COMPOSITING] AI coordinates incomplete, using smart defaults`);
+          
+          // Determine product size category
+          const productLower = (productTitle || '').toLowerCase();
+          const isSmallAccessory = productLower.includes('holder') || productLower.includes('hook') || 
+                                   productLower.includes('rack') || productLower.includes('hanger') ||
+                                   productLower.includes('towel') || productLower.includes('soap');
+          const isMediumItem = productLower.includes('lamp') || productLower.includes('vase') || 
+                               productLower.includes('clock') || productLower.includes('mirror');
+          
+          if (isSmallAccessory) {
+            // Small items: place on right side of image, middle height
+            width = Math.round(imgW * 0.12);  // 12% of image width
+            height = Math.round(imgH * 0.15); // 15% of image height
+            x = Math.round(imgW * 0.75);      // 75% from left
+            y = Math.round(imgH * 0.45);      // 45% from top
+          } else if (isMediumItem) {
+            // Medium items: center-ish
+            width = Math.round(imgW * 0.2);
+            height = Math.round(imgH * 0.25);
+            x = Math.round(imgW * 0.5);
+            y = Math.round(imgH * 0.5);
+          } else {
+            // Large furniture: center, larger size
+            width = Math.round(imgW * 0.3);
+            height = Math.round(imgH * 0.35);
+            x = Math.round(imgW * 0.5);
+            y = Math.round(imgH * 0.55);
+          }
+          console.log(`   📐 [COMPOSITING] Default size: ${width}x${height} at (${x}, ${y})`);
+        }
+        
+        if (x && y && width && height) {
           
           console.log(`   📍 [COMPOSITING] Parsed: x=${x}, y=${y}, width=${width}, height=${height}`);
           
@@ -17775,7 +17814,7 @@ That's it. Just 4 lines with numbers. No other text.`;
             console.log(`   ✨ Used ACTUAL product image (not AI-generated)`);
           }
         } else {
-          console.log(`   ⚠️ [COMPOSITING] Could not parse X/Y/W/H from response, falling back to AI generation`);
+          console.log(`   ⚠️ [COMPOSITING] Unexpected: coordinates not set, falling back to AI generation`);
         }
         
       } catch (compError) {
