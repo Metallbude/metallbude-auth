@@ -17657,35 +17657,36 @@ OUTPUT: The same room photo, with similar furniture REPLACED by "${productTitle}
       console.log(`   🎯 [COMPOSITING] Will use ACTUAL product photo, not AI-generated!`);
       
       try {
-        // Step 3A: Ask AI ONLY for placement coordinates (not to generate image)
-        const placementPrompt = `You are analyzing a room image to determine WHERE to place a product.
-
-The product is: "${productTitle}"
-${visualization.suggestedPlacement ? `Suggested placement: ${visualization.suggestedPlacement}` : ''}
-
-Analyze this room image and return the EXACT pixel coordinates where the product should be placed.
-
-Return ONLY valid JSON in this exact format:
-{
-  "placement": {
-    "x": <number - x coordinate from left edge of image>,
-    "y": <number - y coordinate from top edge of image>,
-    "width": <number - how wide the product should appear in pixels>,
-    "height": <number - how tall the product should appear in pixels>
-  },
-  "anchor": "<string - where on the product to anchor: 'center', 'bottom-center', 'top-center'>",
-  "confidence": <number 0-1>
-}
-
-IMPORTANT:
-- The coordinates should be where you would naturally place this type of product
-- Consider the room's perspective and scale
-- Use realistic proportions (e.g., a toilet paper holder is small, a sofa is large)
-- If replacing existing furniture, use its location`;
-
         const roomBuffer = Buffer.from(roomImage, 'base64');
         const roomMetadata = await sharp(roomBuffer).metadata();
-        console.log(`   📐 Room dimensions: ${roomMetadata.width}x${roomMetadata.height}`);
+        const imgW = roomMetadata.width;
+        const imgH = roomMetadata.height;
+        console.log(`   📐 Room dimensions: ${imgW}x${imgH}`);
+
+        // Step 3A: Ask AI ONLY for placement - SUPER SIMPLE FORMAT
+        const placementPrompt = `Look at this room image (${imgW}x${imgH} pixels).
+
+Product to place: "${productTitle}"
+
+Tell me WHERE to place this product. Give me 4 numbers:
+1. X = horizontal position (0 = left edge, ${imgW} = right edge)
+2. Y = vertical position (0 = top edge, ${imgH} = bottom edge)  
+3. W = width of product in pixels
+4. H = height of product in pixels
+
+RESPOND WITH ONLY THESE 4 NUMBERS, ONE PER LINE:
+X=<number>
+Y=<number>
+W=<number>
+H=<number>
+
+Example response:
+X=450
+Y=320
+W=80
+H=120
+
+That's it. Just 4 lines with numbers. No other text.`;
 
         const placementResponse = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
@@ -17693,87 +17694,88 @@ IMPORTANT:
             contents: [{
               role: "user",
               parts: [
-                { text: placementPrompt },
-                { inlineData: { mimeType: 'image/jpeg', data: roomImage } }
+                { inlineData: { mimeType: 'image/jpeg', data: roomImage } },
+                { text: placementPrompt }
               ]
             }],
             generationConfig: {
               temperature: 0.1,
-              maxOutputTokens: 500
+              maxOutputTokens: 100
             }
           },
           { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
         );
 
         const placementText = placementResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        console.log(`   📍 [COMPOSITING] Placement response: ${placementText.substring(0, 200)}...`);
+        console.log(`   📍 [COMPOSITING] Placement response: ${placementText.replace(/\n/g, ' | ')}`);
         
-        // Parse placement coordinates
-        const placementData = robustParseAIJson(placementText, {});
+        // Parse simple X=, Y=, W=, H= format
+        const xMatch = placementText.match(/X\s*=\s*(\d+)/i);
+        const yMatch = placementText.match(/Y\s*=\s*(\d+)/i);
+        const wMatch = placementText.match(/W\s*=\s*(\d+)/i);
+        const hMatch = placementText.match(/H\s*=\s*(\d+)/i);
         
-        if (placementData.placement && placementData.placement.x !== undefined) {
-          const { x, y, width, height } = placementData.placement;
-          const anchor = placementData.anchor || 'center';
+        if (xMatch && yMatch && wMatch && hMatch) {
+          const x = parseInt(xMatch[1], 10);
+          const y = parseInt(yMatch[1], 10);
+          const width = parseInt(wMatch[1], 10);
+          const height = parseInt(hMatch[1], 10);
           
-          console.log(`   📍 [COMPOSITING] Placement: x=${x}, y=${y}, size=${width}x${height}, anchor=${anchor}`);
+          console.log(`   📍 [COMPOSITING] Parsed: x=${x}, y=${y}, width=${width}, height=${height}`);
           
-          // Step 3B: Download and process product image
-          const productUrl = productImages[0];
-          console.log(`   📥 [COMPOSITING] Downloading product image...`);
+          // Validate dimensions are reasonable
+          if (width < 10 || height < 10 || width > imgW || height > imgH) {
+            console.log(`   ⚠️ [COMPOSITING] Invalid dimensions, falling back to AI generation`);
+          } else {
           
-          const productResponse = await axios.get(productUrl, { 
-            responseType: 'arraybuffer',
-            timeout: 15000 
-          });
-          const productBuffer = Buffer.from(productResponse.data);
+            // Step 3B: Download and process product image
+            const productUrl = productImages[0];
+            console.log(`   📥 [COMPOSITING] Downloading product image from: ${productUrl.substring(0, 60)}...`);
+            
+            const productResponse = await axios.get(productUrl, { 
+              responseType: 'arraybuffer',
+              timeout: 15000 
+            });
+            const productBuffer = Buffer.from(productResponse.data);
+            
+            // Resize product to specified dimensions
+            const resizedProduct = await sharp(productBuffer)
+              .resize(Math.round(width), Math.round(height), { 
+                fit: 'contain',
+                background: { r: 0, g: 0, b: 0, alpha: 0 }  // Transparent background
+              })
+              .png()  // Use PNG to preserve any transparency
+              .toBuffer();
+            
+            console.log(`   🔧 [COMPOSITING] Product resized to ${width}x${height}`);
+            
+            // Calculate position (center the product at x,y)
+            let compositeX = Math.round(x - width / 2);
+            let compositeY = Math.round(y - height / 2);
+            
+            // Ensure coordinates are within bounds
+            compositeX = Math.max(0, Math.min(compositeX, imgW - width));
+            compositeY = Math.max(0, Math.min(compositeY, imgH - height));
+            
+            // Step 3D: Composite product onto room
+            console.log(`   🖼️ [COMPOSITING] Placing product at (${compositeX}, ${compositeY})...`);
           
-          // Resize product to specified dimensions
-          const resizedProduct = await sharp(productBuffer)
-            .resize(Math.round(width), Math.round(height), { 
-              fit: 'contain',
-              background: { r: 0, g: 0, b: 0, alpha: 0 }  // Transparent background
-            })
-            .png()  // Use PNG to preserve any transparency
-            .toBuffer();
-          
-          console.log(`   🔧 [COMPOSITING] Product resized to ${Math.round(width)}x${Math.round(height)}`);
-          
-          // Step 3C: Calculate composite position based on anchor
-          let compositeX = Math.round(x);
-          let compositeY = Math.round(y);
-          
-          if (anchor === 'center' || anchor === 'bottom-center' || anchor === 'top-center') {
-            compositeX = Math.round(x - width / 2);
+            const compositedImage = await sharp(roomBuffer)
+              .composite([{
+                input: resizedProduct,
+                left: compositeX,
+                top: compositeY,
+                blend: 'over'  // Place on top
+              }])
+              .jpeg({ quality: 90 })
+              .toBuffer();
+            
+            generatedImageBase64 = compositedImage.toString('base64');
+            console.log(`✅ [COMPOSITING] SUCCESS! Composited image: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
+            console.log(`   ✨ Used ACTUAL product image (not AI-generated)`);
           }
-          if (anchor === 'center') {
-            compositeY = Math.round(y - height / 2);
-          } else if (anchor === 'bottom-center') {
-            compositeY = Math.round(y - height);
-          }
-          
-          // Ensure coordinates are within bounds
-          compositeX = Math.max(0, Math.min(compositeX, roomMetadata.width - width));
-          compositeY = Math.max(0, Math.min(compositeY, roomMetadata.height - height));
-          
-          // Step 3D: Composite product onto room
-          console.log(`   🖼️ [COMPOSITING] Placing product at (${compositeX}, ${compositeY})...`);
-          
-          const compositedImage = await sharp(roomBuffer)
-            .composite([{
-              input: resizedProduct,
-              left: compositeX,
-              top: compositeY,
-              blend: 'over'  // Place on top
-            }])
-            .jpeg({ quality: 90 })
-            .toBuffer();
-          
-          generatedImageBase64 = compositedImage.toString('base64');
-          console.log(`✅ [COMPOSITING] SUCCESS! Composited image: ${(generatedImageBase64.length / 1024).toFixed(1)} KB`);
-          console.log(`   ✨ Used ACTUAL product image (not AI-generated)`);
-          
         } else {
-          console.log(`   ⚠️ [COMPOSITING] Could not get placement coordinates, falling back to AI generation`);
+          console.log(`   ⚠️ [COMPOSITING] Could not parse X/Y/W/H from response, falling back to AI generation`);
         }
         
       } catch (compError) {
