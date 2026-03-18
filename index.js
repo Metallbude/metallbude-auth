@@ -16579,8 +16579,29 @@ Respond ONLY with JSON:
   "labels": ["5 descriptive terms"],
   "colors": ["detected colors"],
   "material": "Metal/Wood/Rattan/Fabric",
+  "style": "industrial/minimalist/modern/rustic/elegant/scandinavian/bohemian/traditional",
   "searchTerms": ["15-20 search terms in DE, EN, FR, IT that will match Metallbude products"]
 }
+
+=== STYLE DETECTION GUIDELINES ===
+Determine style based on these visual cues:
+- INDUSTRIAL: Raw metal, exposed bolts, black steel, utilitarian design, factory aesthetic
+- MINIMALIST: Clean lines, simple forms, no ornamentation, monochrome, essential shapes
+- MODERN: Contemporary design, sleek surfaces, neutral colors, functional elegance
+- RUSTIC: Natural wood textures, weathered finishes, warm tones, handcrafted feel
+- ELEGANT: Refined materials, gold/brass accents, sophisticated curves, luxurious feel
+- SCANDINAVIAN: Light woods, white/gray/pastels, organic shapes, cozy minimalism
+- BOHEMIAN: Mixed textures, rattan/wicker, colorful, eclectic, layered patterns
+- TRADITIONAL: Classic designs, ornate details, rich woods, timeless shapes
+
+=== CONFIDENCE CALCULATION ===
+Set confidence based on image quality and match certainty:
+- 0.90-1.0: Crystal clear image, object clearly visible, perfect lighting, exact product match
+- 0.75-0.89: Good image quality, object identifiable, some uncertainty about exact type
+- 0.60-0.74: Average quality, object recognizable but details unclear, multiple possible matches
+- 0.40-0.59: Poor quality, blurry/dark image, difficult to identify precisely
+- 0.20-0.39: Very poor quality, educated guess at best
+Consider: lighting, focus, angle, object visibility, background clutter, obstruction
 
 IMPORTANT:
 - detectedObjects: List ALL distinct objects - be SPECIFIC about furniture types!
@@ -16607,6 +16628,7 @@ EXAMPLE 1 - SINGLE OBJECT (no selection needed):
   "labels": ["lounge chair", "outdoor", "garden furniture", "metal frame", "cushion"],
   "colors": ["black", "schwarz", "noir", "nero"],
   "material": "Metal",
+  "style": "industrial",
   "searchTerms": ["DIEGO", "CRUZ", "Lounge", "Sessel", "chair", "fauteuil", "poltrona", "Outdoor", "extérieur", "esterno", "Garten", "garden", "jardin", "giardino", "schwarz", "black", "noir", "nero", "Metall", "metal", "métal", "metallo"]
 }
 
@@ -16622,6 +16644,7 @@ EXAMPLE 2 - SINGLE ITEM (find holder/storage for it):
   "labels": ["toilet paper", "bathroom", "WC", "hygiene"],
   "colors": ["white", "weiß", "blanc", "bianco"],
   "material": "Paper",
+  "style": "minimalist",
   "searchTerms": ["TUALI", "MO", "Toilettenpapierhalter", "toilet paper holder", "porte-papier toilette", "portarotolo", "Bad", "bathroom", "salle de bain", "bagno", "WC", "Toilette", "minimalist", "Metall", "metal"]
 }
 
@@ -16637,6 +16660,7 @@ EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
   "labels": ["coffee table", "living room", "lounge", "furniture", "metal"],
   "colors": ["black", "schwarz", "grey", "grau"],
   "material": "Metal",
+  "style": "modern",
   "searchTerms": ["KIVA", "Untersetzer", "coaster", "dessous de verre", "sottobicchiere"]
 }
 
@@ -16708,13 +16732,18 @@ CRITICAL FORMATTING RULES:
                   type: "string",
                   description: "Main material"
                 },
+                style: {
+                  type: "string",
+                  enum: ["industrial", "minimalist", "modern", "rustic", "elegant", "scandinavian", "bohemian", "traditional"],
+                  description: "Design style of the furniture"
+                },
                 searchTerms: {
                   type: "array",
                   items: { type: "string" },
                   description: "Search terms in DE, EN, FR, IT"
                 }
               },
-              required: ["detectedObjects", "needsUserSelection", "mainObject", "matchingProducts", "searchTerms"]
+              required: ["detectedObjects", "needsUserSelection", "mainObject", "matchingProducts", "searchTerms", "style", "confidence"]
             }
           }
         },
@@ -17245,56 +17274,54 @@ app.post('/ai/analyze-selected-object', async (req, res) => {
           contents: [{
             parts: [
               {
-                text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture.
+                text: `You are a product matcher for "Metallbude" - a minimalist metal furniture shop.
 
-The user has selected to focus on: "${focusOn}"
+The user selected: "${focusOn}"
 
-Your task: Find Metallbude products related to this item.
+RULES:
+1. If "${focusOn}" is FURNITURE → Return ONLY products of the SAME type
+2. If "${focusOn}" is an ITEM (like towel, book) → Return products to HOLD/STORE it
 
-IF "${focusOn}" is FURNITURE → Find similar furniture
-IF "${focusOn}" is an ITEM → Find a Metallbude product to HOLD, STORE, or DISPLAY it
+METALLBUDE PRODUCT CATALOG (STRICT - only use these exact names):
 
-COMPLETE Metallbude Product Catalog:
-- Towel holders: VANA, TENSI, NALI, STENNI, MILO, DELAYA, ESTINA, VALI
-- Toilet paper holders: TUALI, MO, TOVA
-- Coat racks: TAMINA, MALOU, RUBI, ENIO, GARDO, LENNY
-- Shoe racks: NEVA, BOVI, CAMO, CUBO
-- Wall shelves: THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
-- Coffee tables: CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X, COSMO, LAGO, NELIO
-- Side tables: CIRO, DAMIO, RAW S, MELA
-- Dining tables: ZENO, NERO
-- Bar stools: BARNI
-- Outdoor seating: DIEGO, CRUZ
-- Trays: DAVA, CUT, RAW T, SIVA
-- Coasters: KIVA
-- Kitchen: IVANA (paper towel), NIA (dish towel), KENA
-- Wine rack: VINIA, VINO
-- Bookends: DARCY
-- Vases: RAW V
-- Umbrella stands: PAREO
+COFFEE TABLES (large living room tables):
+- CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X
 
-IMPORTANT: Return ALL matching product names from this catalog!
-If looking for coffee tables → return ALL coffee tables: CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X, COSMO, LAGO, NELIO
-If looking for wall shelves → return ALL: THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
-If looking for bar stools → return: BARNI
-If looking for side tables → return ALL: CIRO, DAMIO, RAW S, MELA
-Do NOT limit to just 2-3 products - return the COMPLETE list!
+SIDE TABLES (small accent tables):
+- CIRO, DAMIO, RAW S, MELA, COSMO
 
-Respond with JSON:
-{
-  "focusedObject": "${focusOn}",
-  "userIntent": "What Metallbude product would help with this",
-  "productType": "Category name",
-  "matchingProducts": ["ALL", "MATCHING", "PRODUCT", "NAMES"],
-  "searchTerms": ["search", "terms", "in", "DE", "EN", "FR", "IT"]
-}
+NIGHTSTANDS (bedroom):
+- NELIO, DAMIO
 
-CRITICAL FORMATTING RULES:
-- Return ONLY valid JSON - no markdown, no extra text
-- NEVER include empty strings "" in arrays
-- NEVER include punctuation-only items like "," or "." in arrays
-- Every array item must be a meaningful word or phrase
-- Do not truncate the response`
+OUTDOOR TABLES:
+- LAGO
+
+WALL SHELVES:
+- THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
+
+TOWEL HOLDERS (bathroom):
+- VANA, TENSI, NALI, STENNI, MILO, DELAYA, ESTINA, VALI
+
+TOILET PAPER HOLDERS:
+- TUALI, MO, TOVA
+
+COAT RACKS:
+- TAMINA, MALOU, RUBI, ENIO, GARDO, LENNY
+
+SHOE RACKS:
+- NEVA, BOVI, CAMO, CUBO
+
+OUTDOOR SEATING:
+- DIEGO, CRUZ
+
+TRAYS:
+- DAVA, CUT, RAW T, SIVA
+
+INSTRUCTIONS:
+- For "coffee table" → return ONLY: CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X
+- For "side table" → return ONLY: CIRO, DAMIO, RAW S, MELA, COSMO
+- For "wall shelf" → return ONLY: THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
+- NEVER mix categories! Coffee tables are NOT side tables!`
               },
               {
                 inlineData: {
@@ -17306,8 +17333,36 @@ CRITICAL FORMATTING RULES:
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 4000,
-            responseMimeType: "application/json"  // Force JSON output
+            maxOutputTokens: 2000,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "object",
+              properties: {
+                focusedObject: {
+                  type: "string",
+                  description: "The object the user selected"
+                },
+                userIntent: {
+                  type: "string",  
+                  description: "What the user is looking for"
+                },
+                productType: {
+                  type: "string",
+                  description: "The Metallbude category that matches"
+                },
+                matchingProducts: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "ONLY product names from the MATCHING category"
+                },
+                searchTerms: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Search terms in DE, EN, FR, IT"
+                }
+              },
+              required: ["focusedObject", "productType", "matchingProducts"]
+            }
           }
         },
         {
@@ -17327,18 +17382,28 @@ CRITICAL FORMATTING RULES:
       return res.status(500).json({ error: 'AI returned empty response' });
     }
     
-    console.log('📝 [SELECTED] Gemini response:', geminiText.substring(0, 300));
+    console.log('📝 [SELECTED] Gemini response:', geminiText.substring(0, 500));
     
-    // Use robust JSON parser
-    const analysis = robustParseAIJson(geminiText, {
-      focusedObject: focusOn,
-      userIntent: null,
-      productType: null,
-      matchingProducts: [],
-      searchTerms: []
-    });
+    // With responseSchema, should parse directly
+    let analysis;
+    try {
+      analysis = JSON.parse(geminiText);
+      console.log('✅ [SELECTED] Direct JSON parse successful');
+      analysis = cleanParsedArrays(analysis);
+    } catch (parseErr) {
+      console.log('⚠️ [SELECTED] Direct parse failed, using robust parser');
+      analysis = robustParseAIJson(geminiText, {
+        focusedObject: focusOn,
+        userIntent: null,
+        productType: null,
+        matchingProducts: [],
+        searchTerms: []
+      });
+    }
     
     console.log(`📊 [SELECTED] Parsed analysis:`, JSON.stringify(analysis, null, 2).substring(0, 500));
+    console.log(`🎯 [SELECTED] Product Type: ${analysis.productType}`);
+    console.log(`🎯 [SELECTED] Matching Products: [${analysis.matchingProducts?.join(', ')}]`);
     
     // Fetch products from Shopify with translations
     let products = [];
