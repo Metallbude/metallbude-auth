@@ -422,6 +422,20 @@ function robustParseAIJson(text, defaultValue = {}) {
 function extractFieldsFromText(text, defaultValue = {}) {
   const result = { ...defaultValue };
   
+  // Helper to check if an item is valid (not garbage)
+  const isValidItem = (item) => {
+    if (!item || typeof item !== 'string') return false;
+    const trimmed = item.trim();
+    if (!trimmed || trimmed.length === 0) return false;
+    // Filter out punctuation-only items (commas, dots, etc from malformed JSON)
+    if (/^[\s,.\-_:;'"!?()[\]{}]+$/.test(trimmed)) return false;
+    // Filter out single non-alphanumeric characters
+    if (trimmed.length === 1 && !/[a-zA-Z0-9]/.test(trimmed)) return false;
+    // Filter out just whitespace
+    if (/^\s*$/.test(trimmed)) return false;
+    return true;
+  };
+  
   // For arrays, we need to find the full array content including newlines
   const arrayFields = ['matchingProducts', 'searchTerms', 'detectedObjects', 'labels', 'colors', 'designTips', 'alternativeSpots'];
   
@@ -436,7 +450,7 @@ function extractFieldsFromText(text, defaultValue = {}) {
       let itemMatch;
       while ((itemMatch = itemRegex.exec(match[1])) !== null) {
         const item = itemMatch[1].trim();
-        if (item && item.length > 0 && !item.match(/^\s*$/)) {
+        if (isValidItem(item)) {
           items.push(item);
         }
       }
