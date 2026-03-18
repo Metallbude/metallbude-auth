@@ -408,8 +408,10 @@ function robustParseAIJson(text, defaultValue = {}) {
     const cleanedResult = cleanParsedArrays(result);
     return cleanedResult;
   } catch (parseError) {
-    console.log('⚠️ [JSON] Parse failed, extracting partial data...');
-    console.log('   Attempted JSON (first 400):', jsonStr.substring(0, 400));
+    console.log('⚠️ [JSON] Parse failed:', parseError.message);
+    console.log('   JSON length:', jsonStr.length);
+    console.log('   First 500 chars:', jsonStr.substring(0, 500));
+    console.log('   Last 200 chars:', jsonStr.substring(jsonStr.length - 200));
     
     // Fall back to regex extraction
     return extractFieldsFromText(jsonStr, defaultValue);
@@ -436,19 +438,37 @@ function extractFieldsFromText(text, defaultValue = {}) {
     return true;
   };
   
+  // Helper to find the complete array content by counting brackets
+  const findArrayContent = (text, fieldName) => {
+    const startPattern = new RegExp(`"${fieldName}"\\s*:\\s*\\[`, 'i');
+    const startMatch = text.match(startPattern);
+    if (!startMatch) return null;
+    
+    const startIndex = text.indexOf(startMatch[0]) + startMatch[0].length;
+    let bracketCount = 1;
+    let endIndex = startIndex;
+    
+    for (let i = startIndex; i < text.length && bracketCount > 0; i++) {
+      if (text[i] === '[') bracketCount++;
+      else if (text[i] === ']') bracketCount--;
+      endIndex = i;
+    }
+    
+    return text.substring(startIndex, endIndex);
+  };
+  
   // For arrays, we need to find the full array content including newlines
   const arrayFields = ['matchingProducts', 'searchTerms', 'detectedObjects', 'labels', 'colors', 'designTips', 'alternativeSpots'];
   
   for (const field of arrayFields) {
-    // Match array with content including newlines - use [\s\S]*? for non-greedy match
-    const regex = new RegExp(`"${field}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'i');
-    const match = text.match(regex);
-    if (match && match[1]) {
+    // Use bracket-aware extraction instead of non-greedy regex
+    const arrayContent = findArrayContent(text, field);
+    if (arrayContent) {
       // Extract all quoted strings from the array content
       const items = [];
       const itemRegex = /"([^"]+)"/g;
       let itemMatch;
-      while ((itemMatch = itemRegex.exec(match[1])) !== null) {
+      while ((itemMatch = itemRegex.exec(arrayContent)) !== null) {
         const item = itemMatch[1].trim();
         if (isValidItem(item)) {
           items.push(item);
