@@ -240,6 +240,149 @@ const config = {
   customerEmails: new Map(),
 };
 
+// ============================================
+// 🔧 ROBUST JSON PARSER FOR AI RESPONSES
+// ============================================
+// Handles truncated/malformed JSON from Gemini API
+function robustParseAIJson(text, defaultValue = {}) {
+  if (!text) return defaultValue;
+  
+  // Strip markdown code blocks
+  let cleaned = text
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/g, '')
+    .trim();
+  
+  // Find JSON by locating first { and last }
+  const jsonStartIndex = cleaned.indexOf('{');
+  const jsonEndIndex = cleaned.lastIndexOf('}');
+  
+  if (jsonStartIndex === -1) {
+    console.log('⚠️ [JSON] No JSON object found in response');
+    // Still try regex extraction on the raw text
+    return extractFieldsFromText(text, defaultValue);
+  }
+  
+  // If no closing brace, add one
+  let jsonStr;
+  if (jsonEndIndex <= jsonStartIndex) {
+    jsonStr = cleaned.substring(jsonStartIndex) + '}';
+    console.log('⚠️ [JSON] JSON truncated - adding closing brace');
+  } else {
+    jsonStr = cleaned.substring(jsonStartIndex, jsonEndIndex + 1);
+  }
+  
+  // === REPAIR COMMON ISSUES ===
+  
+  // 1. Fix incomplete keys: "key\n"next" -> "key": null,\n"next"
+  jsonStr = jsonStr.replace(/"([^"]+)"(\s*\n\s*")/g, '"$1": null,$2');
+  
+  // 2. Fix truncated strings (empty values): "key": "  -> "key": ""
+  jsonStr = jsonStr.replace(/":\s*"(\s*)(?=[,}\]\n])/g, '": ""');
+  
+  // 3. Fix trailing commas before } or ]
+  jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+  
+  // 4. Fix double commas
+  jsonStr = jsonStr.replace(/,\s*,/g, ',');
+  
+  // 5. Fix incomplete array items (truncated strings in arrays)
+  jsonStr = jsonStr.replace(/"([^"]*)\s*$/gm, '"$1"');
+  
+  // 6. Fix missing closing brackets - count and rebalance
+  const openBrackets = (jsonStr.match(/\{/g) || []).length;
+  const closeBrackets = (jsonStr.match(/\}/g) || []).length;
+  if (openBrackets > closeBrackets) {
+    jsonStr += '}'.repeat(openBrackets - closeBrackets);
+  }
+  const openSquare = (jsonStr.match(/\[/g) || []).length;
+  const closeSquare = (jsonStr.match(/\]/g) || []).length;
+  if (openSquare > closeSquare) {
+    // Find where to insert the closing brackets
+    const lastBrace = jsonStr.lastIndexOf('}');
+    const insertPos = lastBrace > 0 ? lastBrace : jsonStr.length;
+    jsonStr = jsonStr.slice(0, insertPos) + ']'.repeat(openSquare - closeSquare) + jsonStr.slice(insertPos);
+  }
+  
+  // Try to parse
+  try {
+    const result = JSON.parse(jsonStr);
+    console.log('✅ [JSON] Parsed successfully');
+    return result;
+  } catch (parseError) {
+    console.log('⚠️ [JSON] Parse failed, extracting partial data...');
+    console.log('   Attempted JSON (first 400):', jsonStr.substring(0, 400));
+    
+    // Fall back to regex extraction
+    return extractFieldsFromText(jsonStr, defaultValue);
+  }
+}
+
+/**
+ * Extract fields from text using regex when JSON parsing fails
+ */
+function extractFieldsFromText(text, defaultValue = {}) {
+  const result = { ...defaultValue };
+  
+  // For arrays, we need to find the full array content including newlines
+  const arrayFields = ['matchingProducts', 'searchTerms', 'detectedObjects', 'labels', 'colors', 'designTips', 'alternativeSpots'];
+  
+  for (const field of arrayFields) {
+    // Match array with content including newlines - use [\s\S]*? for non-greedy match
+    const regex = new RegExp(`"${field}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'i');
+    const match = text.match(regex);
+    if (match && match[1]) {
+      // Extract all quoted strings from the array content
+      const items = [];
+      const itemRegex = /"([^"]+)"/g;
+      let itemMatch;
+      while ((itemMatch = itemRegex.exec(match[1])) !== null) {
+        const item = itemMatch[1].trim();
+        if (item && item.length > 0 && !item.match(/^\s*$/)) {
+          items.push(item);
+        }
+      }
+      if (items.length > 0) {
+        result[field] = items;
+        console.log(`   ✅ Extracted ${field}: [${items.slice(0, 5).join(', ')}${items.length > 5 ? '...' : ''}]`);
+      }
+    }
+  }
+  
+  // Extract string fields
+  const stringFields = {
+    mainObject: /"mainObject"\s*:\s*"([^"]+)"/,
+    userIntent: /"userIntent"\s*:\s*"([^"]+)"/,
+    productType: /"productType"\s*:\s*"([^"]+)"/,
+    focusedObject: /"focusedObject"\s*:\s*"([^"]+)"/,
+    material: /"material"\s*:\s*"([^"]+)"/,
+    roomType: /"roomType"\s*:\s*"([^"]+)"/,
+    style: /"style"\s*:\s*"([^"]+)"/,
+    suggestedPlacement: /"suggestedPlacement"\s*:\s*"([^"]+)"/,
+    visualDescription: /"visualDescription"\s*:\s*"([^"]+)"/,
+    styleMatch: /"styleMatch"\s*:\s*"([^"]+)"/
+  };
+  
+  for (const [field, pattern] of Object.entries(stringFields)) {
+    const match = text.match(pattern);
+    if (match) {
+      result[field] = match[1];
+      console.log(`   ✅ Extracted ${field}: "${result[field].substring(0, 50)}..."`);
+    }
+  }
+  
+  // Extract confidence
+  const confMatch = text.match(/"confidence"\s*:\s*([\d.]+)/);
+  if (confMatch) result.confidence = parseFloat(confMatch[1]);
+  
+  // Extract booleans
+  const boolMatch = text.match(/"needsUserSelection"\s*:\s*(true|false)/i);
+  if (boolMatch) result.needsUserSelection = boolMatch[1].toLowerCase() === 'true';
+  
+  console.log('   Regex extraction complete. Fields found:', Object.keys(result).filter(k => result[k] !== null && result[k] !== undefined && (Array.isArray(result[k]) ? result[k].length > 0 : true)).join(', '));
+  return result;
+}
+
 // Helper function to get real customer email from Shopify for public endpoints
 async function getRealCustomerEmail(customerId) {
     try {
@@ -16080,199 +16223,976 @@ app.get('/api/returns/:orderId/shipping', async (req, res) => {
 });
 
 // ============================================================================
-// AI VISUAL SEARCH - Google Cloud Vision API
+// AI VISUAL SEARCH - Using Google Gemini for Smart Furniture Recognition
 // ============================================================================
 
 /**
- * Analyze image using Google Cloud Vision API
- * Used by mobile app visual search feature
+ * Analyze image using Google Gemini AI
+ * Much smarter than Cloud Vision - actually understands furniture context
  */
 app.post('/ai/analyze-image', async (req, res) => {
   try {
-    const { image } = req.body; // base64 image
+    const { image, language = 'DE', country = 'DE' } = req.body; // base64 image + locale
+    
+    // Map language codes: 'en' -> 'EN', 'de' -> 'DE', etc.
+    const shopifyLanguage = (language || 'DE').toUpperCase();
+    const shopifyCountry = (country || 'DE').toUpperCase();
+    
+    console.log(`🌍 Locale: language=${shopifyLanguage}, country=${shopifyCountry}`);
     
     if (!image) {
       return res.status(400).json({ error: 'No image provided' });
     }
     
-    const apiKey = process.env.GOOGLE_CLOUD_VISION_KEY;
-    if (!apiKey) {
-      console.error('❌ GOOGLE_CLOUD_VISION_KEY not configured');
-      return res.status(500).json({ error: 'Vision API not configured' });
+    // Check for API keys
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const visionKey = process.env.GOOGLE_CLOUD_VISION_KEY;
+    
+    console.log('🔑 API Keys status:');
+    console.log(`   GEMINI_API_KEY: ${geminiKey ? '✅ SET (' + geminiKey.substring(0, 8) + '...)' : '❌ NOT SET'}`);
+    console.log(`   GOOGLE_CLOUD_VISION_KEY: ${visionKey ? '✅ SET' : '❌ NOT SET'}`);
+    
+    if (!geminiKey && !visionKey) {
+      console.error('❌ No AI API key configured');
+      return res.status(500).json({ error: 'AI API not configured' });
     }
     
-    console.log('🔍 Analyzing image with Google Cloud Vision...');
+    // Try Gemini first (smarter), fall back to Cloud Vision
+    if (geminiKey) {
+      console.log('🔍 Analyzing image with Google Gemini AI...');
     
-    const visionResponse = await axios.post(
-      `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-      {
-        requests: [{
-          image: { content: image },
-          features: [
-            { type: 'LABEL_DETECTION', maxResults: 15 },
-            { type: 'IMAGE_PROPERTIES', maxResults: 5 },
-            { type: 'OBJECT_LOCALIZATION', maxResults: 10 }
-          ]
-        }]
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000
-      }
-    );
-    
-    const response = visionResponse.data.responses[0];
-    
-    if (response.error) {
-      console.error('❌ Vision API error:', response.error);
-      return res.status(500).json({ error: response.error.message });
-    }
-    
-    // Extract labels
-    const labels = (response.labelAnnotations || [])
-      .map(l => l.description.toLowerCase());
-    
-    // Extract colors from dominant colors
-    const colorInfo = response.imagePropertiesAnnotation?.dominantColors?.colors || [];
-    const colors = colorInfo.slice(0, 5).map(c => {
-      const { red = 0, green = 0, blue = 0 } = c.color || {};
-      // Map RGB to color names
-      if (red > 200 && green > 200 && blue > 200) return 'white';
-      if (red < 60 && green < 60 && blue < 60) return 'black';
-      if (red > 180 && green > 140 && blue < 100) return 'gold';
-      if (red > 140 && green > 90 && blue < 70) return 'wood';
-      if (red > 180 && green > 160 && blue > 140 && blue < 180) return 'beige';
-      if (Math.abs(red - green) < 30 && Math.abs(green - blue) < 30 && red > 100) return 'gray';
-      if (red > 150 && green < 100 && blue < 100) return 'red';
-      if (blue > 150 && red < 100 && green < 100) return 'blue';
-      if (green > 150 && red < 100 && blue < 100) return 'green';
-      return 'neutral';
-    }).filter((c, i, arr) => arr.indexOf(c) === i); // Remove duplicates
-    
-    // Extract objects
-    const objects = (response.localizedObjectAnnotations || [])
-      .map(o => o.name.toLowerCase());
-    
-    // Generate search terms (German translations for furniture)
-    const searchTerms = [];
-    
-    // Map English labels to German search terms for Metallbude products
-    const translations = {
-      // Furniture types
-      'chair': 'stuhl',
-      'armchair': 'sessel',
-      'lounge chair': 'sessel',
-      'furniture': 'möbel',
-      'shelf': 'regal',
-      'shelving': 'regal',
-      'bookshelf': 'regal',
-      'table': 'tisch',
-      'desk': 'schreibtisch',
-      'side table': 'beistelltisch',
-      'coffee table': 'couchtisch',
-      'coat rack': 'garderobe',
-      'clothes rack': 'kleiderstange',
-      'wardrobe': 'garderobe',
-      'hook': 'haken',
-      'wall hook': 'wandhaken',
-      'lamp': 'lampe',
-      'light': 'leuchte',
-      'mirror': 'spiegel',
-      'bench': 'bank',
-      'stool': 'hocker',
-      'container': 'container',
-      'cart': 'rollcontainer',
-      'cabinet': 'schrank',
-      'rack': 'regal',
-      'stand': 'ständer',
-      // Materials
-      'metal': 'metall',
-      'steel': 'stahl',
-      'iron': 'eisen',
-      'wood': 'holz',
-      'leather': 'leder',
-      'fabric': 'stoff',
-      // Colors
-      'black': 'schwarz',
-      'white': 'weiß',
-      'gold': 'gold',
-      'gray': 'grau',
-      'grey': 'grau',
-      'beige': 'beige',
-      'brown': 'braun'
-    };
-    
-    // Add translated search terms
-    for (const label of labels) {
-      // Check direct translation
-      if (translations[label]) {
-        searchTerms.push(translations[label]);
-      }
-      // Check partial matches
-      for (const [eng, ger] of Object.entries(translations)) {
-        if (label.includes(eng)) {
-          searchTerms.push(ger);
+      try {
+        // Use Gemini 2.5 Flash (latest stable model)
+        const geminiResponse = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        {
+          contents: [{
+            parts: [
+              {
+                text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture and home accessories.
+
+=== YOUR MAIN TASK ===
+The user photographs something to find a matching Metallbude product.
+
+=== STEP 1: DETECT ALL OBJECTS ===
+First, identify ALL distinct objects visible in the image.
+ONLY list FURNITURE, HOME ACCESSORIES, or items that Metallbude could sell or provide storage for.
+DO NOT list consumables like toilet paper, tissues, food, drinks, plants, etc.
+List items like: furniture, shelves, holders, racks, trays, mirrors, etc.
+
+⚠️ IMPORTANT FOR FURNITURE - BE SPECIFIC:
+- For TABLES: Don't just say "table" - specify the TYPE:
+  * "coffee table" (low table in front of sofa/chairs)
+  * "side table" / "end table" (small table next to sofa/armchair)
+  * "dining table" (tall table for eating)
+  * "nightstand" (table next to bed)
+  * "desk" (work table)
+  * "console table" (narrow table against wall)
+- For CHAIRS: Don't just say "chair" - specify:
+  * "bar stool" (tall stool for counter/bar)
+  * "dining chair" (chair at dining table)
+  * "lounge chair" (comfy armchair)
+  * "office chair" (desk chair)
+- For SHELVES: Don't just say "shelf" - specify:
+  * "wall shelf" (mounted on wall)
+  * "standing shelf" (free-standing bookcase)
+  * "shoe rack" (for shoes)
+
+=== STEP 2: DETERMINE IF CLARIFICATION NEEDED ===
+If you detect MULTIPLE distinct objects (more than 1), set needsUserSelection: true
+The app will then ask the user which object they want to search for.
+
+=== STEP 3: FOR THE MAIN OBJECT ===
+Determine user intent using this logic:
+
+  IF the photo shows FURNITURE (chair, table, shelf, etc.)
+  → User wants SIMILAR furniture from Metallbude
+  
+  IF the photo shows an ITEM/OBJECT (not furniture)
+  → User wants a Metallbude product to HOLD, STORE, ORGANIZE, or DISPLAY that item!
+  
+  Think: "What would this item need? Where would you put it?"
+  - Clothing items → coat rack, clothes rail, hanger, hook
+  - Bathroom items → towel holder, toilet paper holder, shower shelf
+  - Kitchen items → paper towel holder, dish towel holder, tray
+  - Books/magazines → shelf, bookend
+  - Shoes → shoe rack
+  - Bottles/wine → wine rack
+  - Small objects → tray, organizer, shelf
+  - Baby → cradle, moses basket
+
+=== STEP 4: Find matching Metallbude products from the catalog below ===
+
+=== COMPLETE METALLBUDE PRODUCT CATALOG ===
+
+TABLES / TISCHE / TABLES / TAVOLI:
+- Side table / Beistelltisch / Table d'appoint / Tavolino (COSMO, CIRO, DENYA, RAW S, SOLI X)
+- Coffee table / Couchtisch / Table basse / Tavolino da caffè (CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X)
+- Outdoor lounge table / Lounge-Tisch Outdoor / Table lounge extérieur / Tavolo lounge esterno LAGO
+- Lowboard / Lowboard / Meuble TV / Mobile TV TAVIR
+- Nightstand hanging / Nachttisch hängend / Table de chevet suspendue / Comodino sospeso NELIO
+- Nightstand standing / Nachttisch stehend / Table de chevet / Comodino DAMIO
+- Console table / Konsolentisch / Console / Consolle RIA
+- Desk / Schreibtisch / Bureau / Scrivania DONNA
+- Table set / Tischsatz / Set de tables / Set tavoli TRE SEMNIA X
+
+SHELVES & STORAGE / REGALE & AUFBEWAHRUNG / ÉTAGÈRES / SCAFFALI:
+- Standing shelf / Standregal / Étagère sur pied / Scaffale THARON
+- Wall shelf / Wandregal / Étagère murale / Mensola (LENN, LINARA, ARIS, RAW L)
+- Metal shelf / Metallregal / Étagère métallique / Scaffale metallico (RIVO, RIVO S)
+- Shelf / Ablage / Tablette / Ripiano RIVO
+- Shoe rack / Schuhregal / Étagère à chaussures / Scarpiera (NEVA, BOVI, CAMO)
+- Wine rack / Weinregal / Porte-bouteilles / Portabottiglie VINIA
+- Rolling container / Rollcontainer / Caisson à roulettes / Cassettiera JUNO
+- Bookend / Buchstütze / Serre-livres / Reggilibri DARCY
+
+COAT RACKS & HALLWAY / GARDEROBEN & FLUR / ENTRÉE / INGRESSO:
+- Coat rack / Garderobe / Portemanteau / Appendiabiti TAMINA
+- Wall coat rack / Wandgarderobe / Portemanteau mural / Attaccapanni MALOU
+- Clothes rail / Kleiderstange / Portant vêtements / Appendiabiti (RUBI, ENIO)
+- Coat hook / Kleiderhaken / Patère / Gancio PALO
+- Wall hook / Wandhaken / Crochet mural / Gancio muro LOU
+- Leather S-hook / Leder S-Haken / Crochet S cuir / Gancio S pelle
+- Clothes hanger / Kleiderbügel / Cintre / Gruccia FAY
+- Valet stand / Herrendiener / Valet de chambre / Indossatore JAMES
+- Hall stand / Dielenständer / Porte-manteau / Attaccapanni CHARLES
+- Shoehorn / Schuhlöffel / Chausse-pied / Calzascarpe TILO
+
+BATHROOM / BADEZIMMER / SALLE DE BAIN / BAGNO:
+- Towel holder / Handtuchhalter / Porte-serviettes / Portasciugamani (VANA, TENSI, NALI, STENNI, MILO)
+- Towel stand / Handtuchständer / Porte-serviettes sur pied / Piantana portasciugamani DELAYA
+- Towel ladder / Handtuchleiter / Échelle porte-serviettes / Scala portasciugamani ESTINA
+- Shower shelf / Duschablage / Étagère de douche / Mensola doccia SHEA
+- Toilet paper holder / Toilettenpapierhalter / Porte-papier toilette / Portarotolo (TUALI, MO)
+
+KITCHEN / KÜCHE / CUISINE / CUCINA:
+- Paper towel holder / Küchenrollenhalter / Porte-essuie-tout / Portarotolo cucina IVANA
+- Dish towel holder / Spültuchhalter / Porte-torchons / Porta strofinacci NIA
+- Serving tray / Serviertablett / Plateau de service / Vassoio DAVA
+- Tray / Tablett / Plateau / Vassoio CUT
+- Decorative tray / Dekotablett / Plateau décoratif / Vassoio decorativo (RAW T, SIVA)
+- Coaster / Untersetzer / Dessous de verre / Sottobicchiere KIVA
+
+LIVING ROOM & DECOR / WOHNZIMMER & DEKO / SALON / SOGGIORNO:
+- Candle holder / Kerzenständer / Bougeoir / Portacandele NOA (L, S)
+- Vase / Vase / Vase / Vaso (FYONA, RAW V)
+- Mirror / Spiegel / Miroir / Specchio RIVO
+- Wall mirror / Wandspiegel / Miroir mural / Specchio da parete (CAYA, CALEO)
+- Magnetic board / Magnettafel / Tableau magnétique / Lavagna magnetica TAVO
+- Wood magnets / Holzmagnete / Aimants en bois / Magneti in legno ELA
+- Hanging console / Hängekonsole / Console suspendue / Consolle sospesa SION
+- Watering can / Gießkanne / Arrosoir / Annaffiatoio YAMIRA
+- Desk organizer / Tischorganizer / Organiseur de bureau / Organizer LIMA
+
+BEDROOM / SCHLAFZIMMER / CHAMBRE / CAMERA:
+- Hanging nightstand / Hängender Nachttisch / Table de chevet suspendue / Comodino sospeso NELIO
+- Standing nightstand / Stehender Nachttisch / Table de chevet / Comodino DAMIO
+- Baby cradle / Babywiege / Berceau / Culla KORSINA
+- Moses basket / Moseskorb / Couffin / Cesta moses ROBE
+
+OUTDOOR & GARDEN / OUTDOOR & GARTEN / EXTÉRIEUR / ESTERNO:
+- Outdoor lounge chair / Lounge-Sessel Outdoor / Fauteuil lounge extérieur / Poltrona lounge esterno DIEGO
+- Outdoor lounge sofa / Lounge-Sofa Outdoor / Canapé lounge extérieur / Divano lounge esterno CRUZ
+- Outdoor lounge table / Lounge-Tisch Outdoor / Table lounge extérieur / Tavolo lounge esterno LAGO
+- Garden lounge set / Garten Lounge Set / Salon de jardin / Set giardino
+
+SEATING / SITZMÖBEL / ASSISES / SEDUTE:
+- Chair / Stuhl / Chaise / Sedia LINELLE
+- Bar stool / Barhocker / Tabouret de bar / Sgabello BARNI
+
+DOORS / TÜREN / PORTES / PORTE:
+- Loft door / Lofttür / Porte loft / Porta loft (LUX, BRIX)
+
+=== COLORS / FARBEN / COULEURS / COLORI ===
+Black/Schwarz/Noir/Nero, White/Weiß/Blanc/Bianco, Cashew/Cashew/Noix de cajou/Anacardo (beige), Blueberry Soda (blue/blau/bleu/blu), Mango Lassi (yellow/gelb/jaune/giallo), Matcha Latte (green/grün/vert/verde), Pink Lemonade (pink/rosa/rose/rosa), Green Tea, Hot Choc, Red Wine, Macchiato
+
+=== RESPONSE FORMAT ===
+Respond ONLY with JSON:
+
+{
+  "detectedObjects": ["cup", "coaster", "towel"],
+  "needsUserSelection": true,
+  "mainObject": "Description of the MAIN OBJECT (largest/center)",
+  "confidence": 0.0-1.0,
+  "userIntent": "What is the user looking for?",
+  "productType": "Metallbude category",
+  "matchingProducts": ["DIEGO", "CRUZ"],
+  "labels": ["5 descriptive terms"],
+  "colors": ["detected colors"],
+  "material": "Metal/Wood/Rattan/Fabric",
+  "searchTerms": ["15-20 search terms in DE, EN, FR, IT that will match Metallbude products"]
+}
+
+IMPORTANT:
+- detectedObjects: List ALL distinct objects - be SPECIFIC about furniture types!
+  * Good: ["coffee table", "lounge chairs", "side table", "wall shelf"]
+  * Bad: ["table", "chairs", "table", "shelf"]
+- needsUserSelection: Set to true if more than 1 object detected, false if only 1 clear object
+- If needsUserSelection is true, still fill in mainObject etc. for the most prominent object
+
+IMPORTANT for searchTerms:
+- Include product names (DIEGO, CRUZ, COSMO, etc.)
+- Include category in ALL 4 LANGUAGES (Sessel, chair, fauteuil, poltrona)
+- Include colors in all languages (schwarz, black, noir, nero)
+- Include style terms (industrial, minimalist, modern)
+
+EXAMPLE 1 - SINGLE OBJECT (no selection needed):
+{
+  "detectedObjects": ["outdoor lounge chair"],
+  "needsUserSelection": false,
+  "mainObject": "Black outdoor lounge chair with metal frame and cushion",
+  "confidence": 0.95,
+  "userIntent": "Looking for similar outdoor seating furniture",
+  "productType": "Lounge chair outdoor",
+  "matchingProducts": ["DIEGO", "CRUZ", "Garten Lounge Set"],
+  "labels": ["lounge chair", "outdoor", "garden furniture", "metal frame", "cushion"],
+  "colors": ["black", "schwarz", "noir", "nero"],
+  "material": "Metal",
+  "searchTerms": ["DIEGO", "CRUZ", "Lounge", "Sessel", "chair", "fauteuil", "poltrona", "Outdoor", "extérieur", "esterno", "Garten", "garden", "jardin", "giardino", "schwarz", "black", "noir", "nero", "Metall", "metal", "métal", "metallo"]
+}
+
+EXAMPLE 2 - SINGLE ITEM (find holder/storage for it):
+{
+  "detectedObjects": ["toilet paper roll"],
+  "needsUserSelection": false,
+  "mainObject": "Toilet paper roll",
+  "confidence": 0.95,
+  "userIntent": "Looking for a holder to store/display this item",
+  "productType": "Toilet paper holder",
+  "matchingProducts": ["TUALI", "MO"],
+  "labels": ["toilet paper", "bathroom", "WC", "hygiene"],
+  "colors": ["white", "weiß", "blanc", "bianco"],
+  "material": "Paper",
+  "searchTerms": ["TUALI", "MO", "Toilettenpapierhalter", "toilet paper holder", "porte-papier toilette", "portarotolo", "Bad", "bathroom", "salle de bain", "bagno", "WC", "Toilette", "minimalist", "Metall", "metal"]
+}
+
+EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
+{
+  "detectedObjects": ["coffee table", "side table", "lounge chairs", "wall shelf"],
+  "needsUserSelection": true,
+  "mainObject": "Large coffee table in front of seating",
+  "confidence": 0.7,
+  "userIntent": "Multiple furniture pieces detected - user should specify which one",
+  "productType": "Coffee table",
+  "matchingProducts": ["CUT", "RAW C", "RAW C SQUARE", "LIVIA", "VESINA X"],
+  "labels": ["coffee table", "living room", "lounge", "furniture", "metal"],
+  "colors": ["black", "schwarz", "grey", "grau"],
+  "material": "Metal",
+  "searchTerms": ["KIVA", "Untersetzer", "coaster", "dessous de verre", "sottobicchiere"]
+}
+
+CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brackets are closed.`
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: image
+                }
+              }
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 4000  // High to prevent truncation
+          }
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 30000
+        }
+      );
+      
+      const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (geminiText) {
+        console.log('📝 Gemini raw response:', geminiText);
+        
+        // Use robust JSON parser to handle truncated/malformed responses
+        const analysis = robustParseAIJson(geminiText, {
+          detectedObjects: [],
+          needsUserSelection: false,
+          mainObject: null,
+          confidence: 0.8,
+          userIntent: null,
+          productType: null,
+          matchingProducts: [],
+          labels: [],
+          colors: [],
+          material: null,
+          searchTerms: []
+        });
+        
+        if (analysis.matchingProducts?.length > 0 || analysis.searchTerms?.length > 0) {
+          console.log(`✅ Gemini analysis complete!`);
+          console.log(`   Main Object: ${analysis.mainObject}`);
+          console.log(`   Confidence: ${analysis.confidence}`);
+          console.log(`   User Intent: ${analysis.userIntent}`);
+          console.log(`   Product Type: ${analysis.productType}`);
+          console.log(`   Matching Products: ${analysis.matchingProducts?.join(', ')}`);
+          console.log(`   Labels: ${analysis.labels?.join(', ')}`);
+          console.log(`   Colors: ${analysis.colors?.join(', ')}`);
+          console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
+          
+          // ============================================
+          // DIRECTLY FETCH PRODUCTS FROM SHOPIFY
+          // ============================================
+          let products = [];
+          
+          try {
+            // Build search queries for Shopify (Storefront API - no wildcards)
+            // ONLY search for specific Metallbude product names - no generic terms!
+            const searchQueries = [];
+            
+            // 1. Search ONLY for specific product names from matchingProducts
+            // Use combined OR query to search all products at once for better results
+            if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
+              // First, try combined OR query (e.g., "TUALI OR MO")
+              const combinedQuery = analysis.matchingProducts.join(' OR ');
+              searchQueries.push(combinedQuery);
+              
+              // Also add individual searches - use title: prefix for better matching
+              for (const productName of analysis.matchingProducts) {
+                // For all product names, search with title prefix for exact product name match
+                searchQueries.push(`title:*${productName}*`);
+                // Also search without prefix as fallback
+                searchQueries.push(productName);
+              }
+            }
+            
+            // 2. If no specific products, search by product type
+            if (searchQueries.length === 0 && analysis.productType) {
+              searchQueries.push(analysis.productType);
+            }
+            
+            // DON'T add generic labels - they return too many irrelevant results
+            
+            console.log('🔍 Shopify search queries:', searchQueries);
+            console.log('🎯 Looking for matchingProducts:', analysis.matchingProducts);
+            
+            // Query Shopify Storefront API with locale support for translations
+            const shopifyQuery = `
+              query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
+                products(first: 25, query: $query, sortKey: RELEVANCE) {
+                  edges {
+                    node {
+                      id
+                      title
+                      handle
+                      description
+                      productType
+                      vendor
+                      tags
+                      priceRange {
+                        minVariantPrice {
+                          amount
+                          currencyCode
+                        }
+                      }
+                      featuredImage {
+                        url
+                        altText
+                      }
+                      images(first: 3) {
+                        edges {
+                          node {
+                            url
+                            altText
+                          }
+                        }
+                      }
+                      variants(first: 1) {
+                        edges {
+                          node {
+                            id
+                            availableForSale
+                            price {
+                              amount
+                              currencyCode
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+            
+            const seenIds = new Set();
+            
+            // Execute searches for matching products - run more queries to catch all products
+            for (const query of searchQueries.slice(0, 10)) {
+              try {
+                console.log(`🔎 Executing Shopify search: "${query}" (lang: ${shopifyLanguage}, country: ${shopifyCountry})`);
+                const shopifyResponse = await axios.post(
+                  config.apiUrl,  // Use Storefront API, not Admin API
+                  {
+                    query: shopifyQuery,
+                    variables: { 
+                      query,
+                      lang: shopifyLanguage,
+                      country: shopifyCountry
+                    }
+                  },
+                  {
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+                      'Accept-Language': shopifyLanguage.toLowerCase()
+                    },
+                    timeout: 10000
+                  }
+                );
+                
+                const edges = shopifyResponse.data?.data?.products?.edges || [];
+                for (const edge of edges) {
+                  const product = edge.node;
+                  if (!seenIds.has(product.id)) {
+                    
+                    // Calculate relevance score - start at 0!
+                    let score = 0;
+                    const titleLower = product.title.toLowerCase();
+                    const titleUpper = product.title.toUpperCase();
+                    const titleWords = titleLower.split(/[\s\-_\(\)]+/);  // Split title into words
+                    
+                    // STRICT: ONLY include if title contains EXACT product name from matchingProducts
+                    // This must be a word boundary match, not substring
+                    let isRelevant = false;
+                    let matchedProductName = null;
+                    for (const mp of (analysis.matchingProducts || [])) {
+                      const mpLower = mp.toLowerCase();
+                      const mpUpper = mp.toUpperCase();
+                      
+                      // Check for word boundary match (not substring)
+                      // For short product names (2-3 chars), require exact word match
+                      // "MO" should match "Toilettenpapierhalter MO" but not "COSMO"
+                      const wordMatch = titleWords.some(word => word === mpLower);
+                      
+                      // Also check if title contains the uppercase product name with boundaries
+                      // Using regex for proper word boundary matching
+                      const upperRegex = new RegExp(`\\b${mpUpper}\\b`);
+                      const upperCaseMatch = upperRegex.test(titleUpper);
+                      
+                      // For longer names (4+ chars), also allow substring match
+                      const containsMatch = mpLower.length >= 4 && titleLower.includes(mpLower);
+                      
+                      // Check handle with STRICT word boundary matching
+                      // Handle format is like "toilettenpapierhalter-zum-kleben-mo"
+                      // For short names (<=3 chars), require exact word boundary match in handle
+                      // For longer names (4+ chars), allow substring match
+                      let handleMatch = false;
+                      if (product.handle) {
+                        const handleLower = product.handle.toLowerCase();
+                        const handleWords = handleLower.split('-');
+                        
+                        if (mpLower.length <= 3) {
+                          // STRICT: Short names must be exact word match in handle
+                          // "mo" should NOT match "moses" or "mode" only exact "mo"
+                          handleMatch = handleWords.some(word => word === mpLower);
+                        } else {
+                          // Longer names can use substring match
+                          handleMatch = handleLower.includes(mpLower);
+                        }
+                      }
+                      
+                      if (wordMatch || upperCaseMatch || containsMatch || handleMatch) {
+                        score += 0.9;
+                        isRelevant = true;
+                        matchedProductName = mp;
+                        console.log(`✅ Product "${product.title}" (handle: ${product.handle}) matches "${mp}" (word: ${wordMatch}, upper: ${upperCaseMatch}, contains: ${containsMatch}, handle: ${handleMatch})`);
+                        break;
+                      }
+                    }
+                    
+                    // DO NOT use productType matching - it's too broad and returns irrelevant products!
+                    // The matchingProducts array should be the ONLY source of truth
+                    
+                    // Skip completely irrelevant products
+                    if (!isRelevant) {
+                      console.log(`⏭️ Skipping irrelevant: "${product.title}" - no match in [${(analysis.matchingProducts || []).join(', ')}]`);
+                      continue;
+                    }
+                    
+                    seenIds.add(product.id);
+                    
+                    // Boost by color match
+                    for (const color of (analysis.colors || [])) {
+                      if (titleLower.includes(color.toLowerCase())) {
+                        score += 0.1;
+                      }
+                    }
+                    
+                    products.push({
+                      id: product.id,
+                      handle: product.handle,
+                      title: product.title,
+                      description: product.description,
+                      productType: product.productType,
+                      price: product.priceRange?.minVariantPrice?.amount,
+                      currency: product.priceRange?.minVariantPrice?.currencyCode,
+                      image: product.featuredImage?.url,
+                      images: (product.images?.edges || []).map(e => e.node.url),
+                      available: product.variants?.edges?.[0]?.node?.availableForSale,
+                      relevanceScore: Math.min(score, 1.0)
+                    });
+                  }
+                }
+              } catch (searchError) {
+                console.log(`⚠️ Search query "${query}" failed:`, searchError.message);
+              }
+            }
+            
+            // Sort by relevance score
+            products.sort((a, b) => b.relevanceScore - a.relevanceScore);
+            products = products.slice(0, 15); // Top 15 results
+            
+            console.log(`📦 Found ${products.length} products from Shopify:`);
+            products.forEach((p, i) => console.log(`   ${i + 1}. ${p.title} (score: ${p.relevanceScore.toFixed(2)})`));
+            
+          } catch (shopifyError) {
+            console.log('⚠️ Shopify product fetch failed:', shopifyError.message);
+          }
+          
+          // Build search terms for fallback
+          let allSearchTerms = [];
+          if (analysis.matchingProducts) {
+            allSearchTerms.push(...analysis.matchingProducts);
+          }
+          if (analysis.productType) {
+            allSearchTerms.push(analysis.productType);
+          }
+          if (analysis.searchTerms) {
+            allSearchTerms.push(...analysis.searchTerms);
+          }
+          allSearchTerms = [...new Set(allSearchTerms.filter(t => t && t.trim()))];
+          
+          return res.json({
+            // NEW: Multi-object detection
+            detectedObjects: analysis.detectedObjects || [],
+            needsUserSelection: analysis.needsUserSelection || false,
+            // Existing fields
+            labels: analysis.labels || [],
+            colors: analysis.colors || [],
+            objects: [analysis.mainObject || analysis.productType],
+            material: analysis.material,
+            confidence: analysis.confidence || 0.8,
+            searchTerms: allSearchTerms,
+            productType: analysis.productType,
+            matchingProducts: analysis.matchingProducts || [],
+            mainObject: analysis.mainObject,
+            userIntent: analysis.userIntent,
+            // Actual products from Shopify
+            products: products,
+            // DEBUG: Raw Gemini response for testing
+            _debug_gemini_raw: geminiText,
+            _debug_gemini_parsed: analysis
+          });
+        } else {
+          console.log('⚠️ Gemini returned no useful data, falling back...');
         }
       }
-      // Also add original label
-      searchTerms.push(label);
-    }
-    
-    // Add object-based terms
-    for (const obj of objects) {
-      if (translations[obj]) {
-        searchTerms.push(translations[obj]);
+      
+      throw new Error('Could not parse Gemini response');
+      
+      } catch (geminiError) {
+        console.log('⚠️ Gemini failed:', geminiError.message);
+        console.log('⚠️ Full error:', geminiError.response?.data || geminiError);
       }
-      searchTerms.push(obj);
-    }
+    } // Close if (geminiKey)
     
-    // Add color-based search terms
-    for (const color of colors) {
-      if (translations[color]) {
-        searchTerms.push(translations[color]);
+    // Fallback to Cloud Vision
+    console.log('🔄 Falling back to Cloud Vision...');
+    // visionKey already declared at top of function
+    if (!visionKey) {
+      return res.status(500).json({ error: 'No AI API key available' });
+    }
+      
+    const visionResponse = await axios.post(
+        `https://vision.googleapis.com/v1/images:annotate?key=${visionKey}`,
+        {
+          requests: [{
+            image: { content: image },
+            features: [
+              { type: 'LABEL_DETECTION', maxResults: 15 },
+              { type: 'IMAGE_PROPERTIES', maxResults: 5 },
+              { type: 'OBJECT_LOCALIZATION', maxResults: 10 }
+            ]
+          }]
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
+      );
+      
+      const response = visionResponse.data.responses[0];
+      const labels = (response.labelAnnotations || []).map(l => l.description.toLowerCase());
+      const objects = (response.localizedObjectAnnotations || []).map(o => o.name.toLowerCase());
+      
+      // Enhanced furniture translations for Cloud Vision fallback
+      const furnitureTranslations = {
+        'chair': ['Stuhl', 'Sessel', 'COSMO', 'BARNI'],
+        'office chair': ['Stuhl', 'COSMO'],
+        'armchair': ['Sessel', 'DIEGO', 'CRUZ'],
+        'lounge chair': ['Lounge', 'Sessel', 'DIEGO', 'CRUZ'],
+        'lounge': ['Lounge', 'DIEGO', 'CRUZ'],
+        'furniture': ['Möbel'],
+        'shelf': ['Regal', 'ARIS', 'THARON'],
+        'table': ['Tisch', 'RAW', 'DENYA'],
+        'side table': ['Beistelltisch', 'RAW', 'DENYA'],
+        'coffee table': ['Couchtisch', 'RAW'],
+        'coat rack': ['Garderobe', 'TAMINA'],
+        'rack': ['Regal', 'ARIS'],
+        'hook': ['Haken', 'MILO'],
+        'outdoor': ['Outdoor', 'Garten', 'DIEGO', 'CRUZ', 'LAGO'],
+        'patio': ['Terrasse', 'Garten', 'DIEGO'],
+        'garden': ['Garten', 'Outdoor', 'DIEGO', 'CRUZ'],
+        'towel rack': ['Handtuchhalter', 'STENNI', 'TENSI', 'NALI'],
+        'towel': ['Handtuch', 'STENNI', 'TENSI'],
+        'toilet paper': ['Toilettenpapierhalter', 'TUALI', 'MO'],
+        'paper towel': ['Küchenrollenhalter'],
+        'mirror': ['Spiegel', 'CALEO'],
+        'wine': ['Weinregal', 'VINIA'],
+        'planter': ['Blumenständer'],
+        'console': ['Konsole', 'RIA', 'SION'],
+        'desk': ['Schreibtisch', 'JUNO'],
+        'vase': ['Vase', 'FYONA']
+      };
+      
+      const searchTerms = [];
+      const productNames = [];
+      for (const label of [...labels, ...objects]) {
+        for (const [eng, translations] of Object.entries(furnitureTranslations)) {
+          if (label.includes(eng)) {
+            searchTerms.push(...translations);
+            // Also track product names for direct search
+            translations.forEach(t => {
+              if (t === t.toUpperCase()) productNames.push(t);
+            });
+          }
+        }
       }
-    }
-    
-    // Determine style
-    let style = 'modern';
-    if (labels.some(l => l.includes('minimalist')) || 
-        (colors.includes('black') && colors.includes('white'))) {
-      style = 'minimalist';
-    } else if (labels.some(l => l.includes('industrial')) || 
-               labels.some(l => l.includes('metal')) ||
-               labels.some(l => l.includes('steel'))) {
-      style = 'industrial';
-    } else if (labels.some(l => l.includes('rustic')) || 
-               colors.includes('wood')) {
-      style = 'rustic';
-    } else if (labels.some(l => l.includes('scandinavian'))) {
-      style = 'scandinavian';
-    }
-    
-    // Calculate confidence
-    const confidence = labels.length > 5 ? 0.85 : (labels.length > 2 ? 0.7 : 0.5);
-    
-    // Remove duplicates and limit search terms
-    const uniqueTerms = [...new Set(searchTerms)].slice(0, 10);
-    
-    console.log(`✅ Vision analysis complete: ${labels.length} labels, ${colors.length} colors, ${objects.length} objects`);
-    console.log(`   Search terms: ${uniqueTerms.join(', ')}`);
-    
-    res.json({
-      labels,
-      colors,
-      objects,
-      style,
-      confidence,
-      searchTerms: uniqueTerms
-    });
+      
+      // 🔥 NEW: Do a Shopify search with Cloud Vision results
+      let products = [];
+      if (productNames.length > 0 || searchTerms.length > 0) {
+        try {
+          const searchQuery = productNames.length > 0 
+            ? productNames.join(' OR ')
+            : [...new Set(searchTerms)].slice(0, 3).join(' OR ');
+            
+          console.log(`🔍 [Cloud Vision Fallback] Searching Shopify: "${searchQuery}"`);
+          
+          const shopifyQuery = `
+            query SearchProducts($query: String!) {
+              products(first: 10, query: $query) {
+                edges {
+                  node {
+                    id
+                    handle
+                    title
+                    description
+                    productType
+                    priceRange {
+                      minVariantPrice { amount currencyCode }
+                    }
+                    featuredImage { url }
+                    images(first: 3) { edges { node { url } } }
+                    variants(first: 1) {
+                      edges {
+                        node { availableForSale }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `;
+          
+          const shopifyResponse = await axios.post(
+            `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2024-01/graphql.json`,
+            { query: shopifyQuery, variables: { query: searchQuery } },
+            {
+              headers: {
+                'X-Shopify-Storefront-Access-Token': process.env.SHOPIFY_STOREFRONT_ACCESS_TOKEN,
+                'Content-Type': 'application/json'
+              },
+              timeout: 15000
+            }
+          );
+          
+          const shopifyProducts = shopifyResponse.data?.data?.products?.edges || [];
+          products = shopifyProducts.map(({ node: product }) => ({
+            id: product.id,
+            handle: product.handle,
+            title: product.title,
+            description: product.description,
+            productType: product.productType,
+            price: product.priceRange?.minVariantPrice?.amount,
+            currency: product.priceRange?.minVariantPrice?.currencyCode,
+            image: product.featuredImage?.url,
+            images: (product.images?.edges || []).map(e => e.node.url),
+            available: product.variants?.edges?.[0]?.node?.availableForSale,
+            relevanceScore: 0.6 // Lower score for Cloud Vision fallback
+          }));
+          
+          console.log(`✅ [Cloud Vision Fallback] Found ${products.length} products`);
+        } catch (shopifyError) {
+          console.log(`⚠️ [Cloud Vision Fallback] Shopify search failed:`, shopifyError.message);
+        }
+      }
+      
+      return res.json({
+        labels,
+        colors: ['neutral'],
+        objects,
+        style: 'modern',
+        confidence: 0.5,
+        searchTerms: [...new Set(searchTerms)].slice(0, 8),
+        products, // 🔥 Include products from Cloud Vision fallback
+        _debug_source: 'Cloud Vision (Gemini not available)'
+      });
     
   } catch (error) {
-    console.error('❌ Vision API error:', error.response?.data || error.message);
+    console.error('❌ AI analysis error:', error.response?.data || error.message);
     res.status(500).json({ 
       error: 'Image analysis failed',
       details: error.message 
     });
+  }
+});
+
+/**
+ * AI Visual Search - Analyze specific object selected by user
+ * Called when user picks "cup" from multiple detected objects
+ */
+app.post('/ai/analyze-selected-object', async (req, res) => {
+  try {
+    const { image, selectedObject, customQuery, language = 'DE', country = 'DE' } = req.body;
+    
+    // Map language codes for Shopify translations
+    const shopifyLanguage = (language || 'DE').toUpperCase();
+    const shopifyCountry = (country || 'DE').toUpperCase();
+    
+    console.log(`🎯 [SELECTED] Analyzing selected object: "${selectedObject || customQuery}"`);
+    console.log(`   Language: ${shopifyLanguage}, Country: ${shopifyCountry}`);
+    console.log(`   Image provided: ${image ? 'yes (' + (image.length / 1024).toFixed(1) + ' KB)' : 'NO'}`);
+    
+    if (!image) {
+      console.log(`❌ [SELECTED] No image provided`);
+      return res.status(400).json({ error: 'No image provided' });
+    }
+    
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      console.log(`❌ [SELECTED] Gemini API key missing`);
+      return res.status(500).json({ error: 'Gemini API not configured' });
+    }
+    
+    // Determine what the user wants to focus on
+    const focusOn = customQuery || selectedObject;
+    console.log(`🎯 [SELECTED] User selected to focus on: "${focusOn}"`);
+    
+    let geminiResponse;
+    try {
+      geminiResponse = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        {
+          contents: [{
+            parts: [
+              {
+                text: `You are a visual product recognition system for "Metallbude" (metallbude.com) - a shop for minimalist metal furniture.
+
+The user has selected to focus on: "${focusOn}"
+
+Your task: Find Metallbude products related to this item.
+
+IF "${focusOn}" is FURNITURE → Find similar furniture
+IF "${focusOn}" is an ITEM → Find a Metallbude product to HOLD, STORE, or DISPLAY it
+
+COMPLETE Metallbude Product Catalog:
+- Towel holders: VANA, TENSI, NALI, STENNI, MILO, DELAYA, ESTINA, VALI
+- Toilet paper holders: TUALI, MO, TOVA
+- Coat racks: TAMINA, MALOU, RUBI, ENIO, GARDO, LENNY
+- Shoe racks: NEVA, BOVI, CAMO, CUBO
+- Wall shelves: THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
+- Coffee tables: CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X, COSMO, LAGO, NELIO
+- Side tables: CIRO, DAMIO, RAW S, MELA
+- Dining tables: ZENO, NERO
+- Bar stools: BARNI
+- Outdoor seating: DIEGO, CRUZ
+- Trays: DAVA, CUT, RAW T, SIVA
+- Coasters: KIVA
+- Kitchen: IVANA (paper towel), NIA (dish towel), KENA
+- Wine rack: VINIA, VINO
+- Bookends: DARCY
+- Vases: RAW V
+- Umbrella stands: PAREO
+
+IMPORTANT: Return ALL matching product names from this catalog!
+If looking for coffee tables → return ALL coffee tables: CUT, RAW C, RAW C SQUARE, LIVIA, VESINA X, COSMO, LAGO, NELIO
+If looking for wall shelves → return ALL: THARON, LENN, LINARA, ARIS, RAW L, RIVO, ELISA, VINIA
+If looking for bar stools → return: BARNI
+If looking for side tables → return ALL: CIRO, DAMIO, RAW S, MELA
+Do NOT limit to just 2-3 products - return the COMPLETE list!
+
+Respond with JSON:
+{
+  "focusedObject": "${focusOn}",
+  "userIntent": "What Metallbude product would help with this",
+  "productType": "Category name",
+  "matchingProducts": ["ALL", "MATCHING", "PRODUCT", "NAMES"],
+  "searchTerms": ["search", "terms", "in", "DE", "EN", "FR", "IT"]
+}
+
+CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: image
+                }
+              }
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 4000  // High to prevent truncation
+          }
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 30000
+        }
+      );
+    } catch (geminiErr) {
+      console.log(`❌ [SELECTED] Gemini API call failed: ${geminiErr.message}`);
+      return res.status(500).json({ error: 'AI analysis failed', details: geminiErr.message });
+    }
+    
+    const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (!geminiText) {
+      console.log('❌ [SELECTED] No text in Gemini response');
+      return res.status(500).json({ error: 'AI returned empty response' });
+    }
+    
+    console.log('📝 [SELECTED] Gemini response:', geminiText.substring(0, 300));
+    
+    // Use robust JSON parser
+    const analysis = robustParseAIJson(geminiText, {
+      focusedObject: focusOn,
+      userIntent: null,
+      productType: null,
+      matchingProducts: [],
+      searchTerms: []
+    });
+    
+    console.log(`📊 [SELECTED] Parsed analysis:`, JSON.stringify(analysis, null, 2).substring(0, 500));
+    
+    // Fetch products from Shopify with translations
+    let products = [];
+    
+    if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
+      console.log(`🎯 [SELECTED] AI returned ${analysis.matchingProducts.length} matching products: ${analysis.matchingProducts.join(', ')}`);
+      const shopifyQuery = `
+        query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
+          products(first: 20, query: $query, sortKey: RELEVANCE) {
+            edges {
+              node {
+                id
+                title
+                handle
+                description
+                productType
+                priceRange { minVariantPrice { amount currencyCode } }
+                featuredImage { url }
+                variants(first: 1) { edges { node { availableForSale } } }
+              }
+            }
+          }
+        }
+      `;
+      
+      // Search for UP TO 10 products (to cover all coffee tables, shelves, etc.)
+      for (const productName of analysis.matchingProducts.slice(0, 10)) {
+        try {
+          const shopifyResponse = await axios.post(
+            config.apiUrl,  // Use Storefront API, not Admin API
+            { 
+              query: shopifyQuery, 
+              variables: { 
+                query: productName,
+                lang: shopifyLanguage,
+                country: shopifyCountry
+              } 
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+                'Accept-Language': shopifyLanguage.toLowerCase()
+              },
+              timeout: 10000
+            }
+          );
+          
+          const edges = shopifyResponse.data?.data?.products?.edges || [];
+          for (const edge of edges) {
+            const p = edge.node;
+            const titleLower = p.title.toLowerCase();
+            
+            // STRICT FILTERING: Only include if title matches a product name
+            let isRelevant = false;
+            for (const mp of analysis.matchingProducts) {
+              if (titleLower.includes(mp.toLowerCase())) {
+                isRelevant = true;
+                console.log(`✅ [SELECTED] "${p.title}" matches "${mp}"`);
+                break;
+              }
+            }
+            
+            if (!isRelevant) {
+              console.log(`⏭️ [SELECTED] Skipping irrelevant "${p.title}"`);
+              continue;
+            }
+            
+            // Avoid duplicates
+            if (products.some(existing => existing.id === p.id)) {
+              continue;
+            }
+            
+            products.push({
+              id: p.id,
+              handle: p.handle,
+              title: p.title,
+              price: p.priceRange?.minVariantPrice?.amount,
+              currency: p.priceRange?.minVariantPrice?.currencyCode,
+              image: p.featuredImage?.url,
+              available: p.variants?.edges?.[0]?.node?.availableForSale,
+              relevanceScore: 0.9
+            });
+          }
+        } catch (e) {
+          console.log(`[SELECTED] Search for ${productName} failed:`, e.message);
+        }
+      }
+      
+      console.log(`📦 [SELECTED] Found ${products.length} relevant products`);
+    }
+    
+    // Always return what we found, even if empty
+    console.log(`✅ [SELECTED] Returning response with ${products.length} products`);
+    return res.json({
+      focusedObject: focusOn,
+      needsUserSelection: false,
+      productType: analysis.productType || null,
+      matchingProducts: analysis.matchingProducts || [],
+      userIntent: analysis.userIntent || null,
+      searchTerms: analysis.searchTerms || [],
+      products: products
+    });
+    
+  } catch (error) {
+    console.error('❌ [SELECTED] Error:', error.message);
+    res.status(500).json({ error: 'Analysis failed', details: error.message });
   }
 });
 
