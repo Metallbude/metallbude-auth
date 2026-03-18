@@ -241,7 +241,102 @@ const config = {
 };
 
 // ============================================
-// 🔧 ROBUST JSON PARSER FOR AI RESPONSES
+// � GEMINI API HELPER WITH RETRY LOGIC
+// ============================================
+// Retries Gemini API calls on failure for reliability
+async function callGeminiWithRetry(apiKey, prompt, imageBase64, maxRetries = 2) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  
+  const requestBody = {
+    contents: [{
+      parts: [
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType: 'image/jpeg',
+            data: imageBase64
+          }
+        }
+      ]
+    }],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 4000,
+      responseMimeType: "application/json"
+    }
+  };
+  
+  let lastError = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🔄 Gemini API attempt ${attempt}/${maxRetries}...`);
+      
+      const response = await axios.post(url, requestBody, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 35000
+      });
+      
+      const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (text) {
+        // Quick validation - check if it looks like valid JSON
+        const trimmed = text.trim();
+        if (trimmed.startsWith('{') && trimmed.includes('"')) {
+          console.log(`✅ Gemini response received (${text.length} chars)`);
+          return text;
+        }
+      }
+      
+      console.log(`⚠️ Attempt ${attempt}: Empty or invalid response, retrying...`);
+      lastError = new Error('Empty or invalid Gemini response');
+      
+    } catch (error) {
+      console.log(`⚠️ Attempt ${attempt} failed: ${error.message}`);
+      lastError = error;
+      
+      // Wait before retry (exponential backoff)
+      if (attempt < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+        console.log(`   Waiting ${delay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  throw lastError || new Error('Gemini API failed after all retries');
+}
+
+
+// ============================================
+// ARRAY CLEANER FOR AI RESPONSES
+// ============================================
+// Removes garbage entries from parsed JSON arrays
+function cleanParsedArrays(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  
+  const isValidArrayItem = (item) => {
+    if (item === null || item === undefined) return false;
+    if (typeof item === 'number' || typeof item === 'boolean') return true;
+    if (typeof item !== 'string') return true;
+    const trimmed = item.trim();
+    if (!trimmed || trimmed.length === 0) return false;
+    if (/^[\s,.\-_:;'"!?()[\]{}]+$/.test(trimmed)) return false;
+    if (trimmed.length === 1 && !/[a-zA-Z0-9]/.test(trimmed)) return false;
+    return true;
+  };
+  
+  for (const key of Object.keys(obj)) {
+    if (Array.isArray(obj[key])) {
+      obj[key] = obj[key].filter(isValidArrayItem);
+    } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+      obj[key] = cleanParsedArrays(obj[key]);
+    }
+  }
+  return obj;
+}
+// ============================================
+// �🔧 ROBUST JSON PARSER FOR AI RESPONSES
 // ============================================
 // Handles truncated/malformed JSON from Gemini API
 function robustParseAIJson(text, defaultValue = {}) {
@@ -308,7 +403,10 @@ function robustParseAIJson(text, defaultValue = {}) {
   try {
     const result = JSON.parse(jsonStr);
     console.log('✅ [JSON] Parsed successfully');
-    return result;
+    
+    // Clean all arrays in the result to remove empty/invalid entries
+    const cleanedResult = cleanParsedArrays(result);
+    return cleanedResult;
   } catch (parseError) {
     console.log('⚠️ [JSON] Parse failed, extracting partial data...');
     console.log('   Attempted JSON (first 400):', jsonStr.substring(0, 400));
@@ -16481,7 +16579,13 @@ EXAMPLE 3 - MULTIPLE OBJECTS (user must choose):
   "searchTerms": ["KIVA", "Untersetzer", "coaster", "dessous de verre", "sottobicchiere"]
 }
 
-CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brackets are closed.`
+CRITICAL FORMATTING RULES:
+- Return ONLY valid, COMPLETE JSON - no markdown, no extra text
+- NEVER include empty strings "" in arrays
+- NEVER include punctuation-only items like "," or "." or "-" in arrays
+- Every array must contain ONLY meaningful strings with actual words
+- Make sure all brackets are properly closed
+- Do not truncate the response`
               },
               {
                 inlineData: {
@@ -16493,7 +16597,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 4000  // High to prevent truncation
+            maxOutputTokens: 4000,
+            responseMimeType: "application/json"  // Force JSON output
           }
         },
         {
@@ -16766,13 +16871,26 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate. Make sure all brack
           }
           allSearchTerms = [...new Set(allSearchTerms.filter(t => t && t.trim()))];
           
+          // Helper to clean arrays - remove empty strings, whitespace, punctuation-only entries
+          const cleanArray = (arr) => {
+            if (!arr || !Array.isArray(arr)) return [];
+            return arr.filter(item => {
+              if (!item || typeof item !== 'string') return false;
+              const trimmed = item.trim();
+              // Remove empty strings, whitespace-only, or punctuation-only entries like "," "." "-"
+              if (!trimmed || trimmed.length === 0) return false;
+              if (/^[\s,.\-_:;'"!?]+$/.test(trimmed)) return false;
+              return true;
+            });
+          };
+          
           return res.json({
-            // NEW: Multi-object detection
-            detectedObjects: analysis.detectedObjects || [],
+            // NEW: Multi-object detection - cleaned!
+            detectedObjects: cleanArray(analysis.detectedObjects),
             needsUserSelection: analysis.needsUserSelection || false,
-            // Existing fields
-            labels: analysis.labels || [],
-            colors: analysis.colors || [],
+            // Existing fields - also cleaned
+            labels: cleanArray(analysis.labels),
+            colors: cleanArray(analysis.colors),
             objects: [analysis.mainObject || analysis.productType],
             material: analysis.material,
             confidence: analysis.confidence || 0.8,
@@ -17042,7 +17160,12 @@ Respond with JSON:
   "searchTerms": ["search", "terms", "in", "DE", "EN", "FR", "IT"]
 }
 
-CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
+CRITICAL FORMATTING RULES:
+- Return ONLY valid JSON - no markdown, no extra text
+- NEVER include empty strings "" in arrays
+- NEVER include punctuation-only items like "," or "." in arrays
+- Every array item must be a meaningful word or phrase
+- Do not truncate the response`
               },
               {
                 inlineData: {
@@ -17054,7 +17177,8 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 4000  // High to prevent truncation
+            maxOutputTokens: 4000,
+            responseMimeType: "application/json"  // Force JSON output
           }
         },
         {
@@ -17180,13 +17304,26 @@ CRITICAL: Return ONLY valid, COMPLETE JSON. Do not truncate.`
     
     // Always return what we found, even if empty
     console.log(`✅ [SELECTED] Returning response with ${products.length} products`);
+    
+    // Helper to clean arrays - remove empty strings, whitespace, punctuation-only entries
+    const cleanArray = (arr) => {
+      if (!arr || !Array.isArray(arr)) return [];
+      return arr.filter(item => {
+        if (!item || typeof item !== 'string') return false;
+        const trimmed = item.trim();
+        if (!trimmed || trimmed.length === 0) return false;
+        if (/^[\s,.\-_:;'"!?]+$/.test(trimmed)) return false;
+        return true;
+      });
+    };
+    
     return res.json({
       focusedObject: focusOn,
       needsUserSelection: false,
       productType: analysis.productType || null,
-      matchingProducts: analysis.matchingProducts || [],
+      matchingProducts: cleanArray(analysis.matchingProducts),
       userIntent: analysis.userIntent || null,
-      searchTerms: analysis.searchTerms || [],
+      searchTerms: cleanArray(analysis.searchTerms),
       products: products
     });
     
