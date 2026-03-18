@@ -477,11 +477,25 @@ function extractFieldsFromText(text, defaultValue = {}) {
       if (field === 'detectedObjects') {
         console.log(`   🔍 [DEBUG] detectedObjects array content: "${arrayContent.substring(0, 200)}..."`);
       }
-      // Extract all quoted strings from the array content
+      
+      // FIX: Clean up malformed empty strings and misaligned quotes BEFORE extraction
+      // Remove empty quoted strings "" that throw off quote matching
+      // Also normalize patterns like `," "` to `, "`
+      const cleanedContent = arrayContent
+        .replace(/""/g, '')           // Remove empty quoted strings
+        .replace(/,\s*"\s+/g, ', "')  // Fix `, " x` → `, "x` (space after opening quote)
+        .replace(/"\s*,\s*"/g, '", "') // Normalize `" , "` patterns
+        .trim();
+      
+      if (field === 'detectedObjects') {
+        console.log(`   🔍 [DEBUG] cleaned content: "${cleanedContent.substring(0, 200)}..."`);
+      }
+      
+      // Extract all quoted strings from the CLEANED array content
       const items = [];
       const itemRegex = /"([^"]+)"/g;
       let itemMatch;
-      while ((itemMatch = itemRegex.exec(arrayContent)) !== null) {
+      while ((itemMatch = itemRegex.exec(cleanedContent)) !== null) {
         const item = itemMatch[1].trim();
         if (isValidItem(item)) {
           items.push(item);
@@ -16645,7 +16659,63 @@ CRITICAL FORMATTING RULES:
           generationConfig: {
             temperature: 0.1,
             maxOutputTokens: 4000,
-            responseMimeType: "application/json"  // Force JSON output
+            responseMimeType: "application/json",
+            // FORCE exact JSON structure - Gemini MUST follow this schema
+            responseSchema: {
+              type: "object",
+              properties: {
+                detectedObjects: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "List of ALL distinct objects/furniture in the image"
+                },
+                needsUserSelection: {
+                  type: "boolean",
+                  description: "true if multiple objects detected, false if single object"
+                },
+                mainObject: {
+                  type: "string",
+                  description: "Description of the main/largest object"
+                },
+                confidence: {
+                  type: "number",
+                  description: "Confidence score 0.0 to 1.0"
+                },
+                userIntent: {
+                  type: "string",
+                  description: "What the user is looking for"
+                },
+                productType: {
+                  type: "string",
+                  description: "Metallbude product category"
+                },
+                matchingProducts: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Metallbude product names that match"
+                },
+                labels: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Descriptive labels"
+                },
+                colors: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Detected colors"
+                },
+                material: {
+                  type: "string",
+                  description: "Main material"
+                },
+                searchTerms: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Search terms in DE, EN, FR, IT"
+                }
+              },
+              required: ["detectedObjects", "needsUserSelection", "mainObject", "matchingProducts", "searchTerms"]
+            }
           }
         },
         {
@@ -16659,20 +16729,30 @@ CRITICAL FORMATTING RULES:
       if (geminiText) {
         console.log('📝 Gemini raw response:', geminiText);
         
-        // Use robust JSON parser to handle truncated/malformed responses
-        const analysis = robustParseAIJson(geminiText, {
-          detectedObjects: [],
-          needsUserSelection: false,
-          mainObject: null,
-          confidence: 0.8,
-          userIntent: null,
-          productType: null,
-          matchingProducts: [],
-          labels: [],
-          colors: [],
-          material: null,
-          searchTerms: []
-        });
+        // With responseSchema, Gemini output should be valid JSON - parse directly first
+        let analysis;
+        try {
+          analysis = JSON.parse(geminiText);
+          console.log('✅ [JSON] Direct parse successful!');
+          // Clean arrays just in case
+          analysis = cleanParsedArrays(analysis);
+        } catch (directParseError) {
+          console.log('⚠️ Direct parse failed, using robust parser...');
+          // Fall back to robust parser
+          analysis = robustParseAIJson(geminiText, {
+            detectedObjects: [],
+            needsUserSelection: false,
+            mainObject: null,
+            confidence: 0.8,
+            userIntent: null,
+            productType: null,
+            matchingProducts: [],
+            labels: [],
+            colors: [],
+            material: null,
+            searchTerms: []
+          });
+        }
         
         if (analysis.matchingProducts?.length > 0 || analysis.searchTerms?.length > 0) {
           console.log(`✅ Gemini analysis complete!`);
@@ -16684,6 +16764,8 @@ CRITICAL FORMATTING RULES:
           console.log(`   Labels: ${analysis.labels?.join(', ')}`);
           console.log(`   Colors: ${analysis.colors?.join(', ')}`);
           console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
+          console.log(`   🎯 DETECTED OBJECTS: [${analysis.detectedObjects?.join(', ')}]`);
+          console.log(`   🎯 Needs User Selection: ${analysis.needsUserSelection}`);
           
           // ============================================
           // DIRECTLY FETCH PRODUCTS FROM SHOPIFY
