@@ -17582,22 +17582,52 @@ const getZendeskAuthHeader = () => {
  */
 app.post('/zendesk/tickets', async (req, res) => {
   try {
+    const { 
+      subject, 
+      message, 
+      requester_name, 
+      requester_email,
+      // Customer context
+      shopify_customer_id,
+      order_count,
+      total_spent,
+      phone 
+    } = req.body;
+    
+    // Build customer context note for agents
+    let customerContext = '';
+    if (shopify_customer_id || order_count || total_spent || phone) {
+      customerContext = '\n\n---\n📋 **Customer Info (from App)**\n';
+      if (shopify_customer_id) {
+        customerContext += `• Shopify ID: ${shopify_customer_id}\n`;
+        customerContext += `• Admin: https://admin.shopify.com/store/metallbude/customers/${shopify_customer_id}\n`;
+      }
+      if (order_count) customerContext += `• Orders: ${order_count}\n`;
+      if (total_spent) customerContext += `• Total Spent: ${total_spent}\n`;
+      if (phone) customerContext += `• Phone: ${phone}\n`;
+    }
+    
+    // Build tags based on customer data
+    const ticketTags = ['mobile_app', 'flutter', 'in_app_chat'];
+    if (shopify_customer_id) ticketTags.push('has_shopify_account');
+    if (order_count > 0) ticketTags.push('has_orders');
+    if (order_count >= 5) ticketTags.push('repeat_customer');
+    
+    const fullMessage = message + customerContext;
+    
     if (!isZendeskConfigured()) {
       console.log('⚠️ Zendesk not configured, using request API');
-      // Fall back to anonymous request API
-      const { subject, message, requesterName, requesterEmail, tags } = req.body;
-      
       const response = await axios.post(
         `${ZENDESK_BASE_URL}/api/v2/requests.json`,
         {
           request: {
             subject: subject || 'App Support Request',
-            comment: { body: message },
+            comment: { body: fullMessage },
             requester: {
-              name: requesterName || 'App User',
-              email: requesterEmail || `app-${Date.now()}@metallbude-app.local`
+              name: requester_name || 'App User',
+              email: requester_email || `app-${Date.now()}@metallbude-app.local`
             },
-            tags: tags || ['mobile_app', 'flutter']
+            tags: ticketTags
           }
         },
         { headers: { 'Content-Type': 'application/json' } }
@@ -17612,20 +17642,19 @@ app.post('/zendesk/tickets', async (req, res) => {
     }
     
     // Use authenticated API for full access
-    const { subject, message, requesterName, requesterEmail, tags, priority } = req.body;
-    
     const response = await axios.post(
       `${ZENDESK_BASE_URL}/api/v2/tickets.json`,
       {
         ticket: {
           subject: subject || 'App Support Request',
-          comment: { body: message },
+          comment: { body: fullMessage },
           requester: {
-            name: requesterName || 'App User',
-            email: requesterEmail
+            name: requester_name || 'App User',
+            email: requester_email,
+            phone: phone || undefined
           },
-          tags: tags || ['mobile_app', 'flutter', 'in_app_chat'],
-          priority: priority || 'normal'
+          tags: ticketTags,
+          priority: 'normal'
         }
       },
       {
@@ -17676,17 +17705,38 @@ app.post('/zendesk/tickets/:ticketId/comments', async (req, res) => {
       return res.json({ success: true });
     }
     
-    // Use ticket API with auth
-    const response = await axios.put(
-      `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
-      {
-        ticket: {
-          comment: {
-            body: message,
-            public: isPublic
+    // First get the ticket to find the requester_id
+    // This ensures the comment is attributed to the customer, not the API user
+    let requesterId = null;
+    try {
+      const ticketResponse = await axios.get(
+        `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': getZendeskAuthHeader()
           }
         }
-      },
+      );
+      requesterId = ticketResponse.data.ticket?.requester_id;
+    } catch (e) {
+      console.log('⚠️ Could not get ticket requester, comment will be from API user');
+    }
+    
+    // Add comment with author_id set to the original requester
+    const commentPayload = {
+      ticket: {
+        comment: {
+          body: message,
+          public: isPublic,
+          ...(requesterId && { author_id: requesterId }) // Set author to requester
+        }
+      }
+    };
+    
+    await axios.put(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+      commentPayload,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -17695,7 +17745,7 @@ app.post('/zendesk/tickets/:ticketId/comments', async (req, res) => {
       }
     );
     
-    console.log('✅ Comment added to ticket:', ticketId);
+    console.log('✅ Comment added to ticket:', ticketId, requesterId ? `(as requester ${requesterId})` : '');
     res.json({ success: true });
     
   } catch (error) {
