@@ -17716,19 +17716,26 @@ app.get('/zendesk/tickets/:ticketId/comments', async (req, res) => {
     const { ticketId } = req.params;
     const { since_id } = req.query; // Optional: only get comments after this ID
     
-    let url = `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}/comments.json`;
-    
-    // If not configured, use requests API (limited)
     if (!isZendeskConfigured()) {
-      url = `${ZENDESK_BASE_URL}/api/v2/requests/${ticketId}/comments.json`;
+      return res.json({ success: true, comments: [] });
     }
     
-    const response = await axios.get(url, {
-      headers: isZendeskConfigured() ? {
+    // First get ticket to know the requester ID
+    const ticketUrl = `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`;
+    const ticketResponse = await axios.get(ticketUrl, {
+      headers: {
         'Content-Type': 'application/json',
         'Authorization': getZendeskAuthHeader()
-      } : {
-        'Content-Type': 'application/json'
+      }
+    });
+    const requesterId = ticketResponse.data.ticket?.requester_id;
+    
+    // Get comments
+    const commentsUrl = `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}/comments.json`;
+    const response = await axios.get(commentsUrl, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': getZendeskAuthHeader()
       }
     });
     
@@ -17740,13 +17747,15 @@ app.get('/zendesk/tickets/:ticketId/comments', async (req, res) => {
       comments = comments.filter(c => c.id > sinceIdNum);
     }
     
-    // Map to simplified format
+    // Map to simplified format with is_from_agent flag
     const mappedComments = comments.map(c => ({
       id: c.id,
       body: c.body || c.plain_body,
-      authorId: c.author_id,
-      isPublic: c.public !== false,
-      createdAt: c.created_at
+      author_id: c.author_id,
+      author_name: c.author?.name || 'Metallbude Support',
+      is_from_agent: c.author_id !== requesterId, // Agent if NOT the requester
+      is_public: c.public !== false,
+      created_at: c.created_at
     }));
     
     res.json({
