@@ -17557,6 +17557,259 @@ Alternativ findest du viele Antworten in unseren FAQ unter metallbude.com/pages/
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK SUPPORT TICKET PROXY
+// Securely proxies requests to Zendesk API without exposing credentials to app
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN || 'metallbude';
+const ZENDESK_API_EMAIL = process.env.ZENDESK_API_EMAIL;
+const ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN;
+const ZENDESK_BASE_URL = `https://${ZENDESK_SUBDOMAIN}.zendesk.com`;
+
+// Helper to check if Zendesk is configured
+const isZendeskConfigured = () => ZENDESK_API_EMAIL && ZENDESK_API_TOKEN;
+
+// Helper to get Zendesk auth header
+const getZendeskAuthHeader = () => {
+  const credentials = Buffer.from(`${ZENDESK_API_EMAIL}/token:${ZENDESK_API_TOKEN}`).toString('base64');
+  return `Basic ${credentials}`;
+};
+
+/**
+ * Create a new Zendesk support ticket
+ * POST /zendesk/tickets
+ */
+app.post('/zendesk/tickets', async (req, res) => {
+  try {
+    if (!isZendeskConfigured()) {
+      console.log('⚠️ Zendesk not configured, using request API');
+      // Fall back to anonymous request API
+      const { subject, message, requesterName, requesterEmail, tags } = req.body;
+      
+      const response = await axios.post(
+        `${ZENDESK_BASE_URL}/api/v2/requests.json`,
+        {
+          request: {
+            subject: subject || 'App Support Request',
+            comment: { body: message },
+            requester: {
+              name: requesterName || 'App User',
+              email: requesterEmail || `app-${Date.now()}@metallbude-app.local`
+            },
+            tags: tags || ['mobile_app', 'flutter']
+          }
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+      
+      console.log('✅ Zendesk request created:', response.data.request?.id);
+      return res.json({
+        success: true,
+        ticketId: response.data.request?.id?.toString(),
+        status: response.data.request?.status
+      });
+    }
+    
+    // Use authenticated API for full access
+    const { subject, message, requesterName, requesterEmail, tags, priority } = req.body;
+    
+    const response = await axios.post(
+      `${ZENDESK_BASE_URL}/api/v2/tickets.json`,
+      {
+        ticket: {
+          subject: subject || 'App Support Request',
+          comment: { body: message },
+          requester: {
+            name: requesterName || 'App User',
+            email: requesterEmail
+          },
+          tags: tags || ['mobile_app', 'flutter', 'in_app_chat'],
+          priority: priority || 'normal'
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': getZendeskAuthHeader()
+        }
+      }
+    );
+    
+    console.log('✅ Zendesk ticket created:', response.data.ticket?.id);
+    res.json({
+      success: true,
+      ticketId: response.data.ticket?.id?.toString(),
+      status: response.data.ticket?.status
+    });
+    
+  } catch (error) {
+    console.error('❌ Zendesk create ticket error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data?.error || 'Failed to create ticket'
+    });
+  }
+});
+
+/**
+ * Add comment to existing Zendesk ticket
+ * POST /zendesk/tickets/:ticketId/comments
+ */
+app.post('/zendesk/tickets/:ticketId/comments', async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { message, isPublic = true } = req.body;
+    
+    if (!isZendeskConfigured()) {
+      // Use request API for end-user comments
+      const response = await axios.put(
+        `${ZENDESK_BASE_URL}/api/v2/requests/${ticketId}.json`,
+        {
+          request: {
+            comment: { body: message }
+          }
+        },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+      
+      return res.json({ success: true });
+    }
+    
+    // Use ticket API with auth
+    const response = await axios.put(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+      {
+        ticket: {
+          comment: {
+            body: message,
+            public: isPublic
+          }
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': getZendeskAuthHeader()
+        }
+      }
+    );
+    
+    console.log('✅ Comment added to ticket:', ticketId);
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('❌ Zendesk add comment error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: 'Failed to add comment'
+    });
+  }
+});
+
+/**
+ * Get comments for a Zendesk ticket (for polling agent responses)
+ * GET /zendesk/tickets/:ticketId/comments
+ */
+app.get('/zendesk/tickets/:ticketId/comments', async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { since_id } = req.query; // Optional: only get comments after this ID
+    
+    let url = `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}/comments.json`;
+    
+    // If not configured, use requests API (limited)
+    if (!isZendeskConfigured()) {
+      url = `${ZENDESK_BASE_URL}/api/v2/requests/${ticketId}/comments.json`;
+    }
+    
+    const response = await axios.get(url, {
+      headers: isZendeskConfigured() ? {
+        'Content-Type': 'application/json',
+        'Authorization': getZendeskAuthHeader()
+      } : {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    let comments = response.data.comments || [];
+    
+    // Filter to only comments after since_id if provided
+    if (since_id) {
+      const sinceIdNum = parseInt(since_id);
+      comments = comments.filter(c => c.id > sinceIdNum);
+    }
+    
+    // Map to simplified format
+    const mappedComments = comments.map(c => ({
+      id: c.id,
+      body: c.body || c.plain_body,
+      authorId: c.author_id,
+      isPublic: c.public !== false,
+      createdAt: c.created_at
+    }));
+    
+    res.json({
+      success: true,
+      comments: mappedComments
+    });
+    
+  } catch (error) {
+    console.error('❌ Zendesk get comments error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: 'Failed to get comments',
+      comments: []
+    });
+  }
+});
+
+/**
+ * Get ticket status
+ * GET /zendesk/tickets/:ticketId
+ */
+app.get('/zendesk/tickets/:ticketId', async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    
+    let url = `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`;
+    
+    if (!isZendeskConfigured()) {
+      url = `${ZENDESK_BASE_URL}/api/v2/requests/${ticketId}.json`;
+    }
+    
+    const response = await axios.get(url, {
+      headers: isZendeskConfigured() ? {
+        'Content-Type': 'application/json',
+        'Authorization': getZendeskAuthHeader()
+      } : {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const ticket = response.data.ticket || response.data.request;
+    
+    res.json({
+      success: true,
+      ticket: {
+        id: ticket.id,
+        status: ticket.status,
+        subject: ticket.subject,
+        updatedAt: ticket.updated_at
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Zendesk get ticket error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: 'Failed to get ticket'
+    });
+  }
+});
+
+console.log(`🎫 Zendesk proxy configured: ${isZendeskConfigured() ? 'Full API access' : 'Anonymous requests only'}`);
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Combined Auth Server running on port ${PORT}`);
