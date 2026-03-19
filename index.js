@@ -17565,6 +17565,12 @@ Alternativ findest du viele Antworten in unseren FAQ unter metallbude.com/pages/
 const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN || 'metallbude';
 const ZENDESK_API_EMAIL = process.env.ZENDESK_API_EMAIL;
 const ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN;
+const ZENDESK_MESSAGING_SIGNING_KEY = process.env.ZENDESK_MESSAGING_SIGNING_KEY;
+const ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID = process.env.ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID;
+const ZENDESK_FIELD_ORDER_COUNT = process.env.ZENDESK_FIELD_ORDER_COUNT;
+const ZENDESK_FIELD_TOTAL_SPENT = process.env.ZENDESK_FIELD_TOTAL_SPENT;
+const ZENDESK_FIELD_CUSTOMER_PHONE = process.env.ZENDESK_FIELD_CUSTOMER_PHONE;
+const ZENDESK_FIELD_CUSTOMER_EMAIL = process.env.ZENDESK_FIELD_CUSTOMER_EMAIL;
 const ZENDESK_BASE_URL = `https://${ZENDESK_SUBDOMAIN}.zendesk.com`;
 
 // Helper to check if Zendesk is configured
@@ -17575,6 +17581,133 @@ const getZendeskAuthHeader = () => {
   const credentials = Buffer.from(`${ZENDESK_API_EMAIL}/token:${ZENDESK_API_TOKEN}`).toString('base64');
   return `Basic ${credentials}`;
 };
+
+const buildZendeskMessagingFields = ({
+  email,
+  phone,
+  shopifyCustomerId,
+  orderCount,
+  totalSpent
+}) => {
+  const fields = {};
+
+  if (ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID && shopifyCustomerId) {
+    fields[ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID] = String(shopifyCustomerId);
+  }
+  if (ZENDESK_FIELD_ORDER_COUNT && orderCount !== undefined && orderCount !== null) {
+    fields[ZENDESK_FIELD_ORDER_COUNT] = String(orderCount);
+  }
+  if (ZENDESK_FIELD_TOTAL_SPENT && totalSpent) {
+    fields[ZENDESK_FIELD_TOTAL_SPENT] = String(totalSpent);
+  }
+  if (ZENDESK_FIELD_CUSTOMER_PHONE && phone) {
+    fields[ZENDESK_FIELD_CUSTOMER_PHONE] = String(phone);
+  }
+  if (ZENDESK_FIELD_CUSTOMER_EMAIL && email) {
+    fields[ZENDESK_FIELD_CUSTOMER_EMAIL] = String(email);
+  }
+
+  return fields;
+};
+
+/**
+ * Build authenticated Zendesk Messaging context for the mobile app.
+ * POST /zendesk/messaging/context
+ */
+app.post('/zendesk/messaging/context', async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      phone,
+      shopifyCustomerId,
+      orderCount,
+      totalSpent,
+      platform,
+      isLoggedIn
+    } = req.body || {};
+
+    const tags = ['mobile_app'];
+    if (platform) tags.push(String(platform).toLowerCase());
+    if (isLoggedIn) tags.push('logged_in'); else tags.push('guest');
+    if (shopifyCustomerId) tags.push('has_shopify_account');
+    if (Number(orderCount) > 0) tags.push('has_orders');
+    if (Number(orderCount) >= 5) tags.push('repeat_customer');
+
+    const conversationFields = buildZendeskMessagingFields({
+      email,
+      phone,
+      shopifyCustomerId,
+      orderCount,
+      totalSpent
+    });
+
+    const diagnostics = {
+      received: {
+        hasName: Boolean(name),
+        hasEmail: Boolean(email),
+        hasPhone: Boolean(phone),
+        hasShopifyCustomerId: Boolean(shopifyCustomerId),
+        orderCount: Number(orderCount || 0),
+        hasTotalSpent: Boolean(totalSpent),
+        platform: platform || null,
+        isLoggedIn: Boolean(isLoggedIn)
+      },
+      messagingAuthConfigured: Boolean(ZENDESK_MESSAGING_SIGNING_KEY),
+      fieldMappings: {
+        shopifyCustomerId: ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID || null,
+        orderCount: ZENDESK_FIELD_ORDER_COUNT || null,
+        totalSpent: ZENDESK_FIELD_TOTAL_SPENT || null,
+        customerPhone: ZENDESK_FIELD_CUSTOMER_PHONE || null,
+        customerEmail: ZENDESK_FIELD_CUSTOMER_EMAIL || null
+      },
+      appliedFieldCount: Object.keys(conversationFields).length
+    };
+
+    let jwtToken = null;
+    if (ZENDESK_MESSAGING_SIGNING_KEY && shopifyCustomerId && email) {
+      jwtToken = jwt.sign(
+        {
+          external_id: String(shopifyCustomerId),
+          name: name || email,
+          email: String(email),
+          email_verified: true,
+        },
+        ZENDESK_MESSAGING_SIGNING_KEY,
+        {
+          algorithm: 'HS256',
+          expiresIn: '5m',
+        }
+      );
+      diagnostics.jwtIssued = true;
+    } else {
+      diagnostics.jwtIssued = false;
+      diagnostics.jwtMissingReason = !ZENDESK_MESSAGING_SIGNING_KEY
+        ? 'missing_signing_key'
+        : !shopifyCustomerId
+          ? 'missing_shopify_customer_id'
+          : !email
+            ? 'missing_email'
+            : 'unknown';
+    }
+
+    console.log('💬 Zendesk messaging context prepared:', diagnostics);
+
+    return res.json({
+      success: true,
+      jwt: jwtToken,
+      tags: [...new Set(tags)],
+      conversationFields,
+      diagnostics,
+    });
+  } catch (error) {
+    console.error('❌ Zendesk messaging context error:', error.response?.data || error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to prepare Zendesk messaging context'
+    });
+  }
+});
 
 /**
  * Create a new Zendesk support ticket
