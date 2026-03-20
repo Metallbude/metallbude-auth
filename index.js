@@ -17658,14 +17658,59 @@ const ZENDESK_FIELD_CUSTOMER_PHONE = process.env.ZENDESK_FIELD_CUSTOMER_PHONE;
 const ZENDESK_FIELD_CUSTOMER_EMAIL = process.env.ZENDESK_FIELD_CUSTOMER_EMAIL;
 const ZENDESK_BASE_URL = `https://${ZENDESK_SUBDOMAIN}.zendesk.com`;
 
+// Sunshine Conversations API (for sending messages to Messaging SDK)
+const ZENDESK_SUNCO_APP_ID = process.env.ZENDESK_SUNCO_APP_ID;
+const ZENDESK_SUNCO_KEY_ID = process.env.ZENDESK_SUNCO_KEY_ID;
+const ZENDESK_SUNCO_KEY_SECRET = process.env.ZENDESK_SUNCO_KEY_SECRET;
+
 // Helper to check if Zendesk is configured
 const isZendeskConfigured = () => ZENDESK_API_EMAIL && ZENDESK_API_TOKEN;
+const isSuncoConfigured = () => ZENDESK_SUNCO_APP_ID && ZENDESK_SUNCO_KEY_ID && ZENDESK_SUNCO_KEY_SECRET;
 
 // Helper to get Zendesk auth header
 const getZendeskAuthHeader = () => {
   const credentials = Buffer.from(`${ZENDESK_API_EMAIL}/token:${ZENDESK_API_TOKEN}`).toString('base64');
   return `Basic ${credentials}`;
 };
+
+// Helper to get Sunshine Conversations auth header
+const getSuncoAuthHeader = () => {
+  return `Basic ${Buffer.from(`${ZENDESK_SUNCO_KEY_ID}:${ZENDESK_SUNCO_KEY_SECRET}`).toString('base64')}`;
+};
+
+// Find the Sunshine Conversation ID linked to a ticket
+async function findMessagingConversationId(ticketId) {
+  try {
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}/audits.json?per_page=5`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+
+    for (const audit of data.audits || []) {
+      // Check audit-level via for messaging channel
+      if (audit.via?.channel === 'native_messaging') {
+        console.log(`🔍 Ticket ${ticketId} audit via:`, JSON.stringify(audit.via));
+        if (audit.via?.source?.from?.id) return audit.via.source.from.id;
+      }
+      // Check individual events
+      for (const event of audit.events || []) {
+        if (event.via?.channel === 'native_messaging' && event.via?.source?.from?.id) {
+          return event.via.source.from.id;
+        }
+      }
+    }
+
+    console.log(`⚠️ No messaging conversation ID found in audits for ticket ${ticketId}`);
+    // Log first audit's via for debugging
+    if (data.audits?.[0]?.via) {
+      console.log(`🔍 First audit via:`, JSON.stringify(data.audits[0].via));
+    }
+    return null;
+  } catch (err) {
+    console.error(`❌ Failed to fetch audits for ticket ${ticketId}:`, err.response?.data || err.message);
+    return null;
+  }
+}
 
 const buildZendeskMessagingFields = ({
   email,
@@ -18117,35 +18162,57 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
   if (ticket_id && isZendeskConfigured()) {
     console.log(`✅ Ticket ${ticket_id} resolved for ${requester_email || external_id || 'unknown'}`);
 
-    // Send a public reply to the ticket so it appears in the customer's Messaging SDK
-    try {
-      const solvedMessage = [
-        'Dein Anliegen wurde gelöst! ✅',
-        '',
-        'Falls du noch Fragen hast, schreib uns einfach eine neue Nachricht.',
-        'Wir sind gerne für dich da! 💛'
-      ].join('\n');
+    const solvedMessage = [
+      'Dein Anliegen wurde gelöst! ✅',
+      '',
+      'Falls du noch Fragen hast, schreib uns einfach eine neue Nachricht.',
+      'Wir sind gerne für dich da! 💛'
+    ].join('\n');
 
-      await axios.put(
-        `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticket_id)}.json`,
-        {
-          ticket: {
-            comment: {
-              body: solvedMessage,
-              public: true
+    let messageSent = false;
+
+    // PRIMARY: Send via Sunshine Conversations API → pushes directly to Messaging SDK
+    if (isSuncoConfigured()) {
+      const conversationId = await findMessagingConversationId(ticket_id);
+      if (conversationId) {
+        try {
+          await axios.post(
+            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/messages`,
+            {
+              author: { type: 'business' },
+              content: { type: 'text', text: solvedMessage }
+            },
+            {
+              headers: {
+                'Authorization': getSuncoAuthHeader(),
+                'Content-Type': 'application/json'
+              }
             }
-          }
-        },
-        {
-          headers: {
-            'Authorization': getZendeskAuthHeader(),
-            'Content-Type': 'application/json'
-          }
+          );
+          console.log(`📨 Solved message sent via Messaging SDK for ticket ${ticket_id} (conversation: ${conversationId})`);
+          messageSent = true;
+        } catch (suncoErr) {
+          console.error(`❌ Sunshine API failed for ticket ${ticket_id}:`, suncoErr.response?.data || suncoErr.message);
         }
-      );
-      console.log(`📨 Solved notification sent to ticket ${ticket_id} → Messaging conversation`);
-    } catch (err) {
-      console.error(`❌ Failed to send solved notification for ticket ${ticket_id}:`, err.response?.data || err.message);
+      } else {
+        console.log(`⚠️ Could not find messaging conversation for ticket ${ticket_id} - trying ticket comment fallback`);
+      }
+    } else {
+      console.log('⚠️ Sunshine Conversations not configured (ZENDESK_SUNCO_APP_ID, ZENDESK_SUNCO_KEY_ID, ZENDESK_SUNCO_KEY_SECRET) - using ticket comment fallback');
+    }
+
+    // FALLBACK: Add ticket comment (visible in Zendesk web, may not appear in Messaging SDK for solved tickets)
+    if (!messageSent) {
+      try {
+        await axios.put(
+          `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticket_id)}.json`,
+          { ticket: { comment: { body: solvedMessage, public: true } } },
+          { headers: { 'Authorization': getZendeskAuthHeader(), 'Content-Type': 'application/json' } }
+        );
+        console.log(`📨 Solved notification added as ticket comment for ticket ${ticket_id} (fallback - may not appear in app)`);
+      } catch (err) {
+        console.error(`❌ Failed to send solved notification for ticket ${ticket_id}:`, err.response?.data || err.message);
+      }
     }
   }
 
@@ -18153,6 +18220,7 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 });
 
 console.log(`🎫 Zendesk proxy configured: ${isZendeskConfigured() ? 'Full API access' : 'Anonymous requests only'}`);
+console.log(`☀️ Sunshine Conversations: ${isSuncoConfigured() ? 'Configured (Messaging SDK delivery enabled)' : 'NOT configured (falling back to ticket comments)'}`);
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
