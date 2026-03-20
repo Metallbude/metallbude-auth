@@ -18005,6 +18005,39 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK WEBHOOK - Ticket Status Changes
+// Configure in Zendesk Admin > Apps and integrations > Webhooks
+// URL: https://metallbude-auth.onrender.com/zendesk/webhook/ticket-status
+// Method: POST, Content-Type: application/json
+// Then create a Trigger with action "Notify active webhook" when status changes
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const ZENDESK_WEBHOOK_SECRET = process.env.ZENDESK_WEBHOOK_SECRET;
+
+app.post('/zendesk/webhook/ticket-status', (req, res) => {
+  // Verify webhook authenticity via shared secret header
+  if (ZENDESK_WEBHOOK_SECRET) {
+    const providedSecret = req.headers['x-zendesk-webhook-secret'];
+    if (providedSecret !== ZENDESK_WEBHOOK_SECRET) {
+      console.warn('⚠️ Zendesk webhook: invalid secret');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+
+  const { ticket_id, ticket_status, requester_email, requester_name, external_id } = req.body;
+
+  console.log(`🎫 Zendesk webhook: ticket ${ticket_id} → ${ticket_status}`);
+
+  if (ticket_status === 'solved' || ticket_status === 'closed') {
+    console.log(`✅ Ticket ${ticket_id} resolved for ${requester_email || external_id || 'unknown'}`);
+    // Future: send push notification via CleverPush/Firebase to notify the customer
+    // that their ticket was resolved and they can start a new conversation if needed.
+  }
+
+  res.json({ received: true });
+});
+
 console.log(`🎫 Zendesk proxy configured: ${isZendeskConfigured() ? 'Full API access' : 'Anonymous requests only'}`);
 
 // Start server
