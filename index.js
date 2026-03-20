@@ -18113,7 +18113,8 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 
   console.log(`🎫 Zendesk webhook: ticket ${ticket_id} → ${ticket_status}`);
 
-  if ((ticket_status === 'solved' || ticket_status === 'closed') && ticket_id && isZendeskConfigured()) {
+  // The trigger only fires on solved/closed, so no need to check status language
+  if (ticket_id && isZendeskConfigured()) {
     console.log(`✅ Ticket ${ticket_id} resolved for ${requester_email || external_id || 'unknown'}`);
 
     // Send a public reply to the ticket so it appears in the customer's Messaging SDK
