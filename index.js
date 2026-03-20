@@ -18382,53 +18382,20 @@ app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
 
     if (!suncoUserId) {
       console.log(`ℹ️ No Sunco user for ${shopifyCustomerId}/${email} - nothing to clear`);
-      return res.json({ cleared: true, count: 0 });
+      return res.json({ cleared: true, deleted: false });
     }
 
     console.log(`🔍 Found Sunco user ${suncoUserId} for Shopify customer ${shopifyCustomerId}`);
 
-    // Step 2: List all conversations for this user
-    const { data: convoData } = await axios.get(
-      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=100`,
+    // Step 2: Delete the entire Sunco user — this removes ALL their conversations & messages
+    // When the SDK re-initializes with the JWT, Sunshine auto-creates a fresh user + default conversation
+    // This ensures: no "deleted" tombstones, bot is active on new conversation, completely clean slate
+    await axios.delete(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}`,
       { headers: { 'Authorization': getSuncoAuthHeader() } }
     );
-    const conversations = convoData.conversations || [];
-
-    if (conversations.length === 0) {
-      console.log(`ℹ️ No conversations to clear for Sunco user ${suncoUserId}`);
-      return res.json({ cleared: true, count: 0 });
-    }
-
-    // Step 3: Close each conversation (don't delete messages — it leaves "deleted" tombstones)
-    let closedCount = 0;
-    for (const convo of conversations) {
-      try {
-        // First try to delete the entire conversation
-        await axios.delete(
-          `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}`,
-          { headers: { 'Authorization': getSuncoAuthHeader() } }
-        );
-        closedCount++;
-        console.log(`🗑️ Deleted conversation ${convo.id}`);
-      } catch (delErr) {
-        // Default conversation can't be deleted — just close it
-        // The SDK invalidate() + re-init handles local cache cleanup
-        try {
-          await axios.post(
-            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}/activity`,
-            { type: 'conversation:closed', author: { type: 'business' } },
-            { headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' } }
-          );
-          closedCount++;
-          console.log(`🔒 Closed conversation ${convo.id} (default — cannot delete)`);
-        } catch (closeErr) {
-          console.error(`⚠️ Failed to close conversation ${convo.id}:`, closeErr.response?.data || closeErr.message);
-        }
-      }
-    }
-
-    console.log(`🗑️ Closed ${closedCount}/${conversations.length} conversations for Shopify customer ${shopifyCustomerId}`);
-    return res.json({ cleared: true, count: closedCount });
+    console.log(`🗑️ Deleted Sunco user ${suncoUserId} (all conversations removed) for Shopify customer ${shopifyCustomerId}`);
+    return res.json({ cleared: true, deleted: true, suncoUserId });
 
   } catch (err) {
     console.error('❌ Failed to clear conversations:', err.response?.data || err.message);
