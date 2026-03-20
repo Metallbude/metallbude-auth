@@ -18450,7 +18450,7 @@ app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
             try {
               await axios.post(
                 `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}/activity`,
-                { activity: { type: 'conversation:closed' }, author: { type: 'business' } },
+                { type: 'conversation:closed', author: { type: 'business' } },
                 { headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' } }
               );
             } catch (closeErr) { /* best effort */ }
@@ -18538,7 +18538,7 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
             await axios.post(
               `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/activity`,
               {
-                activity: { type: 'conversation:closed' },
+                type: 'conversation:closed',
                 author: { type: 'business' }
               },
               {
