@@ -18399,22 +18399,75 @@ app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
       return res.json({ cleared: true, count: 0 });
     }
 
-    // Step 3: Delete each conversation
-    let deletedCount = 0;
+    // Step 3: Delete each conversation (or clear messages if default)
+    let clearedCount = 0;
     for (const convo of conversations) {
       try {
+        // Try to delete the entire conversation
         await axios.delete(
           `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}`,
           { headers: { 'Authorization': getSuncoAuthHeader() } }
         );
-        deletedCount++;
+        clearedCount++;
+        console.log(`🗑️ Deleted conversation ${convo.id}`);
       } catch (delErr) {
-        console.error(`⚠️ Failed to delete conversation ${convo.id}:`, delErr.response?.data || delErr.message);
+        const errCode = delErr.response?.data?.errors?.[0]?.code;
+        // Default conversation can't be deleted — clear its messages instead
+        if (errCode === 'bad_request' || delErr.response?.status === 400) {
+          console.log(`📋 Conversation ${convo.id} is default — clearing messages instead`);
+          try {
+            let hasMore = true;
+            let cursor = null;
+            let msgDeletedCount = 0;
+
+            while (hasMore) {
+              const msgUrl = cursor
+                ? `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}/messages?page[after]=${cursor}&page[size]=100`
+                : `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}/messages?page[size]=100`;
+
+              const { data: msgData } = await axios.get(msgUrl, {
+                headers: { 'Authorization': getSuncoAuthHeader() }
+              });
+
+              const messages = msgData.messages || [];
+              for (const msg of messages) {
+                try {
+                  await axios.delete(
+                    `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}/messages/${msg.id}`,
+                    { headers: { 'Authorization': getSuncoAuthHeader() } }
+                  );
+                  msgDeletedCount++;
+                } catch (msgDelErr) {
+                  // Some messages (system/bot) may not be deletable
+                }
+              }
+
+              cursor = msgData.meta?.cursor?.after;
+              hasMore = !!cursor && messages.length > 0;
+            }
+
+            // Close the conversation so next message starts fresh
+            try {
+              await axios.post(
+                `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}/activity`,
+                { activity: { type: 'conversation:closed' }, author: { type: 'business' } },
+                { headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' } }
+              );
+            } catch (closeErr) { /* best effort */ }
+
+            console.log(`🧹 Cleared ${msgDeletedCount} messages from default conversation ${convo.id}`);
+            clearedCount++;
+          } catch (clearErr) {
+            console.error(`⚠️ Failed to clear messages from ${convo.id}:`, clearErr.response?.data || clearErr.message);
+          }
+        } else {
+          console.error(`⚠️ Failed to delete conversation ${convo.id}:`, delErr.response?.data || delErr.message);
+        }
       }
     }
 
-    console.log(`🗑️ Cleared ${deletedCount}/${conversations.length} conversations for Shopify customer ${shopifyCustomerId}`);
-    return res.json({ cleared: true, count: deletedCount });
+    console.log(`🗑️ Cleared ${clearedCount}/${conversations.length} conversations for Shopify customer ${shopifyCustomerId}`);
+    return res.json({ cleared: true, count: clearedCount });
 
   } catch (err) {
     console.error('❌ Failed to clear conversations:', err.response?.data || err.message);
