@@ -18132,11 +18132,8 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
           ticket: {
             comment: {
               body: solvedMessage,
-              public: true,
-              author_id: null // uses the API user as author
-            },
-            // Keep status as solved (don't reopen)
-            status: ticket_status
+              public: true
+            }
           }
         },
         {
