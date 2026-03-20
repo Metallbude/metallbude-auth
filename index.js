@@ -18479,6 +18479,26 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
           );
           console.log(`📨 Solved message sent via Messaging SDK for ticket ${ticket_id} (conversation: ${conversationId})`);
           messageSent = true;
+
+          // Close the conversation so the next message from the user starts a new one
+          try {
+            await axios.post(
+              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/activity`,
+              {
+                activity: { type: 'conversation:closed' },
+                author: { type: 'business' }
+              },
+              {
+                headers: {
+                  'Authorization': getSuncoAuthHeader(),
+                  'Content-Type': 'application/json'
+                }
+              }
+            );
+            console.log(`🔒 Conversation ${conversationId} closed for ticket ${ticket_id}`);
+          } catch (closeErr) {
+            console.error(`⚠️ Failed to close conversation ${conversationId}:`, closeErr.response?.data || closeErr.message);
+          }
         } catch (suncoErr) {
           console.error(`❌ Sunshine API failed for ticket ${ticket_id}:`, suncoErr.response?.data || suncoErr.message);
         }
