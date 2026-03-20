@@ -18157,6 +18157,48 @@ app.get('/zendesk/tickets/:ticketId/comments', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - List Tickets by Email (for Help & Support conversation history)
+// Must be defined BEFORE /zendesk/tickets/:ticketId to avoid route collision
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/zendesk/tickets/by-email', async (req, res) => {
+  const { email } = req.query;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Missing email parameter' });
+  }
+
+  if (!isZendeskConfigured()) {
+    return res.status(503).json({ error: 'Zendesk not configured' });
+  }
+
+  try {
+    // Search for tickets by requester email, sorted by most recent first
+    const query = `type:ticket requester:${email} channel:messaging_sdk`;
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/search.json?query=${encodeURIComponent(query)}&sort_by=created_at&sort_order=desc&per_page=20`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+
+    const tickets = (data.results || []).map(ticket => ({
+      id: ticket.id,
+      subject: ticket.subject,
+      status: ticket.status,
+      createdAt: ticket.created_at,
+      updatedAt: ticket.updated_at,
+      description: ticket.description ? ticket.description.substring(0, 150) : '',
+    }));
+
+    console.log(`📋 Found ${tickets.length} tickets for ${email}`);
+    return res.json({ tickets });
+
+  } catch (err) {
+    console.error('❌ Failed to list tickets:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to list tickets' });
+  }
+});
+
 /**
  * Get ticket status
  * GET /zendesk/tickets/:ticketId
@@ -18405,6 +18447,42 @@ app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Get Ticket Comments (conversation messages for a specific ticket)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
+  const { ticketId } = req.params;
+
+  if (!isZendeskConfigured()) {
+    return res.status(503).json({ error: 'Zendesk not configured' });
+  }
+
+  try {
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}/comments.json?sort_order=asc`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+
+    const messages = (data.comments || [])
+      .filter(c => c.public !== false) // Only public comments
+      .map(comment => ({
+        id: comment.id,
+        body: comment.body,
+        authorId: comment.author_id,
+        createdAt: comment.created_at,
+        isAgent: comment.via?.channel !== 'messaging_sdk',
+      }));
+
+    console.log(`💬 Found ${messages.length} messages for ticket ${ticketId}`);
+    return res.json({ messages });
+
+  } catch (err) {
+    console.error('❌ Failed to get ticket conversation:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to get conversation' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK WEBHOOK - Ticket Status Changes
 // Configure in Zendesk Admin > Apps and integrations > Webhooks
 // URL: https://metallbude-auth.onrender.com/zendesk/webhook/ticket-status
@@ -18462,19 +18540,25 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
           console.log(`📨 Solved message sent via Messaging SDK for ticket ${ticket_id} (conversation: ${conversationId})`);
           messageSent = true;
 
-          // Delete the Sunco user — removes all conversations & messages
-          // The solved message was already pushed to the SDK via real-time delivery
-          // When the user next opens chat, SDK re-login creates a fresh user + conversation with active bot
-          if (suncoUserId) {
-            try {
-              await axios.delete(
-                `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}`,
-                { headers: { 'Authorization': getSuncoAuthHeader() } }
-              );
-              console.log(`🗑️ Deleted Sunco user ${suncoUserId} after ticket ${ticket_id} solved — next chat will be fresh`);
-            } catch (delErr) {
-              console.error(`⚠️ Failed to delete Sunco user ${suncoUserId}:`, delErr.response?.data || delErr.message);
-            }
+          // Close the conversation so the next message starts fresh
+          // (Don't delete user — keep conversation history for Help & Support screen)
+          try {
+            await axios.post(
+              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/activity`,
+              {
+                type: 'conversation:closed',
+                author: { type: 'business' }
+              },
+              {
+                headers: {
+                  'Authorization': getSuncoAuthHeader(),
+                  'Content-Type': 'application/json'
+                }
+              }
+            );
+            console.log(`🔒 Conversation ${conversationId} closed for ticket ${ticket_id}`);
+          } catch (closeErr) {
+            console.error(`⚠️ Failed to close conversation ${conversationId}:`, closeErr.response?.data || closeErr.message);
           }
         } catch (suncoErr) {
           console.error(`❌ Sunshine API failed for ticket ${ticket_id}:`, suncoErr.response?.data || suncoErr.message);
