@@ -18169,7 +18169,11 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
 
 app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
   const { externalId } = req.params;
-  const debug = { externalId, steps: [] };
+  const debug = { 
+    externalId, 
+    configuredAppId: ZENDESK_SUNCO_APP_ID || 'MISSING',
+    steps: [] 
+  };
 
   if (!isSuncoConfigured()) {
     return res.json({ ...debug, error: 'Sunshine not configured', env: { 
@@ -18179,35 +18183,53 @@ app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
     }});
   }
 
-  // Step 1: Try to find Sunco user by externalId
+  // Step 0: List ALL available Sunshine apps to find the correct one
+  try {
+    const appsUrl = `${ZENDESK_BASE_URL}/sc/v2/apps`;
+    const { data: appsData } = await axios.get(appsUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
+    const apps = (appsData.apps || []).map(a => ({ id: a.id, name: a.name || a.displayName }));
+    debug.steps.push({ step: 'list_apps', url: appsUrl, status: 'OK', apps });
+    debug.availableAppIds = apps.map(a => a.id);
+  } catch (appsErr) {
+    debug.steps.push({ step: 'list_apps', status: 'ERROR', statusCode: appsErr.response?.status, error: appsErr.response?.data || appsErr.message });
+  }
+
+  // Step 1: Try configured appId
   const userUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(externalId)}`;
   try {
     const { data } = await axios.get(userUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
-    debug.steps.push({ step: 'find_sunco_user', url: userUrl, status: 'OK', user: data.user ? { id: data.user.id, externalId: data.user.externalId } : data });
-    
-    if (data.user?.id) {
-      // Step 2: List conversations
-      const convoUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${data.user.id}&page[size]=5`;
-      try {
-        const { data: convoData } = await axios.get(convoUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
-        const convos = (convoData.conversations || []).map(c => ({ id: c.id, type: c.type, createdAt: c.createdAt || c.metadata?.createdAt }));
-        debug.steps.push({ step: 'list_conversations', url: convoUrl, status: 'OK', count: convos.length, conversations: convos });
-      } catch (convoErr) {
-        debug.steps.push({ step: 'list_conversations', url: convoUrl, status: 'ERROR', error: convoErr.response?.data || convoErr.message });
-      }
-    }
+    debug.steps.push({ step: 'find_user_configured_app', url: userUrl, status: 'OK', user: data.user ? { id: data.user.id, externalId: data.user.externalId } : data });
   } catch (userErr) {
-    debug.steps.push({ step: 'find_sunco_user', url: userUrl, status: userErr.response?.status === 404 ? 'NOT_FOUND' : 'ERROR', statusCode: userErr.response?.status, error: userErr.response?.data || userErr.message });
+    debug.steps.push({ step: 'find_user_configured_app', url: userUrl, status: userErr.response?.status === 404 ? 'NOT_FOUND' : 'ERROR', statusCode: userErr.response?.status, error: userErr.response?.data || userErr.message });
   }
 
-  // Step 3: Also try listing ALL app users to see format issues
+  // Step 2: Try each discovered app ID (if any discovered and different from configured)
+  if (debug.availableAppIds) {
+    for (const appId of debug.availableAppIds) {
+      if (appId === ZENDESK_SUNCO_APP_ID) continue;
+      const altUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${appId}/users/externalId:${encodeURIComponent(externalId)}`;
+      try {
+        const { data } = await axios.get(altUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
+        debug.steps.push({ step: `find_user_app_${appId}`, url: altUrl, status: 'OK', user: data.user ? { id: data.user.id, externalId: data.user.externalId } : data });
+        debug.correctAppId = appId;
+      } catch (altErr) {
+        debug.steps.push({ step: `find_user_app_${appId}`, status: altErr.response?.status === 404 ? 'NOT_FOUND' : 'ERROR', statusCode: altErr.response?.status, error: altErr.response?.data || altErr.message });
+      }
+    }
+  }
+
+  // Step 3: List sample users from configured app
   try {
     const listUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users?page[size]=5`;
     const { data } = await axios.get(listUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
     const users = (data.users || []).map(u => ({ id: u.id, externalId: u.externalId, email: u.profile?.email }));
-    debug.steps.push({ step: 'list_all_users_sample', status: 'OK', count: data.users?.length || 0, sample: users });
+    debug.steps.push({ step: 'list_users_sample', status: 'OK', count: data.users?.length || 0, sample: users });
   } catch (listErr) {
-    debug.steps.push({ step: 'list_all_users_sample', status: 'ERROR', statusCode: listErr.response?.status, error: listErr.response?.data || listErr.message });
+    debug.steps.push({ step: 'list_users_sample', status: 'ERROR', statusCode: listErr.response?.status, error: listErr.response?.data || listErr.message });
+  }
+
+  if (debug.correctAppId) {
+    debug.FIX = `UPDATE ZENDESK_SUNCO_APP_ID from "${ZENDESK_SUNCO_APP_ID}" to "${debug.correctAppId}" in Render environment variables`;
   }
 
   res.json(debug);
