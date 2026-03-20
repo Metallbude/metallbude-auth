@@ -613,6 +613,20 @@ const ordersCache = new Map();
 const ORDERS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const ORDERS_CACHE_MAX_SIZE = 1000; // Max 1000 cached entries
 
+// Wishlist sync cache: Prevents redundant Firebase lookups for public endpoint
+// customerId -> { items: [...], syncedAt: timestamp }
+const wishlistSyncCache = new Map();
+const WISHLIST_SYNC_CACHE_TTL_MS = 30 * 1000; // 30 seconds
+const WISHLIST_SYNC_CACHE_MAX_SIZE = 500;
+
+// Public wishlist response cache: customerId -> { response: {...}, cachedAt: timestamp }
+const publicWishlistResponseCache = new Map();
+const PUBLIC_WISHLIST_CACHE_TTL_MS = 30 * 1000; // 30 seconds
+
+// Remember which Firebase document format works per customer to avoid double lookups
+// customerId -> 'simple' | 'full'
+const customerIdFormatCache = new Map();
+
 // Load sessions on startup
 async function loadPersistedSessionsWithLogging() {
   try {
@@ -765,6 +779,36 @@ setInterval(() => {
   
   if (cleaned > 0) {
     console.log(`🧹 Orders cache cleanup: removed ${cleaned} entries, ${ordersCache.size} remaining`);
+  }
+
+  // Wishlist sync cache cleanup
+  let wishlistCleaned = 0;
+  for (const [cid, cached] of wishlistSyncCache.entries()) {
+    if (cached.syncedAt < now - WISHLIST_SYNC_CACHE_TTL_MS) {
+      wishlistSyncCache.delete(cid);
+      wishlistCleaned++;
+    }
+  }
+  if (wishlistSyncCache.size > WISHLIST_SYNC_CACHE_MAX_SIZE) {
+    const entries = Array.from(wishlistSyncCache.entries())
+      .sort((a, b) => a[1].syncedAt - b[1].syncedAt);
+    const toRemove = wishlistSyncCache.size - WISHLIST_SYNC_CACHE_MAX_SIZE;
+    for (let i = 0; i < toRemove; i++) {
+      wishlistSyncCache.delete(entries[i][0]);
+      wishlistCleaned++;
+    }
+  }
+
+  // Public wishlist response cache cleanup
+  for (const [cid, cached] of publicWishlistResponseCache.entries()) {
+    if (cached.cachedAt < now - PUBLIC_WISHLIST_CACHE_TTL_MS) {
+      publicWishlistResponseCache.delete(cid);
+      wishlistCleaned++;
+    }
+  }
+
+  if (wishlistCleaned > 0) {
+    console.log(`🧹 Wishlist cache cleanup: removed ${wishlistCleaned} entries, sync=${wishlistSyncCache.size} response=${publicWishlistResponseCache.size}`);
   }
 }, 60 * 1000); // Every minute
 
@@ -8591,6 +8635,14 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
     }
 
     console.log(`✅ Wishlist updated successfully - ${action}ed product ${productId}`);
+    
+    // Invalidate public wishlist caches (extract numeric ID for cache key)
+    const numericId = req.session.customerId?.replace?.('gid://shopify/Customer/', '') || req.session.customerId;
+    if (numericId) {
+        publicWishlistResponseCache.delete(numericId);
+        wishlistSyncCache.delete(numericId);
+    }
+    
     res.json(result);
 
   } catch (error) {
@@ -14534,36 +14586,46 @@ async function syncFirebaseToPublicStorage(customerId) {
         return false;
     }
 
+    // Check sync cache first - avoid redundant Firebase reads
+    const cached = wishlistSyncCache.get(customerId);
+    if (cached && (Date.now() - cached.syncedAt) < WISHLIST_SYNC_CACHE_TTL_MS) {
+        return true; // Already synced recently
+    }
+
     try {
         
         // Try both customer ID formats to find the Firebase document
         let firebaseItems = [];
         let foundFormat = null;
+        const knownFormat = customerIdFormatCache.get(customerId);
         
-        // Try simple format first (this is what gets stored when adding from Flutter)
-        try {
-            // Note: For sync operations, we use a customer-specific placeholder email
-            // since sync functions don't have access to session data with real customer emails
-            firebaseItems = await wishlistService.getWishlist(customerId, `sync-${customerId}@metallbude.internal`);
-            if (firebaseItems.length > 0) {
-                foundFormat = 'simple';
-            }
-        } catch (error) {
-            // Simple format not found, will try full format
-        }
+        // Try the known format first, or GID format (most common) first
+        const tryOrder = knownFormat === 'simple' 
+            ? ['simple', 'full'] 
+            : ['full', 'simple'];
         
-        // If no items found, try full Shopify GID format
-        if (firebaseItems.length === 0) {
+        for (const format of tryOrder) {
+            if (firebaseItems.length > 0) break;
+            
             try {
-                const fullCustomerId = `gid://shopify/Customer/${customerId}`;
-                firebaseItems = await wishlistService.getWishlist(fullCustomerId, `sync-${customerId}@metallbude.internal`);
+                const lookupId = format === 'full' 
+                    ? `gid://shopify/Customer/${customerId}` 
+                    : customerId;
+                firebaseItems = await wishlistService.getWishlist(lookupId, `sync-${customerId}@metallbude.internal`);
                 if (firebaseItems.length > 0) {
-                    foundFormat = 'full';
+                    foundFormat = format;
+                    customerIdFormatCache.set(customerId, format);
                 }
             } catch (error) {
-                // Full format not found
+                // Format not found, try next
             }
+            
+            // If we already know the format and it didn't work, skip the other
+            if (knownFormat && format === knownFormat) break;
         }
+        
+        // Update sync cache regardless of result
+        wishlistSyncCache.set(customerId, { syncedAt: Date.now() });
         
         if (firebaseItems.length === 0) {
             return true; // Not an error, just empty wishlist
@@ -14942,6 +15004,12 @@ app.get('/api/public/wishlist/items', async (req, res) => {
             });
         }
 
+        // Check response cache first - serve identical responses within TTL
+        const cachedResponse = publicWishlistResponseCache.get(customerId);
+        if (cachedResponse && (Date.now() - cachedResponse.cachedAt) < PUBLIC_WISHLIST_CACHE_TTL_MS) {
+            return res.json(cachedResponse.response);
+        }
+
         let customerWishlist = [];
 
         // Always try to sync from Firebase first to ensure we have the latest data
@@ -15163,11 +15231,19 @@ app.get('/api/public/wishlist/items', async (req, res) => {
             }
         }
 
-        res.json({
+        const responseBody = {
             success: true,
             items: customerWishlist,
             count: customerWishlist.length
+        };
+
+        // Cache the response
+        publicWishlistResponseCache.set(customerId, { 
+            response: responseBody, 
+            cachedAt: Date.now() 
         });
+
+        res.json(responseBody);
     } catch (error) {
         console.error('[SHOPIFY] Error getting wishlist:', error);
         res.status(500).json({ 
@@ -15287,6 +15363,10 @@ app.post('/api/public/wishlist/add', async (req, res) => {
         }
 
         console.log(`[SHOPIFY] Adding item to wishlist for customer: ${customerId}`);
+
+        // Invalidate caches for this customer
+        publicWishlistResponseCache.delete(customerId);
+        wishlistSyncCache.delete(customerId);
 
         // First sync from Firebase to ensure we have the latest data
         await syncFirebaseToPublicStorage(customerId);
@@ -15522,6 +15602,10 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             const finalCount = wishlistData[customerId].length;
             
             console.log(`[SHOPIFY] Removed item, new count: ${finalCount}`);
+
+            // Invalidate caches for this customer
+            publicWishlistResponseCache.delete(customerId);
+            wishlistSyncCache.delete(customerId);
             
             // Save the updated data
             await saveWishlistData(wishlistData);
