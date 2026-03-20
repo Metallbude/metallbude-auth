@@ -17678,8 +17678,50 @@ const getSuncoAuthHeader = () => {
   return `Basic ${Buffer.from(`${ZENDESK_SUNCO_KEY_ID}:${ZENDESK_SUNCO_KEY_SECRET}`).toString('base64')}`;
 };
 
+// Helper: Find Sunco user ID by external_id or email fallback
+async function findSuncoUserId(externalId, email) {
+  // Try 1: Lookup by externalId
+  try {
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(externalId)}`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    if (data.user?.id) {
+      console.log(`🔍 Sunco user found by externalId: ${data.user.id}`);
+      return data.user.id;
+    }
+  } catch (err) {
+    if (err.response?.status === 404) {
+      console.log(`ℹ️ Sunco user not found by externalId:${externalId} - trying email fallback`);
+    } else {
+      console.error(`⚠️ Sunco externalId lookup error:`, err.response?.data || err.message);
+    }
+  }
+
+  // Try 2: Lookup by email (Sunshine user search)
+  if (email) {
+    try {
+      const { data } = await axios.get(
+        `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users?filter[identities.email]=${encodeURIComponent(email)}&page[size]=5`,
+        { headers: { 'Authorization': getSuncoAuthHeader() } }
+      );
+      const users = data.users || [];
+      if (users.length > 0) {
+        console.log(`🔍 Sunco user found by email (${email}): ${users[0].id}`);
+        return users[0].id;
+      } else {
+        console.log(`⚠️ No Sunco user found by email: ${email}`);
+      }
+    } catch (err) {
+      console.error(`⚠️ Sunco email lookup error:`, err.response?.data || err.message);
+    }
+  }
+
+  return null;
+}
+
 // Find the Sunshine Conversation ID for a ticket's requester
-// Uses: Ticket → Requester → external_id → Sunco User → Conversations
+// Uses: Ticket → Requester → external_id/email → Sunco User → Conversations
 async function findMessagingConversationId(ticketId) {
   try {
     // Step 1: Get the ticket to find the requester
@@ -17694,29 +17736,25 @@ async function findMessagingConversationId(ticketId) {
     }
     console.log(`🔍 Ticket ${ticketId} requester_id: ${requesterId}`);
 
-    // Step 2: Get the requester's external_id (Shopify Customer ID set via JWT auth)
+    // Step 2: Get the requester's external_id AND email
     const { data: userData } = await axios.get(
       `${ZENDESK_BASE_URL}/api/v2/users/${requesterId}.json`,
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
     const externalId = userData.user?.external_id;
-    if (!externalId) {
-      console.log(`⚠️ No external_id for requester ${requesterId} (${userData.user?.email}) - user may not have authenticated via JWT`);
+    const userEmail = userData.user?.email;
+    if (!externalId && !userEmail) {
+      console.log(`⚠️ No external_id or email for requester ${requesterId} - cannot find Sunco user`);
       return null;
     }
-    console.log(`🔍 Requester external_id: ${externalId}`);
+    console.log(`🔍 Requester external_id: ${externalId}, email: ${userEmail}`);
 
-    // Step 3: Find the Sunco user by their external_id
-    const { data: suncoUserData } = await axios.get(
-      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(externalId)}`,
-      { headers: { 'Authorization': getSuncoAuthHeader() } }
-    );
-    const suncoUserId = suncoUserData.user?.id;
+    // Step 3: Find the Sunco user (tries externalId first, then email fallback)
+    const suncoUserId = await findSuncoUserId(externalId, userEmail);
     if (!suncoUserId) {
-      console.log(`⚠️ No Sunco user found for externalId: ${externalId}`);
+      console.log(`⚠️ No Sunco user found for externalId: ${externalId} / email: ${userEmail}`);
       return null;
     }
-    console.log(`🔍 Sunco user ID: ${suncoUserId}`);
 
     // Step 4: List conversations for this user (most recent first)
     const { data: convoData } = await axios.get(
@@ -18190,7 +18228,9 @@ app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
     try {
       const settingsUrlJson = JSON.parse(Buffer.from(key, 'base64').toString('utf-8'));
       const settingsUrl = settingsUrlJson.settings_url;
-      const { data: sdkSettings } = await axios.get(settingsUrl);
+      const { data: sdkSettings } = await axios.get(settingsUrl, { 
+        headers: { 'Zendesk-Api-Version': '2024-01-01' }
+      });
       // Look for app ID in various places in the response
       const foundAppId = sdkSettings?.app_id || sdkSettings?.appId || sdkSettings?.messaging?.app_id 
         || sdkSettings?.configs?.messaging?.app_id || sdkSettings?.authentication?.sunco_app_id;
@@ -18326,7 +18366,7 @@ app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
-  const { shopifyCustomerId } = req.body;
+  const { shopifyCustomerId, email } = req.body;
 
   if (!shopifyCustomerId) {
     return res.status(400).json({ error: 'Missing shopifyCustomerId' });
@@ -18337,23 +18377,11 @@ app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
   }
 
   try {
-    // Step 1: Find Sunco user by external_id (= Shopify Customer ID)
-    let suncoUserId;
-    try {
-      const { data: suncoUserData } = await axios.get(
-        `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(shopifyCustomerId)}`,
-        { headers: { 'Authorization': getSuncoAuthHeader() } }
-      );
-      suncoUserId = suncoUserData.user?.id;
-    } catch (lookupErr) {
-      if (lookupErr.response?.status === 404) {
-        console.log(`ℹ️ No Sunco user for externalId ${shopifyCustomerId} - nothing to clear`);
-        return res.json({ cleared: true, count: 0 });
-      }
-      throw lookupErr;
-    }
+    // Step 1: Find Sunco user by external_id with email fallback
+    const suncoUserId = await findSuncoUserId(shopifyCustomerId, email);
 
     if (!suncoUserId) {
+      console.log(`ℹ️ No Sunco user for ${shopifyCustomerId}/${email} - nothing to clear`);
       return res.json({ cleared: true, count: 0 });
     }
 
