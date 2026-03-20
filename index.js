@@ -17566,6 +17566,7 @@ const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN || 'metallbude';
 const ZENDESK_API_EMAIL = process.env.ZENDESK_API_EMAIL;
 const ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN;
 const ZENDESK_MESSAGING_SIGNING_KEY = process.env.ZENDESK_MESSAGING_SIGNING_KEY;
+const ZENDESK_MESSAGING_KEY_ID = process.env.ZENDESK_MESSAGING_KEY_ID;
 const ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID = process.env.ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID;
 const ZENDESK_FIELD_ORDER_COUNT = process.env.ZENDESK_FIELD_ORDER_COUNT;
 const ZENDESK_FIELD_TOTAL_SPENT = process.env.ZENDESK_FIELD_TOTAL_SPENT;
@@ -17653,7 +17654,7 @@ app.post('/zendesk/messaging/context', async (req, res) => {
         platform: platform || null,
         isLoggedIn: Boolean(isLoggedIn)
       },
-      messagingAuthConfigured: Boolean(ZENDESK_MESSAGING_SIGNING_KEY),
+      messagingAuthConfigured: Boolean(ZENDESK_MESSAGING_SIGNING_KEY && ZENDESK_MESSAGING_KEY_ID),
       fieldMappings: {
         shopifyCustomerId: ZENDESK_FIELD_SHOPIFY_CUSTOMER_ID || null,
         orderCount: ZENDESK_FIELD_ORDER_COUNT || null,
@@ -17665,9 +17666,10 @@ app.post('/zendesk/messaging/context', async (req, res) => {
     };
 
     let jwtToken = null;
-    if (ZENDESK_MESSAGING_SIGNING_KEY && shopifyCustomerId && email) {
+    if (ZENDESK_MESSAGING_SIGNING_KEY && ZENDESK_MESSAGING_KEY_ID && shopifyCustomerId && email) {
       jwtToken = jwt.sign(
         {
+          scope: 'user',
           external_id: String(shopifyCustomerId),
           name: name || email,
           email: String(email),
@@ -17677,6 +17679,7 @@ app.post('/zendesk/messaging/context', async (req, res) => {
         {
           algorithm: 'HS256',
           expiresIn: '5m',
+          keyid: ZENDESK_MESSAGING_KEY_ID,
         }
       );
       diagnostics.jwtIssued = true;
@@ -17684,6 +17687,8 @@ app.post('/zendesk/messaging/context', async (req, res) => {
       diagnostics.jwtIssued = false;
       diagnostics.jwtMissingReason = !ZENDESK_MESSAGING_SIGNING_KEY
         ? 'missing_signing_key'
+        : !ZENDESK_MESSAGING_KEY_ID
+          ? 'missing_key_id'
         : !shopifyCustomerId
           ? 'missing_shopify_customer_id'
           : !email
