@@ -17678,36 +17678,64 @@ const getSuncoAuthHeader = () => {
   return `Basic ${Buffer.from(`${ZENDESK_SUNCO_KEY_ID}:${ZENDESK_SUNCO_KEY_SECRET}`).toString('base64')}`;
 };
 
-// Find the Sunshine Conversation ID linked to a ticket
+// Find the Sunshine Conversation ID for a ticket's requester
+// Uses: Ticket → Requester → external_id → Sunco User → Conversations
 async function findMessagingConversationId(ticketId) {
   try {
-    const { data } = await axios.get(
-      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}/audits.json?per_page=5`,
+    // Step 1: Get the ticket to find the requester
+    const { data: ticketData } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
+    const requesterId = ticketData.ticket?.requester_id;
+    if (!requesterId) {
+      console.log(`⚠️ No requester_id on ticket ${ticketId}`);
+      return null;
+    }
+    console.log(`🔍 Ticket ${ticketId} requester_id: ${requesterId}`);
 
-    for (const audit of data.audits || []) {
-      // Check audit-level via for messaging channel
-      if (audit.via?.channel === 'native_messaging') {
-        console.log(`🔍 Ticket ${ticketId} audit via:`, JSON.stringify(audit.via));
-        if (audit.via?.source?.from?.id) return audit.via.source.from.id;
-      }
-      // Check individual events
-      for (const event of audit.events || []) {
-        if (event.via?.channel === 'native_messaging' && event.via?.source?.from?.id) {
-          return event.via.source.from.id;
-        }
-      }
+    // Step 2: Get the requester's external_id (Shopify Customer ID set via JWT auth)
+    const { data: userData } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/users/${requesterId}.json`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    const externalId = userData.user?.external_id;
+    if (!externalId) {
+      console.log(`⚠️ No external_id for requester ${requesterId} (${userData.user?.email}) - user may not have authenticated via JWT`);
+      return null;
+    }
+    console.log(`🔍 Requester external_id: ${externalId}`);
+
+    // Step 3: Find the Sunco user by their external_id
+    const { data: suncoUserData } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(externalId)}`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    const suncoUserId = suncoUserData.user?.id;
+    if (!suncoUserId) {
+      console.log(`⚠️ No Sunco user found for externalId: ${externalId}`);
+      return null;
+    }
+    console.log(`🔍 Sunco user ID: ${suncoUserId}`);
+
+    // Step 4: List conversations for this user (most recent first)
+    const { data: convoData } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=5`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    const conversations = convoData.conversations || [];
+    if (conversations.length === 0) {
+      console.log(`⚠️ No conversations found for Sunco user ${suncoUserId}`);
+      return null;
     }
 
-    console.log(`⚠️ No messaging conversation ID found in audits for ticket ${ticketId}`);
-    // Log first audit's via for debugging
-    if (data.audits?.[0]?.via) {
-      console.log(`🔍 First audit via:`, JSON.stringify(data.audits[0].via));
-    }
-    return null;
+    // Return the most recent conversation
+    const conversationId = conversations[0].id;
+    console.log(`✅ Found messaging conversation: ${conversationId} (${conversations.length} total conversations for user)`);
+    return conversationId;
+
   } catch (err) {
-    console.error(`❌ Failed to fetch audits for ticket ${ticketId}:`, err.response?.data || err.message);
+    console.error(`❌ Failed to find messaging conversation for ticket ${ticketId}:`, err.response?.data || err.message);
     return null;
   }
 }
@@ -18131,6 +18159,81 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
       success: false,
       error: 'Failed to get ticket'
     });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Clear Conversations (Sunshine Conversations API)
+// Deletes all server-side messaging conversations for a user
+// Called from the app's "Reset Chat" / "Delete Chat" feature
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
+  const { shopifyCustomerId } = req.body;
+
+  if (!shopifyCustomerId) {
+    return res.status(400).json({ error: 'Missing shopifyCustomerId' });
+  }
+
+  if (!isSuncoConfigured()) {
+    return res.status(503).json({ error: 'Sunshine Conversations not configured' });
+  }
+
+  try {
+    // Step 1: Find Sunco user by external_id (= Shopify Customer ID)
+    let suncoUserId;
+    try {
+      const { data: suncoUserData } = await axios.get(
+        `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(shopifyCustomerId)}`,
+        { headers: { 'Authorization': getSuncoAuthHeader() } }
+      );
+      suncoUserId = suncoUserData.user?.id;
+    } catch (lookupErr) {
+      if (lookupErr.response?.status === 404) {
+        console.log(`ℹ️ No Sunco user for externalId ${shopifyCustomerId} - nothing to clear`);
+        return res.json({ cleared: true, count: 0 });
+      }
+      throw lookupErr;
+    }
+
+    if (!suncoUserId) {
+      return res.json({ cleared: true, count: 0 });
+    }
+
+    console.log(`🔍 Found Sunco user ${suncoUserId} for Shopify customer ${shopifyCustomerId}`);
+
+    // Step 2: List all conversations for this user
+    const { data: convoData } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=100`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    const conversations = convoData.conversations || [];
+
+    if (conversations.length === 0) {
+      console.log(`ℹ️ No conversations to clear for Sunco user ${suncoUserId}`);
+      return res.json({ cleared: true, count: 0 });
+    }
+
+    // Step 3: Delete each conversation
+    let deletedCount = 0;
+    for (const convo of conversations) {
+      try {
+        await axios.delete(
+          `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convo.id}`,
+          { headers: { 'Authorization': getSuncoAuthHeader() } }
+        );
+        deletedCount++;
+      } catch (delErr) {
+        console.error(`⚠️ Failed to delete conversation ${convo.id}:`, delErr.response?.data || delErr.message);
+      }
+    }
+
+    console.log(`🗑️ Cleared ${deletedCount}/${conversations.length} conversations for Shopify customer ${shopifyCustomerId}`);
+    return res.json({ cleared: true, count: deletedCount });
+
+  } catch (err) {
+    console.error('❌ Failed to clear conversations:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to clear conversations' });
   }
 });
 
