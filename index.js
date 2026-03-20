@@ -18163,6 +18163,57 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Sunshine Conversations Diagnostic
+// Test endpoint to debug the Sunco user + conversation lookup
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
+  const { externalId } = req.params;
+  const debug = { externalId, steps: [] };
+
+  if (!isSuncoConfigured()) {
+    return res.json({ ...debug, error: 'Sunshine not configured', env: { 
+      SUNCO_APP_ID: ZENDESK_SUNCO_APP_ID ? `${ZENDESK_SUNCO_APP_ID.substring(0, 8)}...` : 'MISSING',
+      SUNCO_KEY_ID: ZENDESK_SUNCO_KEY_ID ? `${ZENDESK_SUNCO_KEY_ID.substring(0, 8)}...` : 'MISSING',
+      SUNCO_KEY_SECRET: ZENDESK_SUNCO_KEY_SECRET ? 'SET' : 'MISSING'
+    }});
+  }
+
+  // Step 1: Try to find Sunco user by externalId
+  const userUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(externalId)}`;
+  try {
+    const { data } = await axios.get(userUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
+    debug.steps.push({ step: 'find_sunco_user', url: userUrl, status: 'OK', user: data.user ? { id: data.user.id, externalId: data.user.externalId } : data });
+    
+    if (data.user?.id) {
+      // Step 2: List conversations
+      const convoUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${data.user.id}&page[size]=5`;
+      try {
+        const { data: convoData } = await axios.get(convoUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
+        const convos = (convoData.conversations || []).map(c => ({ id: c.id, type: c.type, createdAt: c.createdAt || c.metadata?.createdAt }));
+        debug.steps.push({ step: 'list_conversations', url: convoUrl, status: 'OK', count: convos.length, conversations: convos });
+      } catch (convoErr) {
+        debug.steps.push({ step: 'list_conversations', url: convoUrl, status: 'ERROR', error: convoErr.response?.data || convoErr.message });
+      }
+    }
+  } catch (userErr) {
+    debug.steps.push({ step: 'find_sunco_user', url: userUrl, status: userErr.response?.status === 404 ? 'NOT_FOUND' : 'ERROR', statusCode: userErr.response?.status, error: userErr.response?.data || userErr.message });
+  }
+
+  // Step 3: Also try listing ALL app users to see format issues
+  try {
+    const listUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users?page[size]=5`;
+    const { data } = await axios.get(listUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
+    const users = (data.users || []).map(u => ({ id: u.id, externalId: u.externalId, email: u.profile?.email }));
+    debug.steps.push({ step: 'list_all_users_sample', status: 'OK', count: data.users?.length || 0, sample: users });
+  } catch (listErr) {
+    debug.steps.push({ step: 'list_all_users_sample', status: 'ERROR', statusCode: listErr.response?.status, error: listErr.response?.data || listErr.message });
+  }
+
+  res.json(debug);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Clear Conversations (Sunshine Conversations API)
 // Deletes all server-side messaging conversations for a user
 // Called from the app's "Reset Chat" / "Delete Chat" feature
