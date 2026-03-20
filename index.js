@@ -17720,8 +17720,9 @@ async function findSuncoUserId(externalId, email) {
   return null;
 }
 
-// Find the Sunshine Conversation ID for a ticket's requester
+// Find the Sunshine Conversation ID and Sunco User ID for a ticket's requester
 // Uses: Ticket → Requester → external_id/email → Sunco User → Conversations
+// Returns { conversationId, suncoUserId } or { conversationId: null, suncoUserId: null }
 async function findMessagingConversationId(ticketId) {
   try {
     // Step 1: Get the ticket to find the requester
@@ -17732,7 +17733,7 @@ async function findMessagingConversationId(ticketId) {
     const requesterId = ticketData.ticket?.requester_id;
     if (!requesterId) {
       console.log(`⚠️ No requester_id on ticket ${ticketId}`);
-      return null;
+      return { conversationId: null, suncoUserId: null };
     }
     console.log(`🔍 Ticket ${ticketId} requester_id: ${requesterId}`);
 
@@ -17745,7 +17746,7 @@ async function findMessagingConversationId(ticketId) {
     const userEmail = userData.user?.email;
     if (!externalId && !userEmail) {
       console.log(`⚠️ No external_id or email for requester ${requesterId} - cannot find Sunco user`);
-      return null;
+      return { conversationId: null, suncoUserId: null };
     }
     console.log(`🔍 Requester external_id: ${externalId}, email: ${userEmail}`);
 
@@ -17753,7 +17754,7 @@ async function findMessagingConversationId(ticketId) {
     const suncoUserId = await findSuncoUserId(externalId, userEmail);
     if (!suncoUserId) {
       console.log(`⚠️ No Sunco user found for externalId: ${externalId} / email: ${userEmail}`);
-      return null;
+      return { conversationId: null, suncoUserId: null };
     }
 
     // Step 4: List conversations for this user (most recent first)
@@ -17764,17 +17765,17 @@ async function findMessagingConversationId(ticketId) {
     const conversations = convoData.conversations || [];
     if (conversations.length === 0) {
       console.log(`⚠️ No conversations found for Sunco user ${suncoUserId}`);
-      return null;
+      return { conversationId: null, suncoUserId };
     }
 
-    // Return the most recent conversation
+    // Return the most recent conversation and the user ID
     const conversationId = conversations[0].id;
     console.log(`✅ Found messaging conversation: ${conversationId} (${conversations.length} total conversations for user)`);
-    return conversationId;
+    return { conversationId, suncoUserId };
 
   } catch (err) {
     console.error(`❌ Failed to find messaging conversation for ticket ${ticketId}:`, err.response?.data || err.message);
-    return null;
+    return { conversationId: null, suncoUserId: null };
   }
 }
 
@@ -18442,7 +18443,7 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 
     // PRIMARY: Send via Sunshine Conversations API → pushes directly to Messaging SDK
     if (isSuncoConfigured()) {
-      const conversationId = await findMessagingConversationId(ticket_id);
+      const { conversationId, suncoUserId } = await findMessagingConversationId(ticket_id);
       if (conversationId) {
         try {
           await axios.post(
@@ -18461,24 +18462,19 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
           console.log(`📨 Solved message sent via Messaging SDK for ticket ${ticket_id} (conversation: ${conversationId})`);
           messageSent = true;
 
-          // Close the conversation so the next message from the user starts a new one
-          try {
-            await axios.post(
-              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/activity`,
-              {
-                type: 'conversation:closed',
-                author: { type: 'business' }
-              },
-              {
-                headers: {
-                  'Authorization': getSuncoAuthHeader(),
-                  'Content-Type': 'application/json'
-                }
-              }
-            );
-            console.log(`🔒 Conversation ${conversationId} closed for ticket ${ticket_id}`);
-          } catch (closeErr) {
-            console.error(`⚠️ Failed to close conversation ${conversationId}:`, closeErr.response?.data || closeErr.message);
+          // Delete the Sunco user — removes all conversations & messages
+          // The solved message was already pushed to the SDK via real-time delivery
+          // When the user next opens chat, SDK re-login creates a fresh user + conversation with active bot
+          if (suncoUserId) {
+            try {
+              await axios.delete(
+                `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}`,
+                { headers: { 'Authorization': getSuncoAuthHeader() } }
+              );
+              console.log(`🗑️ Deleted Sunco user ${suncoUserId} after ticket ${ticket_id} solved — next chat will be fresh`);
+            } catch (delErr) {
+              console.error(`⚠️ Failed to delete Sunco user ${suncoUserId}:`, delErr.response?.data || delErr.message);
+            }
           }
         } catch (suncoErr) {
           console.error(`❌ Sunshine API failed for ticket ${ticket_id}:`, suncoErr.response?.data || suncoErr.message);
