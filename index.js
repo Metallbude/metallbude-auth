@@ -18099,10 +18099,10 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
 
 const ZENDESK_WEBHOOK_SECRET = process.env.ZENDESK_WEBHOOK_SECRET;
 
-app.post('/zendesk/webhook/ticket-status', (req, res) => {
+app.post('/zendesk/webhook/ticket-status', async (req, res) => {
   // Verify webhook authenticity via shared secret header
   if (ZENDESK_WEBHOOK_SECRET) {
-    const providedSecret = req.headers['x-zendesk-webhook-secret'];
+    const providedSecret = req.headers['webhooksecret'];
     if (providedSecret !== ZENDESK_WEBHOOK_SECRET) {
       console.warn('⚠️ Zendesk webhook: invalid secret');
       return res.status(401).json({ error: 'Unauthorized' });
@@ -18113,10 +18113,42 @@ app.post('/zendesk/webhook/ticket-status', (req, res) => {
 
   console.log(`🎫 Zendesk webhook: ticket ${ticket_id} → ${ticket_status}`);
 
-  if (ticket_status === 'solved' || ticket_status === 'closed') {
+  if ((ticket_status === 'solved' || ticket_status === 'closed') && ticket_id && isZendeskConfigured()) {
     console.log(`✅ Ticket ${ticket_id} resolved for ${requester_email || external_id || 'unknown'}`);
-    // Future: send push notification via CleverPush/Firebase to notify the customer
-    // that their ticket was resolved and they can start a new conversation if needed.
+
+    // Send a public reply to the ticket so it appears in the customer's Messaging SDK
+    try {
+      const solvedMessage = [
+        'Dein Anliegen wurde gelöst! ✅',
+        '',
+        'Falls du noch Fragen hast, schreib uns einfach eine neue Nachricht.',
+        'Wir sind gerne für dich da! 💛'
+      ].join('\n');
+
+      await axios.put(
+        `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticket_id)}.json`,
+        {
+          ticket: {
+            comment: {
+              body: solvedMessage,
+              public: true,
+              author_id: null // uses the API user as author
+            },
+            // Keep status as solved (don't reopen)
+            status: ticket_status
+          }
+        },
+        {
+          headers: {
+            'Authorization': getZendeskAuthHeader(),
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`📨 Solved notification sent to ticket ${ticket_id} → Messaging conversation`);
+    } catch (err) {
+      console.error(`❌ Failed to send solved notification for ticket ${ticket_id}:`, err.response?.data || err.message);
+    }
   }
 
   res.json({ received: true });
