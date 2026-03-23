@@ -17818,11 +17818,39 @@ app.post('/zendesk/messaging/context', async (req, res) => {
       email,
       phone,
       shopifyCustomerId,
-      orderCount,
-      totalSpent,
+      orderCount: clientOrderCount,
+      totalSpent: clientTotalSpent,
       platform,
       isLoggedIn
     } = req.body || {};
+
+    // Fetch real order count and totalSpent from Shopify Admin API
+    let orderCount = Number(clientOrderCount || 0);
+    let totalSpent = clientTotalSpent;
+    if (shopifyCustomerId && config.adminToken) {
+      try {
+        const customerGid = shopifyCustomerId.startsWith('gid://')
+          ? shopifyCustomerId
+          : `gid://shopify/Customer/${shopifyCustomerId}`;
+        const adminQuery = `query { customer(id: "${customerGid}") { numberOfOrders amountSpent { amount currencyCode } } }`;
+        const adminRes = await axios.post(
+          config.adminApiUrl,
+          { query: adminQuery },
+          { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
+        );
+        const adminCustomer = adminRes.data?.data?.customer;
+        if (adminCustomer) {
+          orderCount = adminCustomer.numberOfOrders ?? orderCount;
+          const spent = adminCustomer.amountSpent;
+          if (spent && spent.amount) {
+            totalSpent = `${spent.amount} ${spent.currencyCode || 'EUR'}`;
+          }
+          console.log(`📊 Shopify Admin: ${orderCount} orders, ${totalSpent} spent`);
+        }
+      } catch (adminErr) {
+        console.warn('⚠️ Shopify Admin lookup failed, using client values:', adminErr.message);
+      }
+    }
 
     const tags = ['mobile_app'];
     if (platform) tags.push(String(platform).toLowerCase());
@@ -18565,6 +18593,36 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
   }
 
   res.json({ received: true });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Delete Ticket
+// Permanently deletes a ticket (changes status to 'deleted')
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.delete('/zendesk/tickets/:ticketId', async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+
+    if (!isZendeskConfigured()) {
+      return res.status(400).json({ success: false, error: 'Zendesk not configured' });
+    }
+
+    await axios.delete(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+
+    console.log(`🗑️ Ticket ${ticketId} deleted`);
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('❌ Zendesk delete ticket error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: 'Failed to delete ticket'
+    });
+  }
 });
 
 console.log(`🎫 Zendesk proxy configured: ${isZendeskConfigured() ? 'Full API access' : 'Anonymous requests only'}`);
