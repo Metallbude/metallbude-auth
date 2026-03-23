@@ -18175,7 +18175,7 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
 
   try {
     // Search for tickets by requester email, sorted by most recent first
-    const query = `type:ticket requester:${email} channel:messaging_sdk`;
+    const query = `type:ticket requester:${email}`;
     const { data } = await axios.get(
       `${ZENDESK_BASE_URL}/api/v2/search.json?query=${encodeURIComponent(query)}&sort_by=created_at&sort_order=desc&per_page=20`,
       { headers: { 'Authorization': getZendeskAuthHeader() } }
@@ -18539,27 +18539,6 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
           );
           console.log(`📨 Solved message sent via Messaging SDK for ticket ${ticket_id} (conversation: ${conversationId})`);
           messageSent = true;
-
-          // Close the conversation so the next message starts fresh
-          // (Don't delete user — keep conversation history for Help & Support screen)
-          try {
-            await axios.post(
-              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/activity`,
-              {
-                type: 'conversation:closed',
-                author: { type: 'business' }
-              },
-              {
-                headers: {
-                  'Authorization': getSuncoAuthHeader(),
-                  'Content-Type': 'application/json'
-                }
-              }
-            );
-            console.log(`🔒 Conversation ${conversationId} closed for ticket ${ticket_id}`);
-          } catch (closeErr) {
-            console.error(`⚠️ Failed to close conversation ${conversationId}:`, closeErr.response?.data || closeErr.message);
-          }
         } catch (suncoErr) {
           console.error(`❌ Sunshine API failed for ticket ${ticket_id}:`, suncoErr.response?.data || suncoErr.message);
         }
