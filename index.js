@@ -18241,9 +18241,8 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Prepare New Conversation
 // 1. Closes all solved tickets (prevents Zendesk from reopening them)
-// 2. Deletes Sunshine Conversations (clears the SDK's message history)
-//    NOTE: Only the conversations are deleted, NOT the user — this keeps
-//    the JWT auth, AI bot channel, and user identity intact.
+// 2. Deletes the Sunshine Conversations USER — the SDK will recreate a
+//    fresh user + conversation when the app immediately re-logins with JWT.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/zendesk/messaging/new-conversation', async (req, res) => {
@@ -18279,33 +18278,20 @@ app.post('/zendesk/messaging/new-conversation', async (req, res) => {
       }
     }
 
-    // Step 2: Delete Sunshine conversations (NOT the user)
+    // Step 2: Delete the entire Sunco user — forces a completely fresh start
+    // The app MUST immediately re-login with JWT after this call,
+    // which recreates the user + a blank default conversation
     if (isSuncoConfigured()) {
       const suncoUserId = await findSuncoUserId(shopifyCustomerId, email);
       if (suncoUserId) {
         try {
-          // List all conversations for this user
-          const { data: convData } = await axios.get(
-            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}/conversations`,
+          await axios.delete(
+            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}`,
             { headers: { 'Authorization': getSuncoAuthHeader() } }
           );
-          const conversations = convData.conversations || [];
-          let deletedCount = 0;
-          for (const conv of conversations) {
-            try {
-              await axios.delete(
-                `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conv.id}`,
-                { headers: { 'Authorization': getSuncoAuthHeader() } }
-              );
-              deletedCount++;
-              console.log(`🗑️ Deleted conversation ${conv.id} for user ${suncoUserId}`);
-            } catch (e) {
-              console.error(`❌ Failed to delete conversation ${conv.id}:`, e.response?.data || e.message);
-            }
-          }
-          console.log(`🆕 New conversation prep: deleted ${deletedCount}/${conversations.length} conversations for ${email}`);
+          console.log(`🗑️ Deleted Sunco user ${suncoUserId} for ${email} — app will recreate on re-login`);
         } catch (e) {
-          console.error('❌ Failed to list/delete conversations:', e.response?.data || e.message);
+          console.error('❌ Failed to delete Sunco user:', e.response?.data || e.message);
         }
       } else {
         console.log(`ℹ️ No Sunco user found for ${shopifyCustomerId}/${email} — nothing to clear`);
