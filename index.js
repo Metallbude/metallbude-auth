@@ -18431,6 +18431,70 @@ app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Send message to a user's messaging conversation
+// POST /zendesk/messaging/send
+// Sends a business message via Sunshine Conversations API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.post('/zendesk/messaging/send', async (req, res) => {
+  const { ticketId, shopifyCustomerId, email, message } = req.body;
+
+  if (!message) {
+    return res.status(400).json({ error: 'Missing message' });
+  }
+  if (!isSuncoConfigured()) {
+    return res.status(503).json({ error: 'Sunshine Conversations not configured' });
+  }
+
+  try {
+    let conversationId = null;
+    let suncoUserId = null;
+
+    // If ticketId provided, find conversation via ticket
+    if (ticketId) {
+      const result = await findMessagingConversationId(ticketId);
+      conversationId = result.conversationId;
+      suncoUserId = result.suncoUserId;
+    }
+
+    // Fallback: find via shopifyCustomerId/email
+    if (!conversationId && (shopifyCustomerId || email)) {
+      suncoUserId = await findSuncoUserId(shopifyCustomerId, email);
+      if (suncoUserId) {
+        const { data: convoData } = await axios.get(
+          `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=5`,
+          { headers: { 'Authorization': getSuncoAuthHeader() } }
+        );
+        const conversations = convoData.conversations || [];
+        if (conversations.length > 0) {
+          conversationId = conversations[0].id;
+        }
+      }
+    }
+
+    if (!conversationId) {
+      return res.status(404).json({ error: 'No conversation found' });
+    }
+
+    await axios.post(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/messages`,
+      {
+        author: { type: 'business' },
+        content: { type: 'text', text: message }
+      },
+      { headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' } }
+    );
+
+    console.log(`📨 Message sent to conversation ${conversationId}: "${message.substring(0, 50)}..."`);
+    res.json({ success: true, conversationId, suncoUserId });
+
+  } catch (err) {
+    console.error('❌ Failed to send message:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Clear Conversations (Sunshine Conversations API)
 // Deletes all server-side messaging conversations for a user
 // Called from the app's "Reset Chat" / "Delete Chat" feature
