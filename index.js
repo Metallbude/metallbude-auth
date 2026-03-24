@@ -18209,14 +18209,27 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
 
-    const tickets = (data.results || []).map(ticket => ({
-      id: ticket.id,
-      subject: ticket.subject,
-      status: ticket.status,
-      createdAt: ticket.created_at,
-      updatedAt: ticket.updated_at,
-      description: ticket.description ? ticket.description.substring(0, 150) : '',
-    }));
+    const tickets = (data.results || [])
+      .filter(ticket => {
+        // Skip AI agent ghost tickets: they have a bot assignee (via_id present but no group)
+        // and typically have subject "Conversation with..." with no real interaction
+        const isAiAgentTicket = ticket.via?.channel === 'api' 
+          && ticket.assignee_id 
+          && !ticket.group_id
+          && (ticket.subject || '').startsWith('Conversation with');
+        if (isAiAgentTicket) {
+          console.log(`🤖 Skipping AI agent ticket #${ticket.id} (${ticket.status})`);
+        }
+        return !isAiAgentTicket;
+      })
+      .map(ticket => ({
+        id: ticket.id,
+        subject: ticket.subject,
+        status: ticket.status,
+        createdAt: ticket.created_at,
+        updatedAt: ticket.updated_at,
+        description: ticket.description ? ticket.description.substring(0, 150) : '',
+      }));
 
     console.log(`📋 Found ${tickets.length} tickets for ${email}`);
     return res.json({ tickets });
@@ -18428,70 +18441,6 @@ app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
   }
 
   res.json(debug);
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ZENDESK - Send message to a user's messaging conversation
-// POST /zendesk/messaging/send
-// Sends a business message via Sunshine Conversations API
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.post('/zendesk/messaging/send', async (req, res) => {
-  const { ticketId, shopifyCustomerId, email, message } = req.body;
-
-  if (!message) {
-    return res.status(400).json({ error: 'Missing message' });
-  }
-  if (!isSuncoConfigured()) {
-    return res.status(503).json({ error: 'Sunshine Conversations not configured' });
-  }
-
-  try {
-    let conversationId = null;
-    let suncoUserId = null;
-
-    // If ticketId provided, find conversation via ticket
-    if (ticketId) {
-      const result = await findMessagingConversationId(ticketId);
-      conversationId = result.conversationId;
-      suncoUserId = result.suncoUserId;
-    }
-
-    // Fallback: find via shopifyCustomerId/email
-    if (!conversationId && (shopifyCustomerId || email)) {
-      suncoUserId = await findSuncoUserId(shopifyCustomerId, email);
-      if (suncoUserId) {
-        const { data: convoData } = await axios.get(
-          `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=5`,
-          { headers: { 'Authorization': getSuncoAuthHeader() } }
-        );
-        const conversations = convoData.conversations || [];
-        if (conversations.length > 0) {
-          conversationId = conversations[0].id;
-        }
-      }
-    }
-
-    if (!conversationId) {
-      return res.status(404).json({ error: 'No conversation found' });
-    }
-
-    await axios.post(
-      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/messages`,
-      {
-        author: { type: 'business' },
-        content: { type: 'text', text: message }
-      },
-      { headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' } }
-    );
-
-    console.log(`📨 Message sent to conversation ${conversationId}: "${message.substring(0, 50)}..."`);
-    res.json({ success: true, conversationId, suncoUserId });
-
-  } catch (err) {
-    console.error('❌ Failed to send message:', err.response?.data || err.message);
-    res.status(500).json({ error: 'Failed to send message' });
-  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
