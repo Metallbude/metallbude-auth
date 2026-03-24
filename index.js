@@ -18209,11 +18209,6 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
 
-    // Debug: log raw ticket data to diagnose filter misses
-    (data.results || []).forEach(t => {
-      console.log(`🔍 RAW ticket #${t.id}: subject="${t.subject}", via=${t.via?.channel}, assignee=${t.assignee_id}, group=${t.group_id}, status=${t.status}, tags=${JSON.stringify(t.tags)}`);
-    });
-
     const tickets = (data.results || [])
       .filter(ticket => {
         // Skip AI agent ghost tickets — auto-created by messaging SDK
@@ -18244,53 +18239,84 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ZENDESK - Close Solved Tickets (enables "New Chat" to create a fresh ticket)
-// When a ticket is "solved", Zendesk reopens it on the next message.
-// Closing it forces Zendesk to create a brand new ticket instead.
+// ZENDESK - Prepare New Conversation
+// 1. Closes all solved tickets (prevents Zendesk from reopening them)
+// 2. Deletes Sunshine Conversations (clears the SDK's message history)
+//    NOTE: Only the conversations are deleted, NOT the user — this keeps
+//    the JWT auth, AI bot channel, and user identity intact.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-app.post('/zendesk/tickets/close-solved', async (req, res) => {
-  const { email } = req.body;
+app.post('/zendesk/messaging/new-conversation', async (req, res) => {
+  const { shopifyCustomerId, email } = req.body;
 
-  if (!email) {
-    return res.status(400).json({ error: 'Missing email' });
-  }
-
-  if (!isZendeskConfigured()) {
-    return res.status(503).json({ error: 'Zendesk not configured' });
+  if (!shopifyCustomerId || !email) {
+    return res.status(400).json({ error: 'Missing shopifyCustomerId or email' });
   }
 
   try {
-    // Find all solved tickets for this user
-    const query = `type:ticket requester:${email} status:solved`;
-    const { data } = await axios.get(
-      `${ZENDESK_BASE_URL}/api/v2/search.json?query=${encodeURIComponent(query)}`,
-      { headers: { 'Authorization': getZendeskAuthHeader() } }
-    );
-
-    const solvedTickets = data.results || [];
-    let closedCount = 0;
-
-    for (const ticket of solvedTickets) {
+    // Step 1: Close all solved tickets so Zendesk creates new ones
+    if (isZendeskConfigured()) {
       try {
-        await axios.put(
-          `${ZENDESK_BASE_URL}/api/v2/tickets/${ticket.id}.json`,
-          { ticket: { status: 'closed' } },
+        const query = `type:ticket requester:${email} status:solved`;
+        const { data } = await axios.get(
+          `${ZENDESK_BASE_URL}/api/v2/search.json?query=${encodeURIComponent(query)}`,
           { headers: { 'Authorization': getZendeskAuthHeader() } }
         );
-        console.log(`🔒 Closed solved ticket #${ticket.id} for ${email}`);
-        closedCount++;
-      } catch (ticketErr) {
-        console.error(`❌ Failed to close ticket #${ticket.id}:`, ticketErr.response?.data || ticketErr.message);
+        for (const ticket of (data.results || [])) {
+          try {
+            await axios.put(
+              `${ZENDESK_BASE_URL}/api/v2/tickets/${ticket.id}.json`,
+              { ticket: { status: 'closed' } },
+              { headers: { 'Authorization': getZendeskAuthHeader() } }
+            );
+            console.log(`🔒 Closed solved ticket #${ticket.id}`);
+          } catch (e) {
+            console.error(`❌ Failed to close ticket #${ticket.id}:`, e.response?.data || e.message);
+          }
+        }
+      } catch (e) {
+        console.error('❌ Failed to search for solved tickets:', e.response?.data || e.message);
       }
     }
 
-    console.log(`🔒 Closed ${closedCount}/${solvedTickets.length} solved tickets for ${email}`);
-    return res.json({ success: true, closedCount });
+    // Step 2: Delete Sunshine conversations (NOT the user)
+    if (isSuncoConfigured()) {
+      const suncoUserId = await findSuncoUserId(shopifyCustomerId, email);
+      if (suncoUserId) {
+        try {
+          // List all conversations for this user
+          const { data: convData } = await axios.get(
+            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}/conversations`,
+            { headers: { 'Authorization': getSuncoAuthHeader() } }
+          );
+          const conversations = convData.conversations || [];
+          let deletedCount = 0;
+          for (const conv of conversations) {
+            try {
+              await axios.delete(
+                `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conv.id}`,
+                { headers: { 'Authorization': getSuncoAuthHeader() } }
+              );
+              deletedCount++;
+              console.log(`🗑️ Deleted conversation ${conv.id} for user ${suncoUserId}`);
+            } catch (e) {
+              console.error(`❌ Failed to delete conversation ${conv.id}:`, e.response?.data || e.message);
+            }
+          }
+          console.log(`🆕 New conversation prep: deleted ${deletedCount}/${conversations.length} conversations for ${email}`);
+        } catch (e) {
+          console.error('❌ Failed to list/delete conversations:', e.response?.data || e.message);
+        }
+      } else {
+        console.log(`ℹ️ No Sunco user found for ${shopifyCustomerId}/${email} — nothing to clear`);
+      }
+    }
+
+    return res.json({ success: true });
 
   } catch (err) {
-    console.error('❌ Failed to close solved tickets:', err.response?.data || err.message);
-    return res.status(500).json({ error: 'Failed to close solved tickets' });
+    console.error('❌ Failed to prepare new conversation:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to prepare new conversation' });
   }
 });
 
