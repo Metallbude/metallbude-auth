@@ -18598,6 +18598,7 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Close/Solve Ticket
 // Updates ticket status (solve, close, etc.)
+// Unassigns the AI agent first if needed, then changes status
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.put('/zendesk/tickets/:ticketId/status', async (req, res) => {
@@ -18614,13 +18615,14 @@ app.put('/zendesk/tickets/:ticketId/status', async (req, res) => {
       return res.status(400).json({ success: false, error: `Invalid status. Allowed: ${allowedStatuses.join(', ')}` });
     }
 
+    // Unassign bot/agent and change status in one call
     await axios.put(
       `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
-      { ticket: { status } },
+      { ticket: { status, assignee_id: null, group_id: null } },
       { headers: { 'Authorization': getZendeskAuthHeader(), 'Content-Type': 'application/json' } }
     );
 
-    console.log(`✅ Ticket ${ticketId} status changed to: ${status}`);
+    console.log(`✅ Ticket ${ticketId} unassigned and status changed to: ${status}`);
     res.json({ success: true, ticketId, status });
 
   } catch (error) {
