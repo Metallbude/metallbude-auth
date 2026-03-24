@@ -18239,6 +18239,59 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Close (delete) a ticket
+// Sets the ticket status to "closed" so it disappears from the active list.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.post('/zendesk/tickets/:ticketId/close', async (req, res) => {
+  const { ticketId } = req.params;
+
+  if (!ticketId) {
+    return res.status(400).json({ error: 'Missing ticketId' });
+  }
+
+  if (!isZendeskConfigured()) {
+    return res.status(503).json({ error: 'Zendesk not configured' });
+  }
+
+  try {
+    // First try to set status to closed directly
+    // If the ticket is open/new/pending, Zendesk requires it to be solved first
+    const { data: ticketData } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    const currentStatus = ticketData.ticket?.status;
+
+    if (currentStatus === 'closed') {
+      return res.json({ success: true, message: 'Already closed' });
+    }
+
+    if (currentStatus !== 'solved') {
+      // Must solve before closing
+      await axios.put(
+        `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+        { ticket: { status: 'solved' } },
+        { headers: { 'Authorization': getZendeskAuthHeader() } }
+      );
+    }
+
+    await axios.put(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+      { ticket: { status: 'closed' } },
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+
+    console.log(`🗑️ Closed ticket #${ticketId}`);
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error(`❌ Failed to close ticket #${ticketId}:`, err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to close ticket' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Prepare New Conversation
 // 1. Closes all solved tickets (prevents Zendesk from reopening them)
 // 2. Deletes the Sunshine Conversations USER — the SDK will recreate a
