@@ -18209,17 +18209,21 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
 
+    // Debug: log raw ticket data to diagnose filter misses
+    (data.results || []).forEach(t => {
+      console.log(`🔍 RAW ticket #${t.id}: subject="${t.subject}", via=${t.via?.channel}, assignee=${t.assignee_id}, group=${t.group_id}, status=${t.status}, tags=${JSON.stringify(t.tags)}`);
+    });
+
     const tickets = (data.results || [])
       .filter(ticket => {
-        // Skip AI agent ghost tickets: bot-assigned with no group, generic subject
-        const isAiAgentTicket = ticket.via?.channel === 'api' 
-          && ticket.assignee_id 
-          && !ticket.group_id
-          && (ticket.subject || '').startsWith('Conversation with');
-        if (isAiAgentTicket) {
-          console.log(`🤖 Skipping AI agent ghost ticket #${ticket.id} (${ticket.status})`);
+        // Skip AI agent ghost tickets — auto-created by messaging SDK
+        // These have the default English "Conversation with ..." subject and are never solved by a human
+        const subject = (ticket.subject || '');
+        const isGhostTicket = /^Conversation with /i.test(subject);
+        if (isGhostTicket) {
+          console.log(`🤖 Skipping AI agent ghost ticket #${ticket.id} (${ticket.status}, subject="${subject}")`);
         }
-        return !isAiAgentTicket;
+        return !isGhostTicket;
       })
       .map(ticket => ({
       id: ticket.id,
