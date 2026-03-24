@@ -18284,50 +18284,6 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ZENDESK - Clear Conversations (Sunshine Conversations API)
-// Deletes all server-side messaging conversations for a user
-// Called from the app's "Reset Chat" / "Delete Chat" feature
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.post('/zendesk/messaging/clear-conversations', async (req, res) => {
-  const { shopifyCustomerId, email } = req.body;
-
-  if (!shopifyCustomerId) {
-    return res.status(400).json({ error: 'Missing shopifyCustomerId' });
-  }
-
-  if (!isSuncoConfigured()) {
-    return res.status(503).json({ error: 'Sunshine Conversations not configured' });
-  }
-
-  try {
-    // Step 1: Find Sunco user by external_id with email fallback
-    const suncoUserId = await findSuncoUserId(shopifyCustomerId, email);
-
-    if (!suncoUserId) {
-      console.log(`ℹ️ No Sunco user for ${shopifyCustomerId}/${email} - nothing to clear`);
-      return res.json({ cleared: true, deleted: false });
-    }
-
-    console.log(`🔍 Found Sunco user ${suncoUserId} for Shopify customer ${shopifyCustomerId}`);
-
-    // Step 2: Delete the entire Sunco user — this removes ALL their conversations & messages
-    // When the SDK re-initializes with the JWT, Sunshine auto-creates a fresh user + default conversation
-    // This ensures: no "deleted" tombstones, bot is active on new conversation, completely clean slate
-    await axios.delete(
-      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}`,
-      { headers: { 'Authorization': getSuncoAuthHeader() } }
-    );
-    console.log(`🗑️ Deleted Sunco user ${suncoUserId} (all conversations removed) for Shopify customer ${shopifyCustomerId}`);
-    return res.json({ cleared: true, deleted: true, suncoUserId });
-
-  } catch (err) {
-    console.error('❌ Failed to clear conversations:', err.response?.data || err.message);
-    return res.status(500).json({ error: 'Failed to clear conversations' });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Get Ticket Comments (conversation messages for a specific ticket)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -18446,36 +18402,6 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
   }
 
   res.json({ received: true });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ZENDESK - Delete Ticket
-// Permanently deletes a ticket (changes status to 'deleted')
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.delete('/zendesk/tickets/:ticketId', async (req, res) => {
-  try {
-    const { ticketId } = req.params;
-
-    if (!isZendeskConfigured()) {
-      return res.status(400).json({ success: false, error: 'Zendesk not configured' });
-    }
-
-    await axios.delete(
-      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
-      { headers: { 'Authorization': getZendeskAuthHeader() } }
-    );
-
-    console.log(`🗑️ Ticket ${ticketId} deleted`);
-    res.json({ success: true });
-
-  } catch (error) {
-    console.error('❌ Zendesk delete ticket error:', error.response?.data || error.message);
-    res.status(error.response?.status || 500).json({
-      success: false,
-      error: 'Failed to delete ticket'
-    });
-  }
 });
 
 console.log(`🎫 Zendesk proxy configured: ${isZendeskConfigured() ? 'Full API access' : 'Anonymous requests only'}`);
