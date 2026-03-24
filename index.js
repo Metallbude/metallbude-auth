@@ -18243,6 +18243,57 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Close Solved Tickets (enables "New Chat" to create a fresh ticket)
+// When a ticket is "solved", Zendesk reopens it on the next message.
+// Closing it forces Zendesk to create a brand new ticket instead.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.post('/zendesk/tickets/close-solved', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Missing email' });
+  }
+
+  if (!isZendeskConfigured()) {
+    return res.status(503).json({ error: 'Zendesk not configured' });
+  }
+
+  try {
+    // Find all solved tickets for this user
+    const query = `type:ticket requester:${email} status:solved`;
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/search.json?query=${encodeURIComponent(query)}`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+
+    const solvedTickets = data.results || [];
+    let closedCount = 0;
+
+    for (const ticket of solvedTickets) {
+      try {
+        await axios.put(
+          `${ZENDESK_BASE_URL}/api/v2/tickets/${ticket.id}.json`,
+          { ticket: { status: 'closed' } },
+          { headers: { 'Authorization': getZendeskAuthHeader() } }
+        );
+        console.log(`🔒 Closed solved ticket #${ticket.id} for ${email}`);
+        closedCount++;
+      } catch (ticketErr) {
+        console.error(`❌ Failed to close ticket #${ticket.id}:`, ticketErr.response?.data || ticketErr.message);
+      }
+    }
+
+    console.log(`🔒 Closed ${closedCount}/${solvedTickets.length} solved tickets for ${email}`);
+    return res.json({ success: true, closedCount });
+
+  } catch (err) {
+    console.error('❌ Failed to close solved tickets:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to close solved tickets' });
+  }
+});
+
 /**
  * Get ticket status
  * GET /zendesk/tickets/:ticketId
