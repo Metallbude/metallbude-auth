@@ -18209,27 +18209,14 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
 
-    const tickets = (data.results || [])
-      .filter(ticket => {
-        // Skip AI agent ghost tickets: they have a bot assignee (via_id present but no group)
-        // and typically have subject "Conversation with..." with no real interaction
-        const isAiAgentTicket = ticket.via?.channel === 'api' 
-          && ticket.assignee_id 
-          && !ticket.group_id
-          && (ticket.subject || '').startsWith('Conversation with');
-        if (isAiAgentTicket) {
-          console.log(`🤖 Skipping AI agent ticket #${ticket.id} (${ticket.status})`);
-        }
-        return !isAiAgentTicket;
-      })
-      .map(ticket => ({
-        id: ticket.id,
-        subject: ticket.subject,
-        status: ticket.status,
-        createdAt: ticket.created_at,
-        updatedAt: ticket.updated_at,
-        description: ticket.description ? ticket.description.substring(0, 150) : '',
-      }));
+    const tickets = (data.results || []).map(ticket => ({
+      id: ticket.id,
+      subject: ticket.subject,
+      status: ticket.status,
+      createdAt: ticket.created_at,
+      updatedAt: ticket.updated_at,
+      description: ticket.description ? ticket.description.substring(0, 150) : '',
+    }));
 
     console.log(`📋 Found ${tickets.length} tickets for ${email}`);
     return res.json({ tickets });
@@ -18282,6 +18269,165 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
       error: 'Failed to get ticket'
     });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Sunshine Conversations Diagnostic
+// Test endpoint to debug the Sunco user + conversation lookup
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/zendesk/sunshine/debug/:externalId', async (req, res) => {
+  const { externalId } = req.params;
+  const debug = { 
+    externalId, 
+    configuredAppId: ZENDESK_SUNCO_APP_ID || 'MISSING',
+    steps: [] 
+  };
+
+  if (!isSuncoConfigured()) {
+    return res.json({ ...debug, error: 'Sunshine not configured' });
+  }
+
+  // Step 1: Fetch Messaging SDK settings URLs to discover the real Sunshine app ID
+  // These are PUBLIC endpoints — no auth needed
+  const channelKeys = {
+    ios: 'eyJzZXR0aW5nc191cmwiOiJodHRwczovL21ldGFsbGJ1ZGUuemVuZGVzay5jb20vbW9iaWxlX3Nka19hcGkvc2V0dGluZ3MvMDFLTTNKRFk5SjNENjdRRlpYUEYxVjUxQUIuanNvbiJ9',
+    android: 'eyJzZXR0aW5nc191cmwiOiJodHRwczovL21ldGFsbGJ1ZGUuemVuZGVzay5jb20vbW9iaWxlX3Nka19hcGkvc2V0dGluZ3MvMDFLTTNKR0tXSDQ4QVhBRlpSRDJURFJRUjUuanNvbiJ9'
+  };
+  let sdkAppId = null;
+  for (const [platform, key] of Object.entries(channelKeys)) {
+    try {
+      const settingsUrlJson = JSON.parse(Buffer.from(key, 'base64').toString('utf-8'));
+      const settingsUrl = settingsUrlJson.settings_url;
+      const { data: sdkSettings } = await axios.get(settingsUrl, { 
+        headers: { 'Zendesk-Api-Version': '2024-01-01' }
+      });
+      // Look for app ID in various places in the response
+      const foundAppId = sdkSettings?.app_id || sdkSettings?.appId || sdkSettings?.messaging?.app_id 
+        || sdkSettings?.configs?.messaging?.app_id || sdkSettings?.authentication?.sunco_app_id;
+      if (foundAppId) sdkAppId = foundAppId;
+      debug.steps.push({ 
+        step: `fetch_sdk_settings_${platform}`, 
+        settingsUrl, 
+        status: 'OK', 
+        sdkAppId: foundAppId || 'not_found_in_response',
+        responseKeys: Object.keys(sdkSettings || {}),
+        // Include full settings for analysis (filtering out sensitive data)
+        settings: sdkSettings
+      });
+    } catch (err) {
+      debug.steps.push({ step: `fetch_sdk_settings_${platform}`, status: 'ERROR', error: err.response?.data || err.message });
+    }
+  }
+
+  // Step 2: Look up user's email via Zendesk Support API
+  let userEmail = null;
+  try {
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/users/search.json?external_id=${encodeURIComponent(externalId)}`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    if (data.users && data.users.length > 0) {
+      userEmail = data.users[0].email;
+      debug.steps.push({ step: 'lookup_zendesk_user', status: 'OK', user: { id: data.users[0].id, name: data.users[0].name, email: userEmail } });
+    } else {
+      debug.steps.push({ step: 'lookup_zendesk_user', status: 'NOT_FOUND' });
+    }
+  } catch (err) {
+    debug.steps.push({ step: 'lookup_zendesk_user', status: 'ERROR', error: err.response?.data || err.message });
+  }
+
+  // Step 3: Try user lookup by external_id in configured Sunshine app
+  try {
+    const url = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/externalId:${encodeURIComponent(externalId)}`;
+    const { data } = await axios.get(url, { headers: { 'Authorization': getSuncoAuthHeader() } });
+    debug.steps.push({ step: 'sunco_user_by_external_id', status: 'OK', user: data.user ? { id: data.user.id, externalId: data.user.externalId } : data });
+  } catch (err) {
+    debug.steps.push({ step: 'sunco_user_by_external_id', status: err.response?.status === 404 ? 'NOT_FOUND' : 'ERROR', statusCode: err.response?.status, error: err.response?.data || err.message });
+  }
+
+  // Step 4: Try finding user by email in configured Sunshine app (different lookup method)
+  if (userEmail) {
+    try {
+      const url = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users?filter[identities.email]=${encodeURIComponent(userEmail)}&page[size]=5`;
+      const { data } = await axios.get(url, { headers: { 'Authorization': getSuncoAuthHeader() } });
+      const users = (data.users || []).map(u => ({ id: u.id, externalId: u.externalId, email: u.profile?.email, identities: u.identities }));
+      debug.steps.push({ step: 'sunco_user_by_email', status: 'OK', email: userEmail, count: users.length, users });
+    } catch (err) {
+      debug.steps.push({ step: 'sunco_user_by_email', status: 'ERROR', statusCode: err.response?.status, error: err.response?.data || err.message });
+    }
+  }
+
+  // Step 5: If SDK settings revealed a different app ID, try that one
+  if (sdkAppId && sdkAppId !== ZENDESK_SUNCO_APP_ID) {
+    debug.appIdMismatch = { configured: ZENDESK_SUNCO_APP_ID, fromSdkSettings: sdkAppId };
+    // Try user lookup with current keys on the correct app (will likely get 403 since keys are app-scoped)
+    try {
+      const url = `${ZENDESK_BASE_URL}/sc/v2/apps/${sdkAppId}/users/externalId:${encodeURIComponent(externalId)}`;
+      const { data } = await axios.get(url, { headers: { 'Authorization': getSuncoAuthHeader() } });
+      debug.steps.push({ step: 'sunco_user_correct_app', appId: sdkAppId, status: 'OK', user: data.user ? { id: data.user.id, externalId: data.user.externalId } : data });
+      debug.correctAppId = sdkAppId;
+    } catch (err) {
+      debug.steps.push({ 
+        step: 'sunco_user_correct_app', appId: sdkAppId, 
+        status: err.response?.status === 403 ? 'FORBIDDEN_NEED_NEW_KEYS' : (err.response?.status === 404 ? 'NOT_FOUND' : 'ERROR'), 
+        statusCode: err.response?.status, 
+        error: err.response?.data || err.message 
+      });
+    }
+  }
+
+  // Step 6: Try listing all Sunshine apps using Support API admin credentials
+  try {
+    const { data } = await axios.get(`${ZENDESK_BASE_URL}/sc/v2/apps`, { headers: { 'Authorization': getZendeskAuthHeader() } });
+    const apps = (data.apps || []).map(a => ({ id: a.id, name: a.name || a.displayName }));
+    debug.steps.push({ step: 'list_apps_admin_auth', status: 'OK', apps });
+  } catch (err) {
+    debug.steps.push({ step: 'list_apps_admin_auth', status: 'ERROR', statusCode: err.response?.status, error: err.response?.data || err.message });
+  }
+
+  // Step 7: Try listing Sunshine apps with Sunco keys
+  try {
+    const { data } = await axios.get(`${ZENDESK_BASE_URL}/sc/v2/apps`, { headers: { 'Authorization': getSuncoAuthHeader() } });
+    const apps = (data.apps || []).map(a => ({ id: a.id, name: a.name || a.displayName }));
+    debug.steps.push({ step: 'list_apps_sunco_auth', status: 'OK', apps });
+  } catch (err) {
+    debug.steps.push({ step: 'list_apps_sunco_auth', status: 'ERROR', statusCode: err.response?.status, error: err.response?.data || err.message });
+  }
+
+  // Generate fix instructions based on findings
+  if (debug.correctAppId) {
+    debug.FIX = [
+      `1. Update ZENDESK_SUNCO_APP_ID from "${ZENDESK_SUNCO_APP_ID}" to "${debug.correctAppId}" in Render env vars`,
+      `2. Create new API keys for app "${debug.correctAppId}" in Zendesk Admin > Apps & integrations > Conversations API`,
+      `3. Update ZENDESK_SUNCO_KEY_ID and ZENDESK_SUNCO_KEY_SECRET in Render env vars with the new keys`,
+      `4. Redeploy on Render`
+    ];
+  } else if (sdkAppId && sdkAppId !== ZENDESK_SUNCO_APP_ID) {
+    debug.FIX = [
+      `APP ID MISMATCH FOUND!`,
+      `Configured: ${ZENDESK_SUNCO_APP_ID}`,
+      `SDK uses: ${sdkAppId}`,
+      `1. Go to Zendesk Admin Center > Apps and integrations > Conversations API`,
+      `2. Find the Sunshine app with ID "${sdkAppId}" (or the one labeled "Messaging")`,
+      `3. Create new API keys for that app`,
+      `4. Update in Render: ZENDESK_SUNCO_APP_ID=${sdkAppId}, plus new KEY_ID and KEY_SECRET`,
+      `5. Redeploy on Render`
+    ];
+  } else {
+    debug.FIX = [
+      `Could not auto-detect the correct app ID from SDK settings.`,
+      `Manual steps:`,
+      `1. Go to Zendesk Admin Center > Apps and integrations > Conversations API`,
+      `2. You should see multiple Sunshine apps - find the one connected to Messaging`,
+      `3. Its ID should NOT be "${ZENDESK_SUNCO_APP_ID}" (that one has no users)`,
+      `4. Create API keys for the correct app`,
+      `5. Update ZENDESK_SUNCO_APP_ID, ZENDESK_SUNCO_KEY_ID, ZENDESK_SUNCO_KEY_SECRET in Render`,
+      `6. Redeploy`
+    ];
+  }
+
+  res.json(debug);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -18450,44 +18596,6 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ZENDESK - Close/Solve Ticket
-// Updates ticket status (solve, close, etc.)
-// Unassigns the AI agent first if needed, then changes status
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.put('/zendesk/tickets/:ticketId/status', async (req, res) => {
-  try {
-    const { ticketId } = req.params;
-    const { status } = req.body || {};
-
-    if (!isZendeskConfigured()) {
-      return res.status(400).json({ success: false, error: 'Zendesk not configured' });
-    }
-
-    const allowedStatuses = ['open', 'pending', 'solved', 'closed'];
-    if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({ success: false, error: `Invalid status. Allowed: ${allowedStatuses.join(', ')}` });
-    }
-
-    // Unassign bot/agent and change status in one call
-    await axios.put(
-      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
-      { ticket: { status, assignee_id: null, group_id: null } },
-      { headers: { 'Authorization': getZendeskAuthHeader(), 'Content-Type': 'application/json' } }
-    );
-
-    console.log(`✅ Ticket ${ticketId} unassigned and status changed to: ${status}`);
-    res.json({ success: true, ticketId, status });
-
-  } catch (error) {
-    console.error('❌ Zendesk update ticket status error:', error.response?.data || error.message);
-    res.status(error.response?.status || 500).json({
-      success: false,
-      error: error.response?.data?.error || 'Failed to update ticket status'
-    });
-  }
-});
-
 // ZENDESK - Delete Ticket
 // Permanently deletes a ticket (changes status to 'deleted')
 // ═══════════════════════════════════════════════════════════════════════════════
