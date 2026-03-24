@@ -18596,6 +18596,42 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Close/Solve Ticket
+// Updates ticket status (solve, close, etc.)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.put('/zendesk/tickets/:ticketId/status', async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { status } = req.body || {};
+
+    if (!isZendeskConfigured()) {
+      return res.status(400).json({ success: false, error: 'Zendesk not configured' });
+    }
+
+    const allowedStatuses = ['open', 'pending', 'solved', 'closed'];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ success: false, error: `Invalid status. Allowed: ${allowedStatuses.join(', ')}` });
+    }
+
+    await axios.put(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
+      { ticket: { status } },
+      { headers: { 'Authorization': getZendeskAuthHeader(), 'Content-Type': 'application/json' } }
+    );
+
+    console.log(`✅ Ticket ${ticketId} status changed to: ${status}`);
+    res.json({ success: true, ticketId, status });
+
+  } catch (error) {
+    console.error('❌ Zendesk update ticket status error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data?.error || 'Failed to update ticket status'
+    });
+  }
+});
+
 // ZENDESK - Delete Ticket
 // Permanently deletes a ticket (changes status to 'deleted')
 // ═══════════════════════════════════════════════════════════════════════════════
