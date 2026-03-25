@@ -44,15 +44,12 @@ try {
       initializeFirebase();
       if (WishlistService) wishlistService = new WishlistService();
       firebaseEnabled = true;
-      console.log('🔥 Firebase initialized successfully');
     } catch (error) {
       console.error('❌ Firebase initialization failed during init():', error?.message || error);
-      console.log('⚠️ Server will continue without Firebase - wishlist features will use Shopify fallback');
     }
   }
 } catch (error) {
   // Missing services directory or modules - continue without Firebase/wishlist
-  console.log('⚠️ Optional services not available (./services/*), continuing without Firebase/wishlist');
 }
 
 // Initialize Express app
@@ -117,7 +114,6 @@ const corsOptions = {
     )) {
       callback(null, true);
     } else {
-      console.log(`🚫 CORS blocked origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -270,7 +266,6 @@ async function callGeminiWithRetry(apiKey, prompt, imageBase64, maxRetries = 2) 
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`🔄 Gemini API attempt ${attempt}/${maxRetries}...`);
       
       const response = await axios.post(url, requestBody, {
         headers: { 'Content-Type': 'application/json' },
@@ -283,22 +278,18 @@ async function callGeminiWithRetry(apiKey, prompt, imageBase64, maxRetries = 2) 
         // Quick validation - check if it looks like valid JSON
         const trimmed = text.trim();
         if (trimmed.startsWith('{') && trimmed.includes('"')) {
-          console.log(`✅ Gemini response received (${text.length} chars)`);
           return text;
         }
       }
       
-      console.log(`⚠️ Attempt ${attempt}: Empty or invalid response, retrying...`);
       lastError = new Error('Empty or invalid Gemini response');
       
     } catch (error) {
-      console.log(`⚠️ Attempt ${attempt} failed: ${error.message}`);
       lastError = error;
       
       // Wait before retry (exponential backoff)
       if (attempt < maxRetries) {
         const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-        console.log(`   Waiting ${delay}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -357,7 +348,6 @@ function robustParseAIJson(text, defaultValue = {}) {
   const jsonEndIndex = cleaned.lastIndexOf('}');
   
   if (jsonStartIndex === -1) {
-    console.log('⚠️ [JSON] No JSON object found in response');
     // Still try regex extraction on the raw text
     return extractFieldsFromText(text, defaultValue);
   }
@@ -366,7 +356,6 @@ function robustParseAIJson(text, defaultValue = {}) {
   let jsonStr;
   if (jsonEndIndex <= jsonStartIndex) {
     jsonStr = cleaned.substring(jsonStartIndex) + '}';
-    console.log('⚠️ [JSON] JSON truncated - adding closing brace');
   } else {
     jsonStr = cleaned.substring(jsonStartIndex, jsonEndIndex + 1);
   }
@@ -406,16 +395,11 @@ function robustParseAIJson(text, defaultValue = {}) {
   // Try to parse
   try {
     const result = JSON.parse(jsonStr);
-    console.log('✅ [JSON] Parsed successfully');
     
     // Clean all arrays in the result to remove empty/invalid entries
     const cleanedResult = cleanParsedArrays(result);
     return cleanedResult;
   } catch (parseError) {
-    console.log('⚠️ [JSON] Parse failed:', parseError.message);
-    console.log('   JSON length:', jsonStr.length);
-    console.log('   First 500 chars:', jsonStr.substring(0, 500));
-    console.log('   Last 200 chars:', jsonStr.substring(jsonStr.length - 200));
     
     // Fall back to regex extraction
     return extractFieldsFromText(jsonStr, defaultValue);
@@ -475,7 +459,6 @@ function extractFieldsFromText(text, defaultValue = {}) {
     if (arrayContent) {
       // DEBUG: Log what we're extracting for detectedObjects
       if (field === 'detectedObjects') {
-        console.log(`   🔍 [DEBUG] detectedObjects array content: "${arrayContent.substring(0, 200)}..."`);
       }
       
       // FIX: Clean up malformed empty strings and misaligned quotes BEFORE extraction
@@ -488,7 +471,6 @@ function extractFieldsFromText(text, defaultValue = {}) {
         .trim();
       
       if (field === 'detectedObjects') {
-        console.log(`   🔍 [DEBUG] cleaned content: "${cleanedContent.substring(0, 200)}..."`);
       }
       
       // Extract all quoted strings from the CLEANED array content
@@ -503,7 +485,6 @@ function extractFieldsFromText(text, defaultValue = {}) {
       }
       if (items.length > 0) {
         result[field] = items;
-        console.log(`   ✅ Extracted ${field}: [${items.slice(0, 5).join(', ')}${items.length > 5 ? '...' : ''}]`);
       }
     }
   }
@@ -526,7 +507,6 @@ function extractFieldsFromText(text, defaultValue = {}) {
     const match = text.match(pattern);
     if (match) {
       result[field] = match[1];
-      console.log(`   ✅ Extracted ${field}: "${result[field].substring(0, 50)}..."`);
     }
   }
   
@@ -538,7 +518,6 @@ function extractFieldsFromText(text, defaultValue = {}) {
   const boolMatch = text.match(/"needsUserSelection"\s*:\s*(true|false)/i);
   if (boolMatch) result.needsUserSelection = boolMatch[1].toLowerCase() === 'true';
   
-  console.log('   Regex extraction complete. Fields found:', Object.keys(result).filter(k => result[k] !== null && result[k] !== undefined && (Array.isArray(result[k]) ? result[k].length > 0 : true)).join(', '));
   return result;
 }
 
@@ -630,9 +609,6 @@ const customerIdFormatCache = new Map();
 // Load sessions on startup
 async function loadPersistedSessionsWithLogging() {
   try {
-    console.log('📂 Loading persisted sessions...');
-    console.log(`📂 Sessions file: ${SESSION_FILE}`);
-    console.log(`📂 Refresh tokens file: ${REFRESH_TOKENS_FILE}`);
     
     try {
       const sessionData = await fs.readFile(SESSION_FILE, 'utf8');
@@ -647,29 +623,21 @@ async function loadPersistedSessionsWithLogging() {
         throw new Error('Corrupted sessions file - cannot parse JSON');
       }
       
-      console.log(`📂 Raw sessions data length: ${sessionEntries.length}`);
       
       let loadedSessions = 0;
       let expiredSessions = 0;
       const now = Date.now();
       
       for (const [token, session] of sessionEntries) {
-        console.log(`📂 Processing session: ${token.substring(0, 8)}... for ${session.email}`);
         if (session.expiresAt && session.expiresAt > now) {
           sessions.set(token, session);
           loadedSessions++;
-          console.log(`📂 ✅ Restored session for ${session.email} - token: ${token.substring(0, 8)}...`);
         } else {
           expiredSessions++;
-          console.log(`📂 ❌ Session expired for ${session.email}`);
         }
       }
       
-      console.log(`📂 FINAL: Loaded ${loadedSessions} sessions from disk (${expiredSessions} expired)`);
-      console.log(`📂 Sessions in memory after loading: ${sessions.size}`);
     } catch (error) {
-      console.log('📂 No existing sessions file found - starting fresh');
-      console.log('📂 Error details:', error.message);
     }
     
     // Similar for refresh tokens...
@@ -696,9 +664,7 @@ async function loadPersistedSessionsWithLogging() {
         }
       }
       
-      console.log(`📂 Loaded ${loadedRefreshTokens} refresh tokens from disk`);
     } catch (error) {
-      console.log('📂 No existing refresh tokens file found - starting fresh');
     }
     
   } catch (error) {
@@ -723,7 +689,6 @@ async function persistSessions() {
       fs.writeFile(REFRESH_TOKENS_FILE, JSON.stringify(refreshEntries), 'utf8')
     ]);
     
-    console.log(`💾 Persisted ${sessions.size} sessions and ${appRefreshTokens.size} refresh tokens`);
   } catch (error) {
     console.error('❌ Error persisting sessions:', error);
   }
@@ -741,13 +706,11 @@ setInterval(async () => {
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  console.log('🔄 Server shutting down - saving sessions...');
   await persistSessions();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
-  console.log('🔄 Server shutting down - saving sessions...');
   await persistSessions();
   process.exit(0);
 });
@@ -778,7 +741,6 @@ setInterval(() => {
   }
   
   if (cleaned > 0) {
-    console.log(`🧹 Orders cache cleanup: removed ${cleaned} entries, ${ordersCache.size} remaining`);
   }
 
   // Wishlist sync cache cleanup
@@ -808,7 +770,6 @@ setInterval(() => {
   }
 
   if (wishlistCleaned > 0) {
-    console.log(`🧹 Wishlist cache cleanup: removed ${wishlistCleaned} entries, sync=${wishlistSyncCache.size} response=${publicWishlistResponseCache.size}`);
   }
 }, 60 * 1000); // Every minute
 
@@ -1045,7 +1006,6 @@ if (REVIEWS_CACHE_ENABLED) {
     }
     
     if (cleaned > 0) {
-      console.log(`🧹 Reviews cache cleanup: removed ${cleaned} entries, ${reviewsCache.size} remaining`);
     }
   }, 5 * 60 * 1000); // Every 5 minutes
 }
@@ -1058,9 +1018,7 @@ async function loadStoreCreditLedger() {
     for (const [email, data] of entries) {
       storeCreditLedger.set((email || '').toLowerCase(), { balance: Number(data?.balance || 0) });
     }
-    console.log(`💳 Loaded ${storeCreditLedger.size} store-credit accounts`);
   } catch (e) {
-    console.log('💳 No existing store credit file found - starting fresh');
   }
 }
 
@@ -1072,14 +1030,11 @@ async function loadStoreCreditReservations() {
     for (const [reservationId, data] of entries) {
       // Clean up expired reservations during load
       if (data.expiresAt && Date.now() > data.expiresAt) {
-        console.log(`🗑️ Removing expired reservation: ${reservationId}`);
         continue;
       }
       storeCreditReservations.set(reservationId, data);
     }
-    console.log(`🔒 Loaded ${storeCreditReservations.size} store-credit reservations`);
   } catch (e) {
-    console.log('🔒 No existing store credit reservations file found - starting fresh');
   }
 }
 
@@ -1088,7 +1043,6 @@ async function persistStoreCreditLedger() {
     const entries = Array.from(storeCreditLedger.entries());
     await fs.mkdir(path.dirname(STORE_CREDIT_FILE), { recursive: true });
     await fs.writeFile(STORE_CREDIT_FILE, JSON.stringify(entries), 'utf8');
-    console.log(`💳 Persisted ${entries.length} store-credit accounts`);
   } catch (e) {
     console.error('❌ Failed to persist store credit ledger:', e?.message || e);
   }
@@ -1099,7 +1053,6 @@ async function persistStoreCreditReservations() {
     const entries = Array.from(storeCreditReservations.entries());
     await fs.mkdir(path.dirname(STORE_CREDIT_RESERVATIONS_FILE), { recursive: true });
     await fs.writeFile(STORE_CREDIT_RESERVATIONS_FILE, JSON.stringify(entries), 'utf8');
-    console.log(`🔒 Persisted ${entries.length} store-credit reservations`);
   } catch (e) {
     console.error('❌ Failed to persist store credit reservations:', e?.message || e);
   }
@@ -1129,9 +1082,7 @@ async function loadReturnShipping() {
     const entries = JSON.parse(raw);
     returnShipping.clear();
     for (const [k, v] of entries) returnShipping.set(k, v);
-    console.log(`📦 Loaded ${returnShipping.size} return shipping records`);
   } catch (_) {
-    console.log('📦 No existing return_shipping file - starting fresh');
   }
 }
 async function persistReturnShipping() {
@@ -1142,8 +1093,8 @@ async function persistReturnShipping() {
 }
 
 // Load at startup
-loadStoreCreditLedger().catch((e) => console.warn('Could not load store credit ledger at startup', e));
-loadStoreCreditReservations().catch((e) => console.warn('Could not load store credit reservations at startup', e));
+loadStoreCreditLedger().catch(() => {});
+loadStoreCreditReservations().catch(() => {});
 loadReturnShipping().catch(() => {});
 
 // Periodic flush (every 60s)
@@ -1161,7 +1112,6 @@ setInterval(async () => {
     for (const [reservationId, reservation] of storeCreditReservations.entries()) {
       // Clean up expired reservations that are still in 'reserved' status
       if (reservation.status === 'reserved' && reservation.expiresAt < now) {
-        console.log(`🧹 Cleaning up expired reservation ${reservationId} (${reservation.amount}€)`);
         storeCreditReservations.delete(reservationId);
         cleanedCount++;
       }
@@ -1169,7 +1119,6 @@ setInterval(async () => {
     
     if (cleanedCount > 0) {
       await persistStoreCreditReservations();
-      console.log(`🧹 Cleaned up ${cleanedCount} expired store credit reservations`);
     }
   } catch (error) {
     console.error('❌ Error cleaning up expired reservations:', error);
@@ -1202,16 +1151,11 @@ function verifyShopifyHmac(req, secret) {
 
 // Webhook route: orders/create - deduct store credit when special codes are used
 app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('🔥 WEBHOOK ENDPOINT HIT! /webhooks/shopify/orders-create');
-  console.log('🔥 Request headers:', req.headers);
-  console.log('🔥 Request body length:', req.body ? req.body.length : 'null');
   
   if (!SHOPIFY_WEBHOOK_SECRET) {
-    console.warn('⚠️ No SHOPIFY_WEBHOOK_SECRET set; rejecting webhook for safety');
     return res.status(401).send('Webhook secret not configured');
   }
   if (!verifyShopifyHmac(req, SHOPIFY_WEBHOOK_SECRET)) {
-    console.warn('⚠️ Invalid HMAC for orders/create webhook');
     return res.status(401).send('Invalid HMAC');
   }
 
@@ -1227,36 +1171,25 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
     const email = (payload?.email || payload?.customer?.email || '').toLowerCase();
     const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
     
-    console.log(`🎯 WEBHOOK: Processing order for ${email}`);
-    console.log(`🎯 WEBHOOK: Found ${discounts.length} discount codes:`, discounts.map(d => d?.code || 'null'));
-    console.log(`🎯 WEBHOOK: STORE_CREDIT_PREFIX = "${STORE_CREDIT_PREFIX}"`);
-    console.log(`🎯 WEBHOOK: Current reservations:`, Array.from(storeCreditReservations.keys()));
     
     // 🔥 NEW: Handle store credit reservations - deduct money when order confirmed
     for (const d of discounts) {
       const code = String(d?.code || '');
       
-      console.log(`🔍 WEBHOOK: Checking discount code: "${code}"`);
       
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        console.log(`💳 WEBHOOK: Found store credit discount: ${code}`);
         
         // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_{reservationId})
         const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_{reservationId}
-        console.log(`🔍 WEBHOOK: Code suffix after removing prefix: "${codeSuffix}"`);
         
         const parts = codeSuffix.split('_');
-        console.log(`🔍 WEBHOOK: Code parts:`, parts);
         
         const reservationId = parts.pop(); // Keep original case - don't use .toLowerCase()
-        console.log(`🔍 WEBHOOK: Extracted reservation ID: "${reservationId}"`);
         
         if (reservationId) {
           const reservation = storeCreditReservations.get(reservationId);
-          console.log(`🔍 WEBHOOK: Found reservation:`, reservation ? `${reservation.id} (${reservation.status})` : 'null');
           
           if (reservation && reservation.status === 'reserved') {
-            console.log(`💰 Processing reservation ${reservationId} - NOW deducting ${reservation.amount}€ from customer's store credit`);
             
             try {
               // NOW actually deduct the money from Shopify store credit account
@@ -1283,7 +1216,6 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
                 storeCreditReservations.set(reservationId, reservation);
                 await persistStoreCreditReservations();
                 
-                console.log(`✅ Successfully deducted ${reservation.amount}€ and finalized reservation ${reservationId} (order: ${payload?.name})`);
               } else {
                 console.error(`❌ Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
                 // Keep reservation as 'reserved' so it can be retried or cleaned up later
@@ -1293,14 +1225,10 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
             }
             
           } else if (reservation && reservation.status === 'finalized') {
-            console.log(`✅ Reservation ${reservationId} already finalized - skipping`);
           } else if (reservation) {
-            console.log(`⚠️ Found reservation ${reservationId} but status is ${reservation.status} (expected: reserved)`);
           } else {
-            console.log(`❌ No reservation found for ID: ${reservationId}`);
           }
         } else {
-          console.log(`❌ Could not extract reservation ID from discount code: ${code}`);
         }
       }
     }
@@ -1420,9 +1348,7 @@ async function tryDebitWithFallbacks({ customerGid, storeCreditAccountId, amount
   const errors = [];
   for (const att of attempts) {
     try {
-      console.log(`🔁 Trying debit attempt: ${att.name}`);
       const resp = await adminGraphQL(att.query, att.variables);
-      console.log(`🔁 Debit attempt '${att.name}' response:`, JSON.stringify(resp, null, 2));
       const payload = resp?.data?.storeCreditAccountDebit;
       const userErrors = (payload?.userErrors) || [];
       if (Array.isArray(userErrors) && userErrors.length) {
@@ -1487,9 +1413,8 @@ async function saveExchangeSelectionsMetafield(orderId, exchangeSelections) {
   try {
     const res = await adminGraphQL(MUTATION_METAFIELDS_SET, variables);
     const errs = res?.data?.metafieldsSet?.userErrors || [];
-    if (errs.length) console.warn('⚠️ metafieldsSet userErrors:', errs);
+    if (errs.length) console.error('metafieldsSet userErrors:', errs);
   } catch (e) {
-    console.warn('⚠️ Failed to write exchange_selections metafield:', e?.message || e);
   }
 }
 
@@ -1543,7 +1468,6 @@ app.post('/store-credit/debit', async (req, res) => {
       if (email) {
         setStoreCredit(email, Number(totalBalanceStr));
         await persistStoreCreditLedger();
-        console.log(`💾 Persisted authoritative balance ${totalBalanceStr} for ${email}`);
       }
     } catch (e) {
       console.error('❌ Failed to persist authoritative balance after debit:', e?.message || e);
@@ -1575,7 +1499,6 @@ app.post('/orders/complete', async (req, res) => {
       return res.status(400).json({ success: false, error: 'customerEmail or email required' });
     }
 
-    console.log(`🛒 Processing order completion: ${finalOrderId} for ${finalEmail}`);
 
     // Check if we have a store credit reservation for this customer
     const emailLower = finalEmail.toLowerCase();
@@ -1592,11 +1515,9 @@ app.post('/orders/complete', async (req, res) => {
     }
     
     if (!reservation || reservedAmount <= 0) {
-      console.log(`✅ No store credit reserved for ${emailLower}, nothing to deduct`);
       return res.json({ success: true, message: 'No store credit to deduct', deducted: 0 });
     }
     
-    console.log(`💳 Found reservation for ${emailLower}: ${reservedAmount}€`);
     const accountId = reservation.storeCreditAccountId;
 
     // Deduct from Shopify using the working pattern from webhook
@@ -1632,7 +1553,6 @@ app.post('/orders/complete', async (req, res) => {
     await persistStoreCreditLedger();
     await persistStoreCreditReservations();
 
-    console.log(`✅ Successfully deducted ${reservedAmount}€ store credit for ${emailLower}, new balance: ${newBalance}€`);
 
     return res.json({
       success: true,
@@ -1687,7 +1607,6 @@ app.post('/store-credit/credit', async (req, res) => {
       if (email) {
         setStoreCredit(email, Number(totalBalanceStr));
         await persistStoreCreditLedger();
-        console.log(`💾 Persisted authoritative balance ${totalBalanceStr} for ${email}`);
       }
     } catch (e) {
       console.error('❌ Failed to persist authoritative balance after credit:', e?.message || e);
@@ -1721,9 +1640,7 @@ async function loadAppPromotionData() {
     for (const [email, data] of entries) {
       appPromotionRedeemed.set((email || '').toLowerCase(), data);
     }
-    console.log(`🎁 Loaded ${appPromotionRedeemed.size} app promotion redemptions`);
   } catch (e) {
-    console.log('🎁 No existing app promotion file found - starting fresh');
   }
 }
 
@@ -1732,7 +1649,6 @@ async function persistAppPromotionData() {
     const entries = Array.from(appPromotionRedeemed.entries());
     await fs.mkdir(path.dirname(APP_PROMOTION_FILE), { recursive: true });
     await fs.writeFile(APP_PROMOTION_FILE, JSON.stringify(entries), 'utf8');
-    console.log(`🎁 Persisted ${entries.length} app promotion redemptions`);
   } catch (e) {
     console.error('❌ Failed to persist app promotion data:', e?.message || e);
   }
@@ -1840,7 +1756,6 @@ app.post('/app-promotion/claim', async (req, res) => {
     setStoreCredit(emailLower, Number(totalBalanceStr));
     await persistStoreCreditLedger();
 
-    console.log(`🎁 App promotion: granted 15€ to ${email}, new balance: ${totalBalanceStr}€`);
 
     return res.json({
       success: true,
@@ -1890,7 +1805,7 @@ app.get('/app-promotion/status', async (req, res) => {
 });
 
 // Load app promotion data on startup
-loadAppPromotionData().catch((e) => console.warn('Could not load app promotion data at startup', e));
+loadAppPromotionData().catch(() => {});
 
 // Persist app promotion data periodically (every 60s)
 setInterval(() => {
@@ -1977,7 +1892,6 @@ app.post('/tag-app-customer', async (req, res) => {
       tags.push(platformTag);
     }
 
-    console.log(`🏷️  Tagging customer ${email || customerGid} with tags: ${tags.join(', ')}`);
 
     // Tag the customer using Shopify Admin API
     const result = await adminGraphQL(MUTATION_CUSTOMER_TAG, {
@@ -1996,7 +1910,6 @@ app.post('/tag-app-customer', async (req, res) => {
       });
     }
 
-    console.log(`✅ Successfully tagged customer ${email || customerGid} with ${tags.length} tag(s)`);
 
     return res.json({
       success: true,
@@ -2139,7 +2052,6 @@ app.post('/raffle/pick-winner', async (req, res) => {
     try {
       setStoreCredit(winnerEmail, Number(totalBalanceStr));
       await persistStoreCreditLedger();
-      console.log(`💸 Raffle: credited ${moneyAmount} EUR to ${winnerEmail} (new balance ${totalBalanceStr})`);
     } catch (e) {
       console.error('❌ Failed to persist balance after raffle credit:', e?.message || e);
     }
@@ -2157,7 +2069,6 @@ app.post('/raffle/pick-winner', async (req, res) => {
     try {
       const emptySet = new Set();
       await persistRaffleParticipants(emptySet);
-      console.log('🔄 Raffle: cleared participants after drawing winner');
     } catch (e) {
       console.error('❌ Failed to clear raffle participants after draw:', e?.message || e);
     }
@@ -2189,16 +2100,11 @@ function generateReservationId() {
 
 // Send verification email
 async function sendVerificationEmail(email, code, language = 'de') {
-  console.log(`📧 sendVerificationEmail called for ${email}`);
-  console.log(`📧 API key configured: ${config.mailerSendApiKey ? 'YES (length: ' + config.mailerSendApiKey.length + ')' : 'NO'}`);
   
   if (!config.mailerSendApiKey) {
-    console.log(`⚠️ MAILERSEND_API_KEY not configured - cannot send email!`);
-    console.log(`Verification code for ${email}: ${code}`);
     return true;
   }
   
-  console.log(`📧 Attempting to send verification email to ${email}...`);
 
   // Email templates by language
   const templates = {
@@ -2261,13 +2167,8 @@ async function sendVerificationEmail(email, code, language = 'de') {
         }
       }
     );
-    console.log(`✅ Email sent successfully to ${email} (status: ${response.status})`);
     return response.status === 202;
   } catch (error) {
-    console.log('❌ MailerSend API FAILED:');
-    console.log('   Status:', error.response?.status);
-    console.log('   Data:', JSON.stringify(error.response?.data || error.message));
-    console.log(`Fallback - Verification code for ${email}: ${code}`);
     return true;
   }
 }
@@ -2305,7 +2206,6 @@ function getReasonDescription(reasonCode) {
 
 async function createReturnViaAdminAPI(returnData) {
   try {
-    console.log('🚀 Creating return via Admin API...');
     
     // 🔥 FIXED: Use returnRequest to get REQUESTED status ("Rückgabe angefragt")
     const mutation = `
@@ -2358,8 +2258,6 @@ async function createReturnViaAdminAPI(returnData) {
       throw new Error('Admin API did not return created return');
     }
 
-    console.log('✅ Return created via Admin API:', createdReturn.id);
-    console.log('🔍 Return status:', createdReturn.status);
     
     return {
       success: true,
@@ -2518,7 +2416,6 @@ function getReasonDescription(reason) {
 // 🔥 ADDED: Check return eligibility (version-safe query)
 async function checkShopifyReturnEligibility(orderId, customerToken) {
   try {
-    console.log('🔍 Checking return eligibility for order:', orderId);
 
     const query = `
       query checkReturnEligibility($orderId: ID!) {
@@ -2666,7 +2563,6 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
       }
     }
 
-    console.log(`✅ Found ${returnableItems.length} returnable items`);
     // Try to enrich returnable items with product variant lists so clients don't have to call storefront
     for (let i = 0; i < returnableItems.length; i++) {
       const it = returnableItems[i];
@@ -2705,7 +2601,6 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
         }
       } catch (e) {
         // Non-fatal: leave variants empty
-        console.warn('Could not fetch variants for product', productHandle || productId, e?.message || e);
       }
     }
     return { eligible: returnableItems.length > 0, reason: returnableItems.length === 0 ? 'No returnable items found' : null, returnableItems, existingReturns: existingReturns.length };
@@ -2719,7 +2614,6 @@ async function checkShopifyReturnEligibility(orderId, customerToken) {
 // 🔥 ADDED: Submit return using Customer Account API orderRequestReturn mutation
 async function submitShopifyReturnRequest(returnRequest, customerToken) {
   try {
-    console.log('🚀 Submitting return request to Shopify Customer Account API');
 
     // First check eligibility to get fulfillment line item IDs
     const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, customerToken);
@@ -2807,7 +2701,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       }))
     };
 
-    console.log('📤 Sending orderRequestReturn with sanitized variables:', { orderId: sanitizedVariables.orderId, lineItemCount: sanitizedVariables.returnLineItems.length });
 
     // ⚠️ FIXED: Try multiple Customer Account API URL formats
     const customerApiUrls = [
@@ -2821,7 +2714,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     
     for (const apiUrl of customerApiUrls) {
       try {
-        console.log(`🌐 Trying Customer Account API: ${apiUrl}`);
         response = await axios.post(
           apiUrl,
           {
@@ -2836,7 +2728,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
             timeout: 10000
           }
         );
-        console.log('✅ Customer Account API succeeded with:', apiUrl);
         break;
       } catch (urlError) {
         console.error(`❌ Failed with ${apiUrl}:`, urlError?.response?.status, urlError?.message);
@@ -2850,7 +2741,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       throw new Error(`Customer Account API failed: ${lastError?.response?.data?.message || lastError?.message}`);
     }
 
-    console.log('📤 Shopify return request response:', response.status);
 
     if (response.data.errors) {
       console.error('❌ GraphQL errors:', response.data.errors);
@@ -2870,7 +2760,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
       throw new Error('Failed to create return request in Shopify');
     }
     
-    console.log('✅ Shopify return request created:', returnRequestData.id);
     
     return {
       success: true,
@@ -2883,7 +2772,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
     
     // 🔥 FALLBACK: Try Storefront API if Customer Account API fails
     if (config.storefrontAccessToken && error.message.includes('404')) {
-      console.log('🔄 Customer Account API failed with 404, trying Storefront API...');
       try {
         // Note: Storefront API might not support return creation, but worth trying
         const storefrontQuery = `
@@ -2895,7 +2783,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
           }
         `;
         
-        console.log('⚠️ Storefront API does not support return creation. This is a Customer Account API limitation.');
         // Continue with Admin API fallback below
       } catch (storefrontError) {
         console.error('❌ Storefront API also failed:', storefrontError?.message);
@@ -2913,7 +2800,6 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
 // 🔥 ADDED: Get customer returns from Shopify Customer Account API
 async function getShopifyCustomerReturns(customerToken) {
   try {
-    console.log('📥 Fetching returns from Shopify Customer Account API');
 
     const query = `
       query customerReturns {
@@ -3037,7 +2923,6 @@ async function getShopifyCustomerReturns(customerToken) {
       }
     }
 
-    console.log(`✅ Retrieved ${returnRequests.length} return requests from Shopify`);
     return returnRequests;
 
   } catch (error) {
@@ -3049,10 +2934,8 @@ async function getShopifyCustomerReturns(customerToken) {
 // 🔥 ADDED: Get returns from Admin API (for returns created via Admin API)
 async function getAdminApiReturns(customerEmail) {
   try {
-    console.log('📥 Fetching returns from Shopify Admin API for:', customerEmail);
 
     if (!config.adminToken) {
-      console.log('❌ Admin token not available');
       return [];
     }
 
@@ -3108,7 +2991,6 @@ async function getAdminApiReturns(customerEmail) {
         }
       }`;
 
-    console.log('🔍 Querying customer and orders...');
     
     const customerResponse = await axios.post(config.adminApiUrl, {
       query: customerQuery,
@@ -3127,12 +3009,10 @@ async function getAdminApiReturns(customerEmail) {
 
     const customer = customerResponse.data.data?.customers?.edges?.[0]?.node;
     if (!customer) {
-      console.log('❌ Customer not found');
       return [];
     }
 
     const orders = customer.orders.edges.map(edge => edge.node);
-    console.log(`📦 Found ${orders.length} orders for customer`);
 
     // Step 2: For each order, check if there are any returns using a separate query
     const allReturns = [];
@@ -3178,7 +3058,6 @@ async function getAdminApiReturns(customerEmail) {
         });
 
         if (orderReturnsResponse.data.errors) {
-          console.log(`⚠️ Order returns query failed for ${order.name}:`, orderReturnsResponse.data.errors);
           continue;
         }
 
@@ -3235,18 +3114,10 @@ async function getAdminApiReturns(customerEmail) {
           allReturns.push(customerReturn);
         }
       } catch (orderError) {
-        console.log(`⚠️ Error querying returns for order ${order.name}:`, orderError.message);
       }
     }
 
-    console.log(`✅ Found ${allReturns.length} total returns for customer: ${customerEmail}`);
     if (allReturns.length > 0) {
-      console.log('📦 Return details:', allReturns.map(r => ({
-        id: r.id,
-        orderNumber: r.orderNumber,
-        itemCount: r.items.length,
-        status: r.status
-      })));
     }
 
     return allReturns;
@@ -3299,8 +3170,6 @@ async function setAsDefaultAddress(customerId, addressId) {
       }
     );
     
-    console.log('Set default address response status:', response.status);
-    console.log('Set default address success:', !!response.data.data?.customerUpdate?.customer);
     return response.data.data?.customerUpdate?.customer != null;
   } catch (error) {
     console.error('Error setting default address:', error.response?.data || error.message);
@@ -3535,7 +3404,6 @@ app.get('/authorize', async (req, res) => {
 // Test endpoint to verify Klaviyo credentials
 app.get('/test/klaviyo', async (req, res) => {
   try {
-    console.log('🧪 Testing Klaviyo credentials...');
     
     const klaviyoPrivateKey = process.env.KLAVIYO_PRIVATE_KEY;
     const klaviyoListId = process.env.KLAVIYO_LIST_ID || 'XebiKL';
@@ -3550,7 +3418,6 @@ app.get('/test/klaviyo', async (req, res) => {
     }
     
     // Test 1: Get the list to verify it exists
-    console.log('🧪 Test 1: Getting list info...');
     const listResponse = await axios.get(
       `https://a.klaviyo.com/api/lists/${klaviyoListId}`,
       {
@@ -3561,10 +3428,8 @@ app.get('/test/klaviyo', async (req, res) => {
       }
     );
     
-    console.log('🧪 List response:', listResponse.status, listResponse.data?.data?.attributes?.name);
     
     // Test 2: Try to get profiles in the list
-    console.log('🧪 Test 2: Getting profiles in list...');
     const profilesResponse = await axios.get(
       `https://a.klaviyo.com/api/lists/${klaviyoListId}/profiles/`,
       {
@@ -3575,7 +3440,6 @@ app.get('/test/klaviyo', async (req, res) => {
       }
     );
     
-    console.log('🧪 Profiles response:', profilesResponse.status, 'Count:', profilesResponse.data?.data?.length);
     
     res.json({ 
       success: true, 
@@ -3621,7 +3485,6 @@ app.post('/notify-me/register', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Variant ID is required' });
     }
 
-    console.log(`📬 Notify Me: Registering ${email} for variant ${variant_id}`);
 
     // Notify Me API endpoint (from widget network inspection)
     // No API key needed - uses shop_id to identify the shop
@@ -3654,7 +3517,6 @@ app.post('/notify-me/register', async (req, res) => {
       }
     );
 
-    console.log(`✅ Notify Me: Successfully registered ${email}`);
     
     return res.status(200).json({ 
       success: true, 
@@ -3706,9 +3568,6 @@ app.post('/newsletter/subscribe', async (req, res) => {
     // Use the correct List ID from your app config
     const klaviyoListId = process.env.KLAVIYO_LIST_ID || 'XebiKL';
 
-    console.log(`📧 Using Klaviyo List ID: ${klaviyoListId}`);
-    console.log(`📧 Klaviyo Private Key configured: ${klaviyoPrivateKey ? 'Yes' : 'No'}`);
-    console.log(`📧 Subscribing ${email} to list ${klaviyoListId}`);
 
     if (!klaviyoPrivateKey) {
       console.error('❌ KLAVIYO_PRIVATE_KEY not configured');
@@ -3717,7 +3576,6 @@ app.post('/newsletter/subscribe', async (req, res) => {
 
     // First, let's test if we can access the list to verify credentials
     try {
-      console.log('📧 Testing Klaviyo credentials by fetching list info...');
       const listResponse = await axios.get(
         `https://a.klaviyo.com/api/lists/${klaviyoListId}`,
         {
@@ -3727,7 +3585,6 @@ app.post('/newsletter/subscribe', async (req, res) => {
           }
         }
       );
-      console.log('📧 List info response:', JSON.stringify(listResponse.data, null, 2));
     } catch (listError) {
       console.error('❌ Failed to access Klaviyo list:', listError.response?.status, listError.response?.data);
       return res.status(500).json({ 
@@ -3737,11 +3594,9 @@ app.post('/newsletter/subscribe', async (req, res) => {
       });
     }
 
-    console.log(`📧 Subscribing email: ${email} to list: ${klaviyoListId}`);
 
     // Method 1: First create/update the profile, then add to list (correct approach)
     try {
-      console.log('📧 Method 1: Create profile and add to list...');
       
       // Step 1: Create or update the profile
       const profileData = {
@@ -3761,8 +3616,6 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       };
 
-      console.log('📧 Step 1: Creating/updating profile...');
-      console.log('📧 Profile data:', JSON.stringify(profileData, null, 2));
 
       const profileResponse = await axios.post(
         'https://a.klaviyo.com/api/profiles/',
@@ -3776,15 +3629,11 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
-      console.log('📧 Profile response status:', profileResponse.status);
-      console.log('📧 Profile response data:', JSON.stringify(profileResponse.data, null, 2));
 
       const profileId = profileResponse.data?.data?.id;
-      console.log('📧 Profile ID:', profileId);
 
       if (profileId) {
         // Step 2: Add profile to list using relationships endpoint
-        console.log('📧 Step 2: Adding profile to list...');
         
         const listSubscriptionData = {
           data: [
@@ -3795,8 +3644,6 @@ app.post('/newsletter/subscribe', async (req, res) => {
           ]
         };
 
-        console.log('📧 Adding profile to list:', klaviyoListId);
-        console.log('📧 List subscription data:', JSON.stringify(listSubscriptionData, null, 2));
 
         const listResponse = await axios.post(
           `https://a.klaviyo.com/api/lists/${klaviyoListId}/relationships/profiles/`,
@@ -3810,23 +3657,16 @@ app.post('/newsletter/subscribe', async (req, res) => {
           }
         );
 
-        console.log('📧 List subscription response status:', listResponse.status);
-        console.log('📧 List subscription response data:', JSON.stringify(listResponse.data, null, 2));
 
         if (listResponse.status >= 200 && listResponse.status < 300) {
-          console.log(`✅ Newsletter subscription successful: ${email} -> List: ${klaviyoListId}`);
           return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
         }
       }
     } catch (profileError) {
-      console.log('📧 Profile creation/list subscription failed with status:', profileError.response?.status);
-      console.log('📧 Profile creation error data:', JSON.stringify(profileError.response?.data, null, 2));
-      console.log('📧 Trying legacy method...');
     }
 
     // Method 2: Direct list subscription API (alternative approach)
     try {
-      console.log('📧 Trying direct list subscription API...');
       
       const directSubscriptionData = {
         data: {
@@ -3872,19 +3712,13 @@ app.post('/newsletter/subscribe', async (req, res) => {
         }
       );
 
-      console.log('📧 Direct subscription response status:', directResponse.status);
-      console.log('📧 Direct subscription response data:', JSON.stringify(directResponse.data, null, 2));
 
       if (directResponse.status === 200 || directResponse.status === 201 || directResponse.status === 204) {
-        console.log(`✅ Newsletter subscription successful (direct): ${email} -> List: ${klaviyoListId}`);
         return res.json({ success: true, message: 'Successfully subscribed to newsletter' });
       }
     } catch (directError) {
-      console.log('📧 Direct subscription failed with status:', directError.response?.status);
-      console.log('📧 Direct subscription error data:', JSON.stringify(directError.response?.data, null, 2));
     }
 
-    console.log(`❌ All subscription methods failed for: ${email}`);
     res.status(500).json({ 
       success: false, 
       error: 'Failed to subscribe to newsletter - all methods failed'
@@ -3945,7 +3779,6 @@ app.post('/newsletter/track-event', async (req, res) => {
       }
     );
 
-    console.log(`✅ Event tracked: ${event_name} for ${email}`);
     res.json({ success: true, message: 'Event tracked successfully' });
 
   } catch (error) {
@@ -4029,7 +3862,6 @@ app.get('/reviews', async (req, res) => {
           const r = await adminGraphQL(q, { id: gid });
           usedHandle = r?.data?.product?.handle || null;
         } catch (e) {
-          console.warn('⚠️ Could not resolve product handle for Judge.me reviews fallback:', e?.message || e);
         }
       }
       if (usedHandle) {
@@ -4269,7 +4101,6 @@ app.get('/reviews/stats', async (req, res) => {
         const r = await adminGraphQL(q, { id: gid });
         usedHandle = r?.data?.product?.handle || null;
       } catch (e) {
-        console.warn('⚠️ Could not resolve product handle for stats fallback:', e?.message || e);
       }
     }
     if (usedHandle) {
@@ -4411,11 +4242,9 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
         hostedUrls.push(`${baseUrl}/uploads/${filename}`);
       }
 
-      console.log(`🖼️ Stored ${hostedUrls.length} review image(s) locally; building picture_urls for Judge.me`);
       const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
       const userAgent = req.headers['user-agent'] || 'MetallbudeApp/1.0';
       const nowIso = new Date().toISOString();
-      console.log(`🧭 Judge.me submit (picture_urls) shop_domain=${shopDomain}, product_id=${product_id}`);
       const payload = {
         api_token: judgemeToken,
         shop_domain: shopDomain,
@@ -4434,7 +4263,6 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       });
-  try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
   addRecentReviewSubmit({ kind: 'picture_urls', product_id, email: customer_email, name: customer_name, rating: intRating, urls: payload.picture_urls, judgeMeMessage: response.data?.message });
   // Invalidate caches for this product/email so new review appears sooner
   try { invalidateCacheForReview({ product: product_id, email: customer_email }); } catch (_) {}
@@ -4448,7 +4276,6 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
     const clientIp2 = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
     const userAgent2 = req.headers['user-agent'] || 'MetallbudeApp/1.0';
     const nowIso2 = new Date().toISOString();
-    console.log(`🧭 Judge.me submit (json_no_files) shop_domain=${shopDomain}, product_id=${product_id}`);
     const reviewData = {
       api_token: judgemeToken,
       shop_domain: shopDomain,
@@ -4465,13 +4292,10 @@ app.post('/reviews/submit', uploadReviews.any(), async (req, res) => {
       user_agent: userAgent2,
     };
 
-    console.log(`📝 Forwarding review as JSON with picture_urls=${Array.isArray(reviewData.picture_urls) ? reviewData.picture_urls.length : 0}`);
     const response = await axios.post('https://judge.me/api/v1/reviews.json', reviewData, {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     });
 
-    console.log(`✅ Review submitted (JSON) for product ${product_id} by ${customer_email}`);
-    try { console.log('🧾 Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400)); } catch (_) {}
     addRecentReviewSubmit({ kind: 'json_no_files', product_id, email: customer_email, name: customer_name, rating: intRating, urls: reviewData.picture_urls, judgeMeMessage: response.data?.message });
     // Invalidate caches for this product/email
     try { invalidateCacheForReview({ product: product_id, email: customer_email }); } catch (_) {}
@@ -4517,7 +4341,6 @@ app.delete('/reviews/:reviewId', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    console.log(`📝 Backend: Attempting to hide (delete) review ${reviewId} via curated=spam`);
 
     // Primary: Use Judge.me curation via PUT reviews/:id.json { curated: 'spam' }
     try {
@@ -4530,11 +4353,9 @@ app.delete('/reviews/:reviewId', async (req, res) => {
         },
         { headers: { Accept: 'application/json' } }
       );
-      console.log(`📝 Backend: PUT curated=spam status: ${putResponse.status}`);
       return res.json({ success: true, message: 'Review hidden (curated=spam)', method: 'put_curated', data: putResponse.data });
     } catch (putErr) {
       const body = typeof putErr?.response?.data === 'string' ? putErr.response.data.slice(0, 400) + '…' : (putErr?.response?.data || putErr.message);
-      console.log('📝 Backend: PUT curated failed, trying fallbacks. Error:', body);
     }
 
     // Fallback 1: legacy hide endpoint (if available)
@@ -4544,11 +4365,9 @@ app.delete('/reviews/:reviewId', async (req, res) => {
         { api_token: judgemeToken, shop_domain: shopDomain, reason: 'duplicated_review' },
         { headers: { Accept: 'application/json' } }
       );
-      console.log(`📝 Backend: Legacy hide status: ${hideResponse.status}`);
       return res.json({ success: true, message: 'Review hidden (legacy hide)', method: 'legacy_hide', data: hideResponse.data });
     } catch (hideErr) {
       const body = typeof hideErr?.response?.data === 'string' ? hideErr.response.data.slice(0, 400) + '…' : (hideErr?.response?.data || hideErr.message);
-      console.log('📝 Backend: Legacy hide failed, trying moderate. Error:', body);
     }
 
     // Fallback 2: moderate endpoint
@@ -4558,11 +4377,9 @@ app.delete('/reviews/:reviewId', async (req, res) => {
         { api_token: judgemeToken, shop_domain: shopDomain, action: 'hide', reason: 'duplicated_review' },
         { headers: { Accept: 'application/json' } }
       );
-      console.log(`📝 Backend: Moderate status: ${moderateResponse.status}`);
       return res.json({ success: true, message: 'Review moderated', method: 'moderate', data: moderateResponse.data });
     } catch (moderateErr) {
       const body = typeof moderateErr?.response?.data === 'string' ? moderateErr.response.data.slice(0, 400) + '…' : (moderateErr?.response?.data || moderateErr.message);
-      console.log('📝 Backend: All methods failed. Moderate error:', body);
     }
 
     // If all methods fail
@@ -4601,7 +4418,6 @@ app.post('/reviews/:reviewId/hide', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    console.log(`📝 Backend: Attempting to hide review ${reviewId} with reason: ${reason} via curated=spam`);
 
     // Primary: PUT curated=spam
     try {
@@ -4610,11 +4426,9 @@ app.post('/reviews/:reviewId/hide', async (req, res) => {
         { api_token: judgemeToken, shop_domain: shopDomain, curated: 'spam' },
         { headers: { Accept: 'application/json' } }
       );
-      console.log(`📝 Backend: Hide (PUT curated) status: ${response.status}`);
       return res.json({ success: true, message: 'Review hidden (curated=spam)', data: response.data, method: 'put_curated' });
     } catch (putErr) {
       const body = typeof putErr?.response?.data === 'string' ? putErr.response.data.slice(0, 400) + '…' : (putErr?.response?.data || putErr.message);
-      console.log('📝 Backend: PUT curated failed, trying legacy hide:', body);
     }
 
     // Fallback: legacy hide endpoint
@@ -4624,11 +4438,9 @@ app.post('/reviews/:reviewId/hide', async (req, res) => {
         { api_token: judgemeToken, shop_domain: shopDomain, reason },
         { headers: { Accept: 'application/json' } }
       );
-      console.log(`📝 Backend: Legacy hide status: ${response.status}`);
       return res.json({ success: true, message: 'Review hidden (legacy hide)', data: response.data, method: 'legacy_hide' });
     } catch (hideErr) {
       const body = typeof hideErr?.response?.data === 'string' ? hideErr.response.data.slice(0, 400) + '…' : (hideErr?.response?.data || hideErr.message);
-      console.log('📝 Backend: Legacy hide failed, trying moderate:', body);
     }
 
     // Fallback 2: moderate endpoint
@@ -4638,11 +4450,9 @@ app.post('/reviews/:reviewId/hide', async (req, res) => {
         { api_token: judgemeToken, shop_domain: shopDomain, action: 'hide', reason },
         { headers: { Accept: 'application/json' } }
       );
-      console.log(`📝 Backend: Moderate status: ${response.status}`);
       return res.json({ success: true, message: 'Review moderated', data: response.data, method: 'moderate' });
     } catch (moderateErr) {
       const body = typeof moderateErr?.response?.data === 'string' ? moderateErr.response.data.slice(0, 400) + '…' : (moderateErr?.response?.data || moderateErr.message);
-      console.log('📝 Backend: All hide methods failed:', body);
     }
 
     return res.status(500).json({ success: false, error: 'Failed to hide review' });
@@ -4689,11 +4499,9 @@ app.post('/reviews/debug/test-picture-urls', async (req, res) => {
       body,
       picture_urls,
     };
-    console.log('🧪 DEBUG posting review with picture_urls:', picture_urls);
     const response = await axios.post('https://judge.me/api/v1/reviews.json', payload, {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     });
-    console.log('🧪 DEBUG Judge.me response (trimmed):', JSON.stringify(response.data).slice(0, 400));
     return res.json({ success: true, data: response.data });
   } catch (error) {
     const errBody = typeof error?.response?.data === 'string'
@@ -4762,7 +4570,6 @@ app.post('/reviews/:reviewId/moderate', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Reviews service not configured' });
     }
 
-    console.log(`📝 Backend: Attempting to moderate review ${reviewId} (preferring curated=spam)`);
 
     // Prefer PUT curated when action implies hiding
     if ((action || 'hide').toLowerCase() === 'hide') {
@@ -4772,11 +4579,9 @@ app.post('/reviews/:reviewId/moderate', async (req, res) => {
           { api_token: judgemeToken, shop_domain: shopDomain, curated: 'spam' },
           { headers: { Accept: 'application/json' } }
         );
-        console.log(`📝 Backend: Moderate via PUT curated status: ${response.status}`);
         return res.json({ success: true, message: 'Review hidden (moderate via curated)', data: response.data, method: 'put_curated' });
       } catch (putErr) {
         const body = typeof putErr?.response?.data === 'string' ? putErr.response.data.slice(0, 400) + '…' : (putErr?.response?.data || putErr.message);
-        console.log('📝 Backend: PUT curated (moderate) failed, trying direct moderate:', body);
       }
     }
 
@@ -4787,7 +4592,6 @@ app.post('/reviews/:reviewId/moderate', async (req, res) => {
       { headers: { Accept: 'application/json' } }
     );
 
-    console.log(`📝 Backend: Moderate response status: ${response.status}`);
     res.json({ success: true, message: 'Review moderated successfully', data: response.data, method: 'moderate' });
 
   } catch (error) {
@@ -4881,7 +4685,6 @@ app.post('/email/send-code', async (req, res) => {
       }
     });
 
-    console.log(`✅ ${type} code sent to ${email} (language: ${language})`);
     res.json({ success: true, message: `${type} code sent successfully` });
 
   } catch (error) {
@@ -4918,7 +4721,6 @@ app.post('/auth/request-code-web', async (req, res) => {
   });
 
   await sendVerificationEmail(email, code, language || 'de');
-  console.log(`Web OAuth: Generated code for ${email}: ${code} (language: ${language || 'de'})`);
 
   res.json({ success: true, sessionId });
 });
@@ -5078,7 +4880,6 @@ app.get('/logout', (req, res) => {
 // Helper function to get real customer data from Shopify Admin API
 async function getShopifyCustomerByEmail(email) {
   if (!config.adminToken) {
-    console.log('No admin token configured - check SHOPIFY_ADMIN_TOKEN env var');
     return null;
   }
 
@@ -5117,7 +4918,6 @@ async function getShopifyCustomerByEmail(email) {
       }
     `;
 
-    console.log(`Searching for customer with email: ${email}`);
     
     const response = await axios.post(
       config.adminApiUrl,
@@ -5141,7 +4941,6 @@ async function getShopifyCustomerByEmail(email) {
     }
 
     const customers = response.data?.data?.customers?.edges || [];
-    console.log(`Found ${customers.length} customers`);
     
     const customer = customers.find(c => 
       c.node.email.toLowerCase() === email.toLowerCase()
@@ -5157,7 +4956,6 @@ async function getShopifyCustomerByEmail(email) {
 // Helper function to create customer in Shopify
 async function createShopifyCustomer(email) {
   if (!config.adminToken) {
-    console.log('No admin token configured');
     return null;
   }
 
@@ -5226,9 +5024,7 @@ app.post('/auth/request-code', async (req, res) => {
   if (config.adminToken) {
     const existingCustomer = await getShopifyCustomerByEmail(email);
     isNewCustomer = !existingCustomer;
-    console.log(`Customer ${email} - exists in Shopify: ${!isNewCustomer}`);
   } else {
-    console.log('Cannot check customer existence - no admin token');
   }
 
   const code = generateVerificationCode();
@@ -5373,8 +5169,6 @@ app.post('/auth/verify-code', async (req, res) => {
     appRefreshTokens.delete(refreshToken);
     await persistSessions();
   
-    console.log(`🔄 Refreshed tokens for ${refreshData.email}`);
-    console.log(`   New access token expires in: ${Math.round(config.tokenLifetimes.accessToken / (24 * 60 * 60))} days`);
   
     res.json({
       success: true,
@@ -5388,9 +5182,6 @@ app.post('/auth/verify-code', async (req, res) => {
 
   config.verificationCodes.delete(sessionId);
 
-  console.log(`✅ Created ${requestLongLivedToken ? 'long-lived' : 'standard'} session for ${email}`);
-  console.log(`   Access token expires in: ${Math.round(accessTokenLifetime / (24 * 60 * 60))} days`);
-  console.log(`   Refresh token expires in: ${Math.round(config.tokenLifetimes.refreshToken / (24 * 60 * 60))} days`);
 
   res.json({
     success: true,
@@ -5409,7 +5200,6 @@ const authenticateAppToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    console.log('❌ No authorization header provided');
     return res.status(401).json({ error: 'No token provided' });
   }
 
@@ -5418,7 +5208,6 @@ const authenticateAppToken = async (req, res, next) => {
   let session = sessions.get(token);
 
   if (!session) {
-    console.log(`❌ Session not found for token prefix: ${token.substring(0, 8)}...`);
 
     // 🔥 FIX: Do NOT create temporary sessions - reject invalid tokens
     return res.status(401).json({ 
@@ -5429,7 +5218,6 @@ const authenticateAppToken = async (req, res, next) => {
   
   // 🔥 FIX: Check if session has expired
   if (session.expiresAt && session.expiresAt < Date.now()) {
-    console.log(`❌ Session expired for ${session.email}`);
     sessions.delete(token);
     await persistSessions();
 
@@ -5442,7 +5230,6 @@ const authenticateAppToken = async (req, res, next) => {
 
   // 🔥 FIX: Validate session data integrity
   if (!session.email || session.email === 'unknown@example.com' || !session.customerId) {
-    console.log(`❌ Corrupted session detected for token: ${token.substring(0, 20)}...`);
     sessions.delete(token);
     await persistSessions();
     
@@ -5465,9 +5252,6 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
   // Suggest refresh if token expires within warning period
   const shouldRefresh = daysUntilExpiry <= config.refreshThresholds.warningDays;
   
-  console.log(`✅ Token validation successful for ${session.email}`);
-  console.log(`   Days until expiry: ${daysUntilExpiry}`);
-  console.log(`   Should refresh: ${shouldRefresh}`);
   
   res.json({
     valid: true,
@@ -5586,10 +5370,8 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
     
     const edges = response.data?.data?.automaticDiscountNodes?.edges || [];
     
-    console.log(`🔍 Found ${edges.length} ACTIVE automatic discounts from query`);
     
     if (edges.length === 0) {
-      console.log('❌❌❌ No active automatic discounts found - returning FALSE');
       return res.json({ success: true, isActive: false, code: 'APP25', discounts: [] });
     }
 
@@ -5667,11 +5449,9 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
       };
       
       activeDiscounts.push(discountInfo);
-      console.log(`  ✅ "${d.title}" - ${percentage * 100}% - Applies to: ${appliesTo}${appliesTo === 'products' ? ` (${productIds.length} products)` : ''}${appliesTo === 'collections' ? ` (${collectionIds.length} collections)` : ''}`);
     }
     
     if (activeDiscounts.length === 0) {
-      console.log('❌❌❌ No valid percentage discounts found - returning FALSE');
       return res.json({ success: true, isActive: false, code: 'APP25', discounts: [] });
     }
     
@@ -5684,7 +5464,6 @@ app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
         current.percentage > best.percentage ? current : best, activeDiscounts[0]);
     }
     
-    console.log(`🎉🎉🎉 Returning ${activeDiscounts.length} active discounts - Best global: ${bestGlobalDiscount.title} (${bestGlobalDiscount.percentage}%)`);
     
     return res.json({
       success: true,
@@ -5712,11 +5491,9 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
   try {
     // If Admin API token is not configured, skip Admin API calls and return null
     if (!config.adminToken) {
-      console.log('⚠️ Admin token not configured - skipping shopify customer access token creation');
       return null;
     }
 
-    console.log('🔑 Creating Shopify customer access token for:', customerEmail);
     
     // Since we don't have the customer's password (email verification system), 
     // we'll use a special approach for store credit functionality
@@ -5755,19 +5532,16 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
     const storeCreditAccounts = storeCreditResponse.data?.data?.customer?.storeCreditAccounts?.edges || [];
     let totalStoreCredit = 0;
     
-    console.log(`🔍 Store credit accounts found: ${storeCreditAccounts.length}`);
     storeCreditAccounts.forEach((edge, index) => {
       const balance = edge.node?.balance;
       if (balance?.amount) {
         const amount = parseFloat(balance.amount);
         totalStoreCredit += amount;
-        console.log(`💳 Account ${index + 1}: ${amount} ${balance.currencyCode}`);
       }
     });
     
     // Only create token if customer has store credit
     if (totalStoreCredit <= 0) {
-      console.log(`💳 No store credit found (${totalStoreCredit}€) - no token needed`);
       return null;
       
       // 🧪 TEMPORARY: Test store credit override (commented out to use real amounts)
@@ -5775,7 +5549,6 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
       // totalStoreCredit = 25.50; // Test amount
     }
     
-    console.log(`💰 Customer has store credit: ${totalStoreCredit}€ - creating access token`);
     
     // For store credit functionality, we'll create a temporary token
     // This is a simplified approach since we don't have password authentication
@@ -5792,7 +5565,6 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
     // Create a JWT token that represents the customer access token
     const customerAccessToken = jwt.sign(tokenPayload, config.privateKey, { algorithm: 'RS256' });
     
-    console.log('✅ Created customer access token for store credit functionality');
     return customerAccessToken;
     
   } catch (error) {
@@ -5805,7 +5577,6 @@ async function createShopifyCustomerAccessToken(customerEmail, customerId) {
 app.get('/customer/profile', authenticateAppToken, async (req, res) => {
   try {
     const customerEmail = req.session.email;
-    console.log('👤 Fetching complete profile for:', customerEmail);
 
     const query = `
       query getCompleteCustomer($customerId: ID!) {
@@ -5994,7 +5765,6 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       }, {}) || {}
     };
 
-    console.log('✅ Complete profile fetched successfully');
     res.json({ customer: profile });
 
   } catch (error) {
@@ -6012,8 +5782,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     }
 
     const customerEmail = req.session.email;
-    console.log('📋 Fetching orders for customer:', customerEmail);
-    console.log('🔍 Using SIMPLE Shopify Admin API query...');
 
     // 🔥 MINIMAL QUERY - Only 100% guaranteed fields
     const query = `
@@ -6135,11 +5903,9 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     }
 
     const orderEdges = response.data?.data?.customer?.orders?.edges || [];
-    console.log(`✅ Successfully fetched ${orderEdges.length} orders using SIMPLE query`);
     // Cache orders for this customer for quick fallback if Admin API is temporarily unavailable
     try {
       ordersCache.set(req.session.customerId, { ordersRaw: orderEdges, fetchedAt: Date.now() });
-      console.log('✅ Cached orders for customer:', req.session.customerId);
     } catch (cacheErr) {
       console.error('⚠️ Failed to cache orders:', cacheErr.message || cacheErr);
     }
@@ -6191,7 +5957,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
           
           // Handle case where variant is null
           if (!variant) {
-            console.log('⚠️ Found line item with null variant:', lineItem.title);
             return {
               id: lineItem.id,
               title: lineItem.title,
@@ -6244,7 +6009,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
       };
     });
 
-    console.log(`✅ Transformed ${orders.length} orders for Flutter app`);
     
     res.json({
       orders: orders,
@@ -6260,7 +6024,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
     // Try returning cached orders if available
     const cached = ordersCache.get(req.session.customerId);
     if (cached && cached.ordersRaw) {
-      console.log('🔁 Returning cached orders due to upstream failure');
       const orderEdges = cached.ordersRaw || [];
       const orders = orderEdges.map(edge => {
         const order = edge.node;
@@ -6306,7 +6069,6 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
 app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
   try {
     const { orderId } = req.params;
-    console.log('📋 Fetching complete order details for:', orderId);
 
     const query = `
       query getOrderDetails($orderId: ID!) {
@@ -7811,7 +7573,6 @@ app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
                        order.displayFinancialStatus !== 'REFUNDED'
     };
 
-    console.log(`✅ Complete order details prepared with ${transformedOrder.lineItems.length} items`);
     res.json({ order: transformedOrder });
 
   } catch (error) {
@@ -7826,7 +7587,6 @@ app.get('/customer/orders/:orderId', authenticateAppToken, async (req, res) => {
 app.get('/customer/analytics', authenticateAppToken, async (req, res) => {
   try {
     const { period = '1year' } = req.query;
-    console.log('📊 Fetching customer analytics for:', req.session.email);
 
     // Calculate date range
     const endDate = new Date();
@@ -7972,7 +7732,6 @@ app.get('/customer/analytics', authenticateAppToken, async (req, res) => {
       });
     });
 
-    console.log('✅ Customer analytics calculated successfully');
     res.json({ analytics });
 
   } catch (error) {
@@ -7998,7 +7757,6 @@ app.post('/analytics/track-purchase', express.json(), async (req, res) => {
     const apiSecret = process.env.GA_API_SECRET;
 
     if (!measurementId || !apiSecret) {
-      console.warn('⚠️ GA_MEASUREMENT_ID or GA_API_SECRET not configured - cannot forward analytics');
       return res.status(501).json({ success: false, error: 'GA4 measurement not configured on server' });
     }
 
@@ -8044,7 +7802,6 @@ app.post('/analytics/track-purchase', express.json(), async (req, res) => {
 
     const endpoint = `https://www.google-analytics.com/mp/collect?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`;
 
-    console.log('📡 Forwarding purchase event to GA4:', { transaction_id: purchaseEvent.params.transaction_id, value: purchaseEvent.params.value, itemsCount: purchaseEvent.params.items.length });
 
     const gaRes = await axios.post(endpoint, payload, { headers: { 'Content-Type': 'application/json' } });
 
@@ -8052,7 +7809,6 @@ app.post('/analytics/track-purchase', express.json(), async (req, res) => {
       return res.json({ success: true });
     }
 
-    console.warn('⚠️ GA4 responded with non-2xx:', gaRes.status, gaRes.data);
     return res.status(502).json({ success: false, error: 'GA4 forwarding failed', details: gaRes.data });
 
   } catch (err) {
@@ -8066,7 +7822,6 @@ app.post('/analytics/track-purchase', express.json(), async (req, res) => {
 // GET /customer/wishlist - Customer wishlist/favorites (Firebase + Shopify hybrid)
 app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
   try {
-    console.log('❤️ Fetching wishlist for:', req.session.email);
 
     let wishlistProductIds = [];
     let wishlistItems = []; // ✅ Store full wishlist items with variant info
@@ -8159,7 +7914,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
               req.session.email,
               wishlistProductIds
             );
-            console.log('🔄 Successfully synced Shopify wishlist to Firebase');
           } catch (syncError) {
             console.error('❌ Failed to sync Shopify wishlist to Firebase:', syncError.message);
           }
@@ -8369,7 +8123,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
       };
     });
 
-    console.log(`✅ Fetched ${wishlist.length} wishlist items`);
     res.json({ wishlist });
 
   } catch (error) {
@@ -8382,9 +8135,6 @@ app.get('/customer/wishlist', authenticateAppToken, async (req, res) => {
 app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
   try {
     const { productId, action = 'add', variantId, selectedOptions } = req.body; // action: 'add' or 'remove'
-    console.log(`❤️ ${action === 'add' ? 'Adding to' : 'Removing from'} wishlist:`, productId);
-    console.log('   Variant ID:', variantId);
-    console.log('   Selected Options:', selectedOptions);
 
     let result;
     let useFirebase = firebaseEnabled && wishlistService;
@@ -8397,7 +8147,6 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
           let productData = null;
           
           try {
-            console.log('🛍️ Fetching product data from Shopify for Firebase storage');
             const productQuery = `
               query getProduct($productId: ID!) {
                 product(id: $productId) {
@@ -8474,7 +8223,6 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
                 sku: useVariant?.sku || ''
               };
               
-              console.log('✅ Fetched product data:', productData);
             }
           } catch (shopifyError) {
             console.error('⚠️ Failed to fetch product data from Shopify:', shopifyError.message);
@@ -8509,7 +8257,6 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
             selectedOptions
           );
         }
-        console.log('🔥 Firebase wishlist operation successful');
       } catch (firebaseError) {
         console.error('❌ Firebase wishlist operation failed, falling back to Shopify:', firebaseError.message);
         useFirebase = false;
@@ -8634,7 +8381,6 @@ app.post('/customer/wishlist', authenticateAppToken, async (req, res) => {
       };
     }
 
-    console.log(`✅ Wishlist updated successfully - ${action}ed product ${productId}`);
     
     // Invalidate public wishlist caches (extract numeric ID for cache key)
     const numericId = req.session.customerId?.replace?.('gid://shopify/Customer/', '') || req.session.customerId;
@@ -8661,7 +8407,6 @@ app.post('/shopify/create-customer-token', authenticateAppToken, async (req, res
       });
     }
     
-    console.log('🔑 Getting store credit for customer:', customerEmail);
     
     // 🎯 SIMPLIFIED SOLUTION: Return store credit information for manual application
     // In a real implementation, you would:
@@ -8685,7 +8430,6 @@ app.post('/shopify/create-customer-token', authenticateAppToken, async (req, res
     const timestamp = Date.now();
     const discountCode = `STORECREDIT${timestamp}`;
     
-    console.log(`💰 Found ${storeCreditAmount} EUR store credit for ${customerEmail}`);
     
     // TODO: Create actual discount code in Shopify
     // For now, we'll return the information for the app to handle
@@ -8716,7 +8460,6 @@ app.post('/shopify/customer-account-api', authenticateAppToken, async (req, res)
       return res.status(400).json({ error: 'Not authenticated' });
     }
     
-    console.log('🔄 Proxying Customer Account API request for:', customerEmail);
     
     // Get customer from Shopify Admin API first
     const customerQuery = `
@@ -8933,7 +8676,6 @@ app.post('/shopify/customer-account-api', authenticateAppToken, async (req, res)
       }
     };
     
-    console.log('✅ Returning transformed customer data');
     res.json(transformedData);
     
   } catch (error) {
@@ -8952,7 +8694,6 @@ app.post('/shopify/customer-account-api', authenticateAppToken, async (req, res)
 // GET /customer/loyalty - Get loyalty points and rewards
 app.get('/customer/loyalty', authenticateAppToken, async (req, res) => {
   try {
-    console.log('🏆 Fetching loyalty data for:', req.session.email);
 
     const query = `
       query getCustomerLoyalty($customerId: ID!) {
@@ -9154,7 +8895,6 @@ app.get('/customer/loyalty', authenticateAppToken, async (req, res) => {
       }))
     };
 
-    console.log(`✅ Loyalty data calculated - Tier: ${tier}, Points: ${currentPoints}`);
     res.json({ loyalty: loyaltyData });
 
   } catch (error) {
@@ -9167,7 +8907,6 @@ app.get('/customer/loyalty', authenticateAppToken, async (req, res) => {
 app.post('/customer/loyalty/redeem', authenticateAppToken, async (req, res) => {
   try {
     const { rewardId } = req.body;
-    console.log('🎁 Redeeming reward:', rewardId);
 
     // Get current points
     const query = `
@@ -9275,7 +9014,6 @@ app.post('/customer/loyalty/redeem', authenticateAppToken, async (req, res) => {
         break;
     }
 
-    console.log(`✅ Reward redeemed successfully - ${cost} points deducted`);
     res.json({
       success: true,
       rewardId,
@@ -9298,7 +9036,6 @@ app.post('/customer/loyalty/redeem', authenticateAppToken, async (req, res) => {
 app.get('/customer/recommendations', authenticateAppToken, async (req, res) => {
   try {
     const { type = 'all', limit = 20 } = req.query;
-    console.log('🎯 Generating recommendations for:', req.session.email);
 
     // Get customer purchase history for recommendations
     const query = `
@@ -9539,7 +9276,6 @@ app.get('/customer/recommendations', authenticateAppToken, async (req, res) => {
       };
     });
 
-    console.log(`✅ Generated ${recommendations.length} personalized recommendations`);
     res.json({
       recommendations,
       type,
@@ -9562,7 +9298,6 @@ app.get('/customer/recommendations', authenticateAppToken, async (req, res) => {
 // GET /customer/recently-viewed - Get recently viewed products
 app.get('/customer/recently-viewed', authenticateAppToken, async (req, res) => {
   try {
-    console.log('👀 Fetching recently viewed products for:', req.session.email);
 
     // Get recently viewed from customer metafield
     const query = `
@@ -9666,7 +9401,6 @@ app.get('/customer/recently-viewed', authenticateAppToken, async (req, res) => {
         vendor: product.vendor
       }));
 
-    console.log(`✅ Fetched ${recentlyViewed.length} recently viewed products`);
     res.json({ recentlyViewed });
 
   } catch (error) {
@@ -9679,7 +9413,6 @@ app.get('/customer/recently-viewed', authenticateAppToken, async (req, res) => {
 app.post('/customer/recently-viewed', authenticateAppToken, async (req, res) => {
   try {
     const { productId } = req.body;
-    console.log('👀 Adding to recently viewed:', productId);
 
     // Get current recently viewed
     const getQuery = `
@@ -9782,7 +9515,6 @@ app.post('/customer/recently-viewed', authenticateAppToken, async (req, res) => 
       }
     );
 
-    console.log(`✅ Added product ${productId} to recently viewed`);
     res.json({ success: true, recentlyViewedCount: recentlyViewed.length });
 
   } catch (error) {
@@ -9796,7 +9528,6 @@ app.post('/customer/recently-viewed', authenticateAppToken, async (req, res) => 
 // GET /customer/support-tickets - Get customer support tickets
 app.get('/customer/support-tickets', authenticateAppToken, async (req, res) => {
   try {
-    console.log('🎫 Fetching support tickets for:', req.session.email);
 
     // Get support tickets from customer metafield
     const query = `
@@ -9839,7 +9570,6 @@ app.get('/customer/support-tickets', authenticateAppToken, async (req, res) => {
     // Sort by creation date (newest first)
     tickets.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    console.log(`✅ Fetched ${tickets.length} support tickets`);
     res.json({ tickets });
 
   } catch (error) {
@@ -9852,7 +9582,6 @@ app.get('/customer/support-tickets', authenticateAppToken, async (req, res) => {
 app.post('/customer/support-tickets', authenticateAppToken, async (req, res) => {
   try {
     const { subject, message, category = 'general', priority = 'normal', orderId = null } = req.body;
-    console.log('🎫 Creating support ticket for:', req.session.email);
 
     if (!subject || !message) {
       return res.status(400).json({ error: 'Subject and message are required' });
@@ -9971,7 +9700,6 @@ app.post('/customer/support-tickets', authenticateAppToken, async (req, res) => 
       }
     );
 
-    console.log(`✅ Created support ticket: ${newTicket.id}`);
     res.json({ 
       success: true, 
       ticket: newTicket,
@@ -9989,7 +9717,6 @@ app.post('/customer/support-tickets', authenticateAppToken, async (req, res) => 
 // GET /customer/subscriptions - Get subscription preferences
 app.get('/customer/subscriptions', authenticateAppToken, async (req, res) => {
   try {
-    console.log('📧 Fetching subscription preferences for:', req.session.email);
 
     const query = `
       query getCustomerSubscriptions($customerId: ID!) {
@@ -10044,7 +9771,6 @@ app.get('/customer/subscriptions', authenticateAppToken, async (req, res) => {
         notificationPrefs = JSON.parse(customer.notificationPrefs.value);
       }
     } catch (e) {
-      console.log('Error parsing subscription preferences:', e);
     }
 
     const subscriptions = {
@@ -10088,7 +9814,6 @@ app.get('/customer/subscriptions', authenticateAppToken, async (req, res) => {
       }
     };
 
-    console.log('✅ Subscription preferences fetched successfully');
     res.json({ subscriptions });
 
   } catch (error) {
@@ -10101,7 +9826,6 @@ app.get('/customer/subscriptions', authenticateAppToken, async (req, res) => {
 app.put('/customer/subscriptions', authenticateAppToken, async (req, res) => {
   try {
     const { preferences } = req.body;
-    console.log('📧 Updating subscription preferences for:', req.session.email);
 
     // Update main marketing consents
     if (preferences.emailMarketing !== undefined || preferences.smsMarketing !== undefined) {
@@ -10242,7 +9966,6 @@ app.put('/customer/subscriptions', authenticateAppToken, async (req, res) => {
       );
     }
 
-    console.log('✅ Subscription preferences updated successfully');
     res.json({ 
       success: true, 
       message: 'Abonnement-Einstellungen wurden erfolgreich aktualisiert' 
@@ -10259,7 +9982,6 @@ app.put('/customer/subscriptions', authenticateAppToken, async (req, res) => {
 // GET /customer/dashboard - Complete customer dashboard data
 app.get('/customer/dashboard', authenticateAppToken, async (req, res) => {
   try {
-    console.log('📊 Fetching complete dashboard for:', req.session.email);
 
     const query = `
       query getCustomerDashboard($customerId: ID!) {
@@ -10482,7 +10204,6 @@ app.get('/customer/dashboard', authenticateAppToken, async (req, res) => {
       ].filter(action => action.available)
     };
 
-    console.log('✅ Complete dashboard data prepared');
     res.json({ dashboard });
 
   } catch (error) {
@@ -10497,7 +10218,6 @@ app.get('/customer/dashboard', authenticateAppToken, async (req, res) => {
 app.post('/customer/delete-account', authenticateAppToken, async (req, res) => {
   try {
     const { confirmEmail, reason } = req.body;
-    console.log('🗑️ Account deletion requested by:', req.session.email);
 
     if (confirmEmail !== req.session.email) {
       return res.status(400).json({ 
@@ -10521,7 +10241,6 @@ app.post('/customer/delete-account', authenticateAppToken, async (req, res) => {
     // 3. Schedule the actual deletion after the required waiting period
     // 4. Notify relevant systems
 
-    console.log('✅ Account deletion request created');
     res.json({
       success: true,
       deletionRequest,
@@ -10539,7 +10258,6 @@ app.post('/customer/delete-account', authenticateAppToken, async (req, res) => {
 // GET /customer/data-export - Export customer data (GDPR compliance)
 app.get('/customer/data-export', authenticateAppToken, async (req, res) => {
   try {
-    console.log('📋 Data export requested by:', req.session.email);
 
     // Get complete customer data for export
     const query = `
@@ -10673,7 +10391,6 @@ app.get('/customer/data-export', authenticateAppToken, async (req, res) => {
       }
     };
 
-    console.log('✅ Customer data export prepared');
     res.json({
       success: true,
       exportData,
@@ -10695,7 +10412,6 @@ app.get('/customer/data-export', authenticateAppToken, async (req, res) => {
 app.get('/customer/orders/:orderId/tracking', authenticateAppToken, async (req, res) => {
   try {
     const { orderId } = req.params;
-    console.log('📦 Fetching tracking info for order:', orderId);
 
     const query = `
       query getOrderTracking($orderId: ID!) {
@@ -10903,7 +10619,6 @@ app.get('/customer/orders/:orderId/tracking', authenticateAppToken, async (req, 
       canTrack: fulfillments.length > 0
     };
 
-    console.log(`✅ Tracking data prepared for ${fulfillments.length} fulfillments`);
     res.json({ tracking: trackingData });
 
   } catch (error) {
@@ -10920,7 +10635,6 @@ app.post('/customer/orders/:orderId/return', authenticateAppToken, async (req, r
     const { orderId } = req.params;
     const { items, reason, notes, preferredResolution = 'refund' } = req.body;
     
-    console.log('↩️ Processing return request for order:', orderId);
 
     if (!items || items.length === 0) {
       return res.status(400).json({ error: 'No items specified for return' });
@@ -11006,7 +10720,6 @@ app.post('/customer/orders/:orderId/return', authenticateAppToken, async (req, r
     // 4. Send confirmation email
     // 5. Create return in Shopify if using Customer Account API
 
-    console.log(`✅ Return request created: ${returnRequest.id}`);
     
     res.json({
       success: true,
@@ -11030,7 +10743,6 @@ app.post('/customer/orders/:orderId/return', authenticateAppToken, async (req, r
 app.get('/customer/returns/:returnId', authenticateAppToken, async (req, res) => {
   try {
     const { returnId } = req.params;
-    console.log('↩️ Fetching return status:', returnId);
 
     // In a real implementation, fetch from your database
     // For demo, returning mock data
@@ -11116,7 +10828,6 @@ app.post('/customer/orders/:orderId/reorder', authenticateAppToken, async (req, 
     const { orderId } = req.params;
     const { selectedItems = null, quantities = {} } = req.body;
     
-    console.log('🔄 Processing reorder for:', orderId);
 
     // Get original order details
     const query = `
@@ -11296,7 +11007,6 @@ app.post('/customer/orders/:orderId/reorder', authenticateAppToken, async (req, 
       ]
     };
 
-    console.log(`✅ Reorder processed - ${cartItems.length} items available`);
     res.json(reorderResult);
 
   } catch (error) {
@@ -11310,7 +11020,6 @@ app.post('/customer/orders/:orderId/reorder', authenticateAppToken, async (req, 
 // GET /customer/search-history - Customer's search history
 app.get('/customer/search-history', authenticateAppToken, async (req, res) => {
   try {
-    console.log('🔍 Fetching search history for:', req.session.email);
 
     // Get search history from customer metafield
     const query = `
@@ -11387,7 +11096,6 @@ app.get('/customer/search-history', authenticateAppToken, async (req, res) => {
 app.post('/customer/search-history', authenticateAppToken, async (req, res) => {
   try {
     const { query, resultsCount = 0, category = null } = req.body;
-    console.log('🔍 Adding search to history:', query);
 
     if (!query || query.trim().length < 2) {
       return res.status(400).json({ error: 'Invalid search query' });
@@ -11508,7 +11216,6 @@ app.post('/customer/search-history', authenticateAppToken, async (req, res) => {
 app.get('/customer/notifications', authenticateAppToken, async (req, res) => {
   try {
     const { type = 'all', unreadOnly = false } = req.query;
-    console.log('🔔 Fetching notifications for:', req.session.email);
 
     // Get notifications from customer metafield
     const query = `
@@ -11573,7 +11280,6 @@ app.get('/customer/notifications', authenticateAppToken, async (req, res) => {
       ]
     };
 
-    console.log(`✅ Fetched ${filteredNotifications.length} notifications`);
     res.json(notificationData);
 
   } catch (error) {
@@ -11586,7 +11292,6 @@ app.get('/customer/notifications', authenticateAppToken, async (req, res) => {
 app.post('/customer/notifications/:notificationId/read', authenticateAppToken, async (req, res) => {
   try {
     const { notificationId } = req.params;
-    console.log('👁️ Marking notification as read:', notificationId);
 
     // Get current notifications
     const getQuery = `
@@ -11691,13 +11396,10 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 
     // Non-sensitive debug: log that eligibility check was received and which user requested it
     try {
-      console.log(`🔍 Checking return eligibility for order: ${orderId} (user: ${customerEmail})`);
     } catch (e) {
-      console.log('🔍 Checking return eligibility (user unknown)');
     }
     
     // 🔥 REMOVED: await ensureValidShopifyToken(customerEmail);
-    console.log('🔍 Using Shopify Admin API directly to check return eligibility...');
 
     // Resolve order identifier: accept full GID or plain order number (e.g. 135798)
     let resolvedOrderId = orderId;
@@ -11730,9 +11432,7 @@ app.get('/orders/:orderId/return-eligibility', authenticateAppToken, async (req,
 
         if (foundOrder && foundOrder.id) {
           resolvedOrderId = foundOrder.id;
-          console.log(`🔎 Resolved order number ${orderId} -> ${resolvedOrderId}`);
         } else {
-          console.log(`❌ Could not resolve order identifier: ${orderId}`);
           return res.status(404).json({ eligible: false, reason: 'Order not found', returnableItems: [] });
         }
       }
@@ -11775,23 +11475,12 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       });
     }
 
-    console.log('📦 Processing return request:', {
-      orderId: returnRequest.orderId,
-      orderNumber: returnRequest.orderNumber,
-      itemCount: returnRequest.items?.length,
-      reason: returnRequest.reason,
-      additionalNotes: returnRequest.additionalNotes,
-      preferredResolution: returnRequest.preferredResolution,
-      customer: customerEmail
-    });
 
     // 🔥 ADDED: Process exchange selections from Flutter app
     const exchangeSelections = req.body.exchangeSelections || [];
     const refundMethods = req.body.refundMethods || {};
     const customerNote = req.body.customerNote || returnRequest.additionalNotes;
     
-    console.log('🔍 Exchange selections received:', exchangeSelections.length);
-    console.log('🔍 Refund methods received:', Object.keys(refundMethods).length);
     
     // Map exchange selections to return items
     if (exchangeSelections.length > 0) {
@@ -11801,7 +11490,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         );
         if (item && selection.wantedVariantId) {
           item.requestedExchangeVariantId = selection.wantedVariantId;
-          console.log(`📦 Item ${item.lineItemId} wants exchange to: ${selection.wantedVariantId}`);
         }
       }
     }
@@ -11812,13 +11500,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         const refundMethod = refundMethods[item.fulfillmentLineItemId];
         if (refundMethod) {
           item.refundMethod = refundMethod;
-          console.log(`💰 Item ${item.lineItemId} refund method: ${refundMethod}`);
         }
       }
     }
 
     // 🔥 FIXED: Try Customer Account API with proper authentication first
-    console.log('🚀 Trying Customer Account API for REQUESTED status...');
     try {
       // First, get customer access token using Admin API
       const customerMutation = `
@@ -11831,17 +11517,14 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       `;
       
       // Extract customer ID from the order (we need this for Customer Account API)
-      console.log('🔍 Getting customer info for Customer Account API authentication...');
       
       // Skip Customer Account API if we don't have proper tokens
-      console.log('⚠️ Customer Account API requires complex authentication setup, trying direct Admin API approaches...');
       throw new Error('Customer Account API authentication not configured');
       
     } catch (customerApiError) {
       console.error('❌ Customer Account API failed:', customerApiError?.message);
       
       // 🔥 APPROACH 2: Try creating as DRAFT first, then convert to REQUEST
-      console.log('🚀 Trying Admin API with draft-to-request conversion...');
       try {
         // Use the standardized input builder
         const input = buildReturnRequestInputFromApp({
@@ -11880,9 +11563,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           }
         };
 
-        console.log('📤 Creating return with request flag...');
-        console.log('🔥 Return line items count:', input.returnLineItems.length);
-        console.log('🔥 Note preview:', input.note?.substring(0, 200) + '...');
         const draftResponse = await axios.post(
           `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
           { query: draftMutation, variables: draftVariables },
@@ -11910,14 +11590,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           throw new Error('Draft return creation failed');
         }
 
-        console.log('✅ Return created:', createdReturn.id);
-        console.log('🔍 Return status from Shopify:', createdReturn.status);
         
         // Save exchange selections to Order metafield for staff processing
         await saveExchangeSelectionsMetafield(input.orderId, exchangeSelections);
         
         // The requestReturn flag should create it in REQUESTED status
-        console.log('✅ Return created via Admin API with request flag');
         try {
           const requestMutation = `
             mutation returnRequest($id: ID!, $requestedAt: DateTime!) {
@@ -11951,12 +11628,9 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
             }
           );
 
-          console.log('🎯 Return request conversion response:', requestResponse.data);
         } catch (conversionError) {
-          console.log('⚠️ Conversion to requested failed, but return was created:', conversionError?.message);
         }
 
-        console.log('✅ Return created via Admin API draft method');
         return res.json({
           success: true,
           returnId: createdReturn.id,
@@ -11972,7 +11646,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     }
 
     // 🔥 APPROACH 3: Try returnCreate mutation with request flag (alternative approach)
-    console.log('🚀 Trying returnCreate with alternate structure...');
     try {
       const alternateMutation = `
         mutation returnCreate($returnInput: ReturnInput!) {
@@ -11999,7 +11672,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
       };
 
-      console.log('📤 Creating return with alternate approach...');
       const alternateResponse = await axios.post(
         `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
         { query: alternateMutation, variables: alternateVariables },
@@ -12012,7 +11684,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       );
 
       if (alternateResponse.data.errors) {
-        console.log('⚠️ Alternate returnCreate failed:', alternateResponse.data.errors[0].message);
         throw new Error('Alternate returnCreate failed');
       }
 
@@ -12028,8 +11699,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
       const createdAlternateReturn = alternateResult.return;
       if (createdAlternateReturn && createdAlternateReturn.id) {
-        console.log('✅ Return created via alternate returnCreate:', createdAlternateReturn.id);
-        console.log('🔍 Alternate return status:', createdAlternateReturn.status);
         
         return res.json({
           success: true,
@@ -12046,9 +11715,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     }
 
     // 🔥 FALLBACK: Standard GraphQL Admin API (creates OPEN status)
-    console.log('🔄 Falling back to standard returnCreate (will be OPEN status, then request)...');
     if (config.adminToken) {
-      console.log('🚀 Trying REST Admin API for return request creation...');
       try {
         // Extract order ID from GID
         const numericOrderId = returnRequest.orderId.replace('gid://shopify/Order/', '');
@@ -12087,7 +11754,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           throw new Error('No valid return line items for REST API');
         }
 
-        console.log('📤 Creating return request via REST Admin API...');
         const restResponse = await axios.post(
           `https://${config.shopDomain}/admin/api/2024-10/orders/${numericOrderId}/return_requests.json`,
           returnRequestPayload,
@@ -12101,8 +11767,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
         const createdReturnRequest = restResponse.data?.return_request;
         if (createdReturnRequest && createdReturnRequest.id) {
-          console.log('✅ Return request created via REST Admin API:', createdReturnRequest.id);
-          console.log('🔍 Return request status:', createdReturnRequest.status);
           
           return res.json({
             success: true,
@@ -12115,13 +11779,11 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
       } catch (restError) {
         console.error('❌ REST Admin API failed:', restError?.response?.data || restError?.message);
-        console.log('⚠️ Falling back to GraphQL Admin API...');
       }
     }
 
     // 🔥 FALLBACK: GraphQL Admin API (creates returns in OPEN status)
     if (config.adminToken) {
-      console.log('🚀 Using Admin API for return creation (safer path)...');
       try {
         // Reuse the API-version-safe eligibility checker to get fulfillmentLineItem IDs
         const eligibility = await checkShopifyReturnEligibility(returnRequest.orderId, null);
@@ -12136,7 +11798,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         for (const requestedItem of returnRequest.items || []) {
           const match = eligibility.returnableItems.find(ri => ri.id === requestedItem.lineItemId || ri.title === requestedItem.title);
           if (!match) {
-            console.log('⚠️ Requested item not found among returnable items:', requestedItem);
             continue;
           }
 
@@ -12204,7 +11865,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           returnRequestInput.exchangeLineItems = exchangeLineItems;
         }
 
-        console.log('🔥 Creating return REQUEST with Admin API - payload:', { returnLineItemsCount: returnLineItems.length });
 
         const returnResponse = await axios.post(config.adminApiUrl, {
           query: returnMutation,
@@ -12233,8 +11893,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           throw new Error('Admin API did not return created return request');
         }
 
-        console.log('✅ Return REQUEST created via Admin API:', createdReturnRequest.id);
-        console.log('🔍 Return request status from Shopify:', createdReturnRequest.status);
         
         // Return request should have REQUESTED status which displays as "Rückgabe angefragt"
         return res.json({
@@ -12257,7 +11915,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     
   // 🔥 FALLBACK: If Customer Account API fails, try Admin API
   if (!shopifyResult.success && shopifyResult.shouldFallbackToAdminAPI) {
-    console.log('🔄 Customer Account API failed, falling back to Admin API...');
     
     try {
       // Use the same Admin API logic from above
@@ -12295,7 +11952,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
 
       if (adminApiResult.success) {
         shopifyResult = adminApiResult;
-        console.log('✅ Successfully created return via Admin API fallback');
       }
     } catch (fallbackError) {
       console.error('❌ Admin API fallback also failed:', fallbackError?.message);
@@ -12330,7 +11986,6 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
     // Here you would save to your database
     // await saveReturnToDatabase(backendReturnData);
 
-    console.log('✅ Return request submitted successfully:', shopifyResult.shopifyReturnRequestId);
 
     res.json({
       success: true,
@@ -12361,59 +12016,43 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
       });
     }
 
-    console.log('📋 Fetching return history for:', customerEmail);
-    console.log('📋 Request parameters:', req.query);
     
     // Check what shipping-related parameters were requested
     const includeShipping = req.query.includeShipping === 'true';
     const includeShippingLabels = req.query.includeShippingLabels === 'true';
     const includeTracking = req.query.includeTracking === 'true';
     
-    console.log('🚚 Shipping parameters requested:');
-    console.log('  - includeShipping:', includeShipping);
-    console.log('  - includeShippingLabels:', includeShippingLabels);
-    console.log('  - includeTracking:', includeTracking);
     
     // Try Customer Account API first
     let shopifyReturns = [];
     try {
       shopifyReturns = await getShopifyCustomerReturns(customerToken);
-      console.log(`✅ Customer Account API returned ${shopifyReturns.length} returns`);
     } catch (error) {
-      console.log('⚠️ Customer Account API failed, trying Admin API fallback:', error.message);
     }
 
     // If we have few or no returns from Customer Account API, also try Admin API
     // This helps with returns created via Admin API that might not show up immediately
     if (shopifyReturns.length === 0) {
       try {
-        console.log('🔄 Fetching returns from Admin API as fallback...');
         const adminReturns = await getAdminApiReturns(customerEmail);
-        console.log(`✅ Admin API returned ${adminReturns.length} returns`);
         
         // Merge results (Admin API format should match our expected format)
         shopifyReturns = [...shopifyReturns, ...adminReturns];
       } catch (adminError) {
-        console.log('⚠️ Admin API fallback also failed:', adminError.message);
       }
     }
     
     // 🔥 NEW: Add shipping label data if requested
     if (includeShipping || includeShippingLabels || includeTracking) {
-      console.log('🚚 Loading real shipping label data...');
       
       for (let i = 0; i < shopifyReturns.length; i++) {
         const returnData = shopifyReturns[i];
-        console.log(`🔍 Loading shipping data for return ${returnData.orderNumber} (ID: ${returnData.id})...`);
         
         // Get real shipping data from storage using the full Shopify GID
         const rs = returnShipping.get(returnData.id) || null;
         
         // Debug: Log what we're looking for and what we found
-        console.log(`  🔍 Looking for shipping data with key: "${returnData.id}"`);
-        console.log(`  📦 Available shipping keys:`, Array.from(returnShipping.keys()));
         if (rs) {
-          console.log(`  ✅ Found shipping data:`, rs);
         }
         
         returnData.shippingLabelUrl = rs?.url || null;
@@ -12424,17 +12063,13 @@ app.get('/returns', authenticateAppToken, async (req, res) => {
         returnData.noShippingRequired = !!(rs?.noShippingRequired);
         
         if (rs) {
-          console.log(`  ✅ Found shipping data for return ${returnData.orderNumber}`);
         } else {
-          console.log(`  ℹ️ No shipping data found for return ${returnData.orderNumber}`);
         }
       }
     } else {
-      console.log('🚚 No shipping data requested - skipping shipping enhancement');
     }
     
     // Log final results
-    console.log(`📊 Final return count: ${shopifyReturns.length} returns for ${customerEmail}`);
     
     res.json({
       success: true,
@@ -12490,9 +12125,7 @@ app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
       try {
         const allReturns = await getShopifyCustomerReturns(customerToken);
         results = allReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
-        console.log(`🔎 Found ${results.length} returns for order ${orderId} via Customer Account API`);
       } catch (err) {
-        console.log('⚠️ Customer Account API failed for order returns:', err.message);
       }
     }
 
@@ -12501,13 +12134,11 @@ app.get('/orders/:orderId/returns', authenticateAppToken, async (req, res) => {
       try {
         const adminReturns = await getAdminApiReturns(customerEmail);
         const matchingAdmin = adminReturns.filter(r => r.orderId === orderId || (r.orderNumber && r.orderNumber.replace('#','') === orderId));
-        console.log(`🔎 Found ${matchingAdmin.length} returns for order ${orderId} via Admin API`);
         // Merge unique by id
         const byId = new Map();
         for (const r of [...results, ...matchingAdmin]) byId.set(r.id, r);
         results = Array.from(byId.values());
       } catch (err) {
-        console.log('⚠️ Admin API order-returns fetch failed:', err.message);
       }
     }
 
@@ -12524,7 +12155,6 @@ app.post('/returns/:returnId/cancel', authenticateAppToken, async (req, res) => 
     const { returnId } = req.params;
     const customerEmail = req.session.email;
     
-    console.log('❌ Cancelling return:', returnId, 'for:', customerEmail);
     
     // In production, update the return status in your database
     // For now, just simulate success
@@ -12593,7 +12223,6 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       return res.json({ amount: 0.0, currency: 'EUR' });
     }
 
-    console.log('Fetching store credit for customer:', req.session.customerId);
 
     const query = `
       query getCustomerStoreCredit($customerId: ID!) {
@@ -12645,8 +12274,6 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       return res.status(502).json({ amount: 0.0, currency: 'EUR' });
     }
 
-    console.log('Store credit response status:', response.status);
-    console.log('Store credit response success:', !response.data.errors);
 
     if (response.data?.errors) {
       console.error('GraphQL errors:', response.data.errors);
@@ -12700,7 +12327,6 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
       }
     });
     
-    console.log('Total store credit:', totalCredit);
 
     // Sync the authoritative balance to local ledger for consistency
     try {
@@ -12709,7 +12335,6 @@ app.get('/customer/store-credit', authenticateAppToken, async (req, res) => {
         const emailLower = customerEmail.toLowerCase();
         setStoreCredit(emailLower, totalCredit);
         await persistStoreCreditLedger();
-        console.log(`💾 Synced authoritative balance ${totalCredit} for ${emailLower} to local ledger`);
       }
     } catch (syncErr) {
       console.error('⚠️ Failed to sync store credit to local ledger:', syncErr.message);
@@ -12734,8 +12359,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     const { updates } = req.body;
     const customerId = req.session.customerId;
     
-    console.log('Updating customer:', customerId);
-    console.log('Updates:', updates);
     
     // First, update the customer's basic info
     let mutationFields = [];
@@ -12798,8 +12421,6 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
       }
     `;
     
-    console.log('GraphQL mutation:', mutation);
-    console.log('Variables:', variables);
     
     const response = await axios.post(
       config.adminApiUrl,
@@ -12857,7 +12478,6 @@ app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
     const customerId = req.session.customerId;
     const customerNumericId = customerId.split('/').pop();
     
-    console.log('Fetching addresses via REST for customer:', customerNumericId);
     
     const response = await axios.get(
       `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses.json`,
@@ -12869,7 +12489,6 @@ app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
       }
     );
     
-    console.log('REST addresses response:', response.data);
     
     const addresses = response.data.addresses || [];
     const formattedAddresses = addresses.map(addr => ({
@@ -12902,8 +12521,6 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
     const customerId = req.session.customerId;
     const customerNumericId = customerId.split('/').pop();
     
-    console.log('Creating new address via REST for customer:', customerNumericId);
-    console.log('Address data:', JSON.stringify(address, null, 2));
     
     const response = await axios.post(
       `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses.json`,
@@ -12929,10 +12546,8 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
       }
     );
     
-    console.log('REST API create response:', response.status, response.data);
     
     if (response.status === 201 && response.data.customer_address) {
-      console.log('Address created successfully via REST');
       res.json({ 
         address: {
           id: `gid://shopify/MailingAddress/${response.data.customer_address.id}`,
@@ -12966,14 +12581,10 @@ app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) 
     const { address } = req.body;
     const customerId = req.session.customerId;
     
-    console.log('Updating address:', addressId);
-    console.log('Customer ID:', customerId);
-    console.log('Address data:', JSON.stringify(address, null, 2));
     
     // CRITICAL: Use REST API instead of GraphQL for address updates
     const shopifyRestUrl = `https://${config.shopDomain}/admin/api/2024-10/customers/${customerId.split('/').pop()}/addresses/${addressId.split('/').pop()}.json`;
     
-    console.log('Using REST API endpoint:', shopifyRestUrl);
     
     const response = await axios.put(
       shopifyRestUrl,
@@ -12999,10 +12610,8 @@ app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) 
       }
     );
     
-    console.log('REST API response:', response.status, response.data);
     
     if (response.status === 200 && response.data.address) {
-      console.log('Address updated successfully via REST');
       res.json({ 
         address: {
           id: `gid://shopify/MailingAddress/${response.data.address.id}`,
@@ -13044,7 +12653,6 @@ app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res
       addressNumericId = addressId;
     }
     
-    console.log('Deleting address via REST:', addressNumericId, 'for customer:', customerNumericId);
     
     const response = await axios.delete(
       `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses/${addressNumericId}.json`,
@@ -13056,13 +12664,10 @@ app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res
       }
     );
     
-    console.log('REST API delete response:', response.status);
     
     if (response.status === 200) {
-      console.log('Address deleted successfully via REST');
       res.json({ success: true });
     } else {
-      console.log('Delete failed with status:', response.status);
       return res.status(400).json({ error: 'Failed to delete address' });
     }
     
@@ -13071,7 +12676,6 @@ app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res
     
     if (error.response?.status === 404) {
       // Address already deleted or doesn't exist
-      console.log('Address not found (404) - treating as success');
       res.json({ success: true });
     } else {
       res.status(500).json({ error: 'Failed to delete address' });
@@ -13085,13 +12689,10 @@ app.post('/customer/address/:addressId/default', authenticateAppToken, async (re
     const { addressId } = req.params;
     const customerId = req.session.customerId;
     
-    console.log('Setting default address:', addressId);
-    console.log('Customer ID:', customerId);
     
     const success = await setAsDefaultAddress(customerId, addressId);
     
     if (success) {
-      console.log('Default address set successfully');
       res.json({ success: true });
     } else {
       res.status(400).json({ error: 'Failed to set default address' });
@@ -13113,7 +12714,6 @@ app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
       return res.status(400).json({ error: 'At least one name field is required' });
     }
     
-    console.log('Updating customer name and all addresses:', customerId);
     
     // First get current customer data with all addresses
     const getCustomerQuery = `
@@ -13500,7 +13100,6 @@ app.post('/api/send-notification', async (req, res) => {
       }
     );
 
-    console.log('Notification sent successfully:', response.data);
     res.json({
       success: true,
       notificationId: response.data.id || 'sent',
@@ -14122,14 +13721,10 @@ app.get('/health', async (req, res) => {
 });
 
 app.get('/debug/sessions', (req, res) => {
-  console.log('🔍 Debug endpoint called - checking session storage...');
-  console.log(`   Sessions in memory: ${sessions.size}`);
-  console.log(`   Refresh tokens in memory: ${appRefreshTokens.size}`);
   
   const sessionList = [];
   
   for (const [token, session] of sessions.entries()) {
-    console.log(`   Found session: ${token.substring(0, 8)}... for ${session.email}`);
     sessionList.push({
       tokenPreview: token.substring(0, 20) + '...',
       email: session.email,
@@ -14171,7 +13766,6 @@ app.get('/debug/sessions', (req, res) => {
 // 🔥 ADD this new endpoint to check disk storage
 app.get('/debug/disk-sessions', async (req, res) => {
   try {
-    console.log('📂 Checking disk storage...');
     
     let diskSessions = [];
     let diskRefreshTokens = [];
@@ -14185,14 +13779,12 @@ app.get('/debug/disk-sessions', async (req, res) => {
         const sessionEntries = JSON.parse(sessionData);
         diskSessions = sessionEntries;
         sessionsFileExists = true;
-        console.log(`📂 Found ${sessionEntries.length} sessions on disk`);
       } catch (jsonParseError) {
         console.error('❌ [DEBUG_DISK] Failed to parse sessions JSON:', jsonParseError.message);
         console.error('❌ [DEBUG_DISK] Session data length:', sessionData?.length || 0);
         sessionsFileExists = false;
       }
     } catch (error) {
-      console.log('📂 No sessions file found on disk');
     }
     
     // Check refresh tokens file
@@ -14202,14 +13794,12 @@ app.get('/debug/disk-sessions', async (req, res) => {
         const refreshEntries = JSON.parse(refreshData);
         diskRefreshTokens = refreshEntries;
         refreshTokensFileExists = true;
-        console.log(`📂 Found ${refreshEntries.length} refresh tokens on disk`);
       } catch (jsonParseError) {
         console.error('❌ [DEBUG_DISK] Failed to parse refresh tokens JSON:', jsonParseError.message);
         console.error('❌ [DEBUG_DISK] Refresh data length:', refreshData?.length || 0);
         refreshTokensFileExists = false;
       }
     } catch (error) {
-      console.log('📂 No refresh tokens file found on disk');
     }
     
     res.json({
@@ -14254,7 +13844,6 @@ app.get('/debug/returns/map', authenticateAppToken, async (req, res) => {
       return res.status(400).json({ error: 'Admin token not configured - cannot map fulfillment line items' });
     }
     
-    console.log('🔍 [DEBUG] Mapping fulfillment line items for order:', orderId);
     
     // Fetch order fulfillments via Admin API
     const orderQuery = `
@@ -14348,7 +13937,6 @@ app.get('/debug/returns/map', authenticateAppToken, async (req, res) => {
 // Test endpoint for return creation (no auth required for debugging)
 app.post('/debug/returns/test', async (req, res) => {
   try {
-    console.log('🧪 [DEBUG] Test return creation request:', JSON.stringify(req.body, null, 2));
     
     const { orderId, items, customerMessage } = req.body;
     
@@ -14366,14 +13954,12 @@ app.post('/debug/returns/test', async (req, res) => {
       returnReason: mapReasonToShopify(item.reason)
     }));
 
-    console.log('🧪 [DEBUG] Mapped return line items:', JSON.stringify(returnLineItems, null, 2));
 
     const returnInput = {
       orderId: orderId,
       returnLineItems: returnLineItems
     };
 
-    console.log('🧪 [DEBUG] Final return input:', JSON.stringify(returnInput, null, 2));
 
     // For testing, just return the mapped data without actually calling Shopify
     res.json({
@@ -14415,7 +14001,6 @@ async function cleanupExpiredTokens() {
   }
   
   if (cleanedSessions > 0 || cleanedRefreshTokens > 0) {
-    console.log(`🧹 Cleaned up ${cleanedSessions} expired sessions and ${cleanedRefreshTokens} expired refresh tokens`);
   }
 }
 
@@ -14481,7 +14066,6 @@ app.get('/auth/health', (req, res) => {
 // Sync wishlist to Shopify customer metafields
 async function syncWishlistToShopify(customerId, wishlistItems) {
     try {
-        console.log('🔄 Syncing wishlist to Shopify metafields for customer:', customerId);
         
         // Convert wishlist items to simple product IDs for Shopify
         const productIds = wishlistItems.map(item => item.productId);
@@ -14536,7 +14120,6 @@ async function syncWishlistToShopify(customerId, wishlistItems) {
         if (response.data.data?.customerUpdate?.userErrors?.length > 0) {
             console.error('❌ Shopify sync errors:', response.data.data.customerUpdate.userErrors);
         } else {
-            console.log('✅ Successfully synced wishlist to Shopify metafields');
         }
     } catch (error) {
         console.error('❌ Error syncing wishlist to Shopify:', error.message);
@@ -14704,7 +14287,6 @@ async function syncAllFirebaseToPublicStorage() {
                 publicWishlistData[simpleCustomerId] = publicItems;
                 syncedCount++;
                 
-                console.log(`✅ [SYNC] Synced ${publicItems.length} items for customer ${simpleCustomerId}`);
                 
             } catch (docError) {
                 console.error(`🚨 [SYNC] Error syncing document ${doc.id}:`, docError);
@@ -14713,7 +14295,6 @@ async function syncAllFirebaseToPublicStorage() {
         
         await saveWishlistData(publicWishlistData);
         
-        console.log(`✅ [SYNC] Full sync completed: ${syncedCount} customers synced`);
         return true;
         
     } catch (error) {
@@ -14742,20 +14323,16 @@ app.get('/api/wishlist/items', authenticateAppToken, async (req, res) => {
             return res.status(400).json({ error: 'Customer ID not found' });
         }
 
-        console.log(`📥 [AUTH] Getting wishlist for authenticated customer: ${sessionCustomerId}`);
 
         // Map customer ID for cross-platform compatibility
         const customerId = mapCustomerIdForWishlist(sessionCustomerId);
-        console.log(`📥 [AUTH] Mapped to customer ID: ${customerId}`);
 
         // First try to sync from Firebase to ensure we have the latest data
         const syncSuccess = await syncFirebaseToPublicStorage(customerId);
-        console.log(`🔄 [AUTH] Firebase sync result: ${syncSuccess}`);
 
         const wishlistData = await loadWishlistData();
         let customerWishlist = wishlistData[customerId] || [];
 
-        console.log(`📥 [AUTH] Found ${customerWishlist.length} wishlist items for ${customerId}`);
 
         res.json({
             success: true,
@@ -14779,7 +14356,6 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
 
         // Map customer ID for cross-platform compatibility
         const customerId = mapCustomerIdForWishlist(sessionCustomerId);
-        console.log(`➕ [AUTH] Adding to wishlist for customer: ${customerId} (session: ${sessionCustomerId})`);
 
         const {
             productId,
@@ -14854,7 +14430,6 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
             }
             
             if (shopifyCustomerId) {
-                console.log(`🔄 [SYNC] Syncing authenticated wishlist to public storage for Shopify customer: ${shopifyCustomerId}`);
                 
                 // Also save to public wishlist storage with Shopify customer ID
                 if (!wishlistData[shopifyCustomerId]) {
@@ -14878,14 +14453,9 @@ app.post('/api/wishlist/add', authenticateAppToken, async (req, res) => {
                     wishlistData[shopifyCustomerId].push(publicItem);
                     await saveWishlistData(wishlistData);
                     
-                    console.log(`✅ [SYNC] Successfully synced item to public storage for customer ${shopifyCustomerId}`);
-                    console.log(`✅ [SYNC] Public storage now has ${wishlistData[shopifyCustomerId].length} items`);
                 } else {
-                    console.log(`ℹ️ [SYNC] Item already exists in public storage for customer ${shopifyCustomerId}`);
                 }
             } else {
-                console.log(`⚠️ [SYNC] Could not map session customer ID "${customerId}" to Shopify customer ID`);
-                console.log(`⚠️ [SYNC] Available session data:`, Object.keys(req.session || {}));
             }
         } catch (syncError) {
             console.error('🚨 [SYNC] Error syncing to public storage:', syncError);
@@ -14917,7 +14487,6 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
 
         // Map customer ID for cross-platform compatibility
         const customerId = mapCustomerIdForWishlist(sessionCustomerId);
-        console.log(`➖ [AUTH] Removing from wishlist for customer: ${customerId} (session: ${sessionCustomerId})`);
 
         const { productId, variantId, selectedOptions } = req.body;
 
@@ -14957,7 +14526,6 @@ app.delete('/api/wishlist/remove', authenticateAppToken, async (req, res) => {
             }
             
             if (shopifyCustomerId && wishlistData[shopifyCustomerId]) {
-                console.log(`🔄 [SYNC] Syncing authenticated wishlist removal to public storage for Shopify customer: ${shopifyCustomerId}`);
                 
                 // Remove from public storage too
                 const publicItemIndex = wishlistData[shopifyCustomerId].findIndex(item => 
@@ -15265,11 +14833,9 @@ app.get('/api/public/wishlist/all', async (req, res) => {
             });
         }
 
-        console.log(`[SHOPIFY] Getting all wishlists for customer: ${customerId}`);
 
         // Check if Firebase/multi-wishlist service is available
         if (!firebaseEnabled || !wishlistService) {
-            console.log(`[SHOPIFY] Multi-wishlist not available - Firebase disabled or wishlist service missing`);
             return res.status(404).json({ 
                 success: false,
                 error: 'Multi-wishlist feature not available',
@@ -15282,7 +14848,6 @@ app.get('/api/public/wishlist/all', async (req, res) => {
             const customerEmail = await getRealCustomerEmail(customerId);
             const fullCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
             
-            console.log(`[SHOPIFY] Fetching wishlists from Firebase for ${customerEmail}`);
             
             // Try to get all wishlists from Firebase (if multi-wishlist service exists)
             // Check if wishlistService has a method to get all wishlists
@@ -15291,10 +14856,8 @@ app.get('/api/public/wishlist/all', async (req, res) => {
             if (typeof wishlistService.getAllWishlists === 'function') {
                 // Multi-wishlist support exists
                 wishlists = await wishlistService.getAllWishlists(fullCustomerId, customerEmail);
-                console.log(`[SHOPIFY] Found ${wishlists.length} wishlists in Firebase`);
             } else {
                 // Fallback: Create a single "main" wishlist from existing items
-                console.log(`[SHOPIFY] Multi-wishlist not supported, creating default wishlist`);
                 const items = await wishlistService.getWishlist(fullCustomerId, customerEmail);
                 
                 wishlists = [{
@@ -15362,7 +14925,6 @@ app.post('/api/public/wishlist/add', async (req, res) => {
             });
         }
 
-        console.log(`[SHOPIFY] Adding item to wishlist for customer: ${customerId}`);
 
         // Invalidate caches for this customer
         publicWishlistResponseCache.delete(customerId);
@@ -15385,7 +14947,6 @@ app.post('/api/public/wishlist/add', async (req, res) => {
         );
 
         if (existingItemIndex !== -1) {
-            console.log(`[SHOPIFY] Item already exists in wishlist`);
             return res.json({
                 success: true,
                 message: 'Item already in wishlist',
@@ -15410,12 +14971,10 @@ app.post('/api/public/wishlist/add', async (req, res) => {
         wishlistData[customerId].push(newItem);
         await saveWishlistData(wishlistData);
 
-        console.log(`[SHOPIFY] Item added to public storage successfully`);
 
         // Also add to Firebase to keep it as canonical source
         if (firebaseEnabled && wishlistService) {
             try {
-                console.log(`🔄 [SYNC] Syncing authenticated wishlist to public storage for Shopify customer: ${customerId}`);
                 
                 // Use the correct customer ID format for Firebase
                 const shopifyCustomerId = customerId.startsWith('gid://') ? customerId : `gid://shopify/Customer/${customerId}`;
@@ -15441,7 +15000,6 @@ app.post('/api/public/wishlist/add', async (req, res) => {
                     selectedOptions,
                     productData
                 );
-                console.log(`✅ [SYNC] Item also added to Firebase with enhanced data successfully:`, firebaseResult);
             } catch (firebaseError) {
                 console.error('❌ [SYNC] Error adding to Firebase (continuing anyway):', firebaseError.message);
                 // Don't fail the request if Firebase fails - this is a sync operation
@@ -15491,19 +15049,15 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             });
         }
 
-        console.log(`[SHOPIFY] Removing item from wishlist for customer: ${customerId}`);
-        console.log(`[SHOPIFY] ProductId: ${productId}, VariantId: ${variantId}, SelectedOptions:`, selectedOptions);
 
         // ✅ PRIORITY 1: Try Firebase first (the source of truth)
         if (firebaseEnabled && wishlistService) {
             try {
-                console.log(`[SHOPIFY] Attempting Firebase removal...`);
                 
                 // Get real customer email for Firebase operations
                 const customerEmail = await getRealCustomerEmail(customerId);
                 const fullCustomerId = `gid://shopify/Customer/${customerId}`;
                 
-                console.log(`[SHOPIFY] Using customer email: ${customerEmail}, fullId: ${fullCustomerId}`);
                 
                 // Remove directly from Firebase
                 const firebaseResult = await wishlistService.removeFromWishlist(
@@ -15514,25 +15068,21 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
                     selectedOptions
                 );
                 
-                console.log(`[SHOPIFY] Firebase removal result:`, firebaseResult);
                 
                 if (firebaseResult.success) {
                     // Get updated count from Firebase
                     const updatedItems = await wishlistService.getWishlist(fullCustomerId, customerEmail);
                     const finalCount = updatedItems.length;
                     
-                    console.log(`[SHOPIFY] Items after removal: ${finalCount}`);
 
                     // Also sync to local storage and Shopify metafields for backup
                     try {
                         await syncFirebaseToPublicStorage(customerId);
-                        console.log(`[SHOPIFY] Synced to public storage`);
                         
                         // Load from public storage for Shopify sync
                         const wishlistData = await loadWishlistData();
                         if (wishlistData[customerId]) {
                             await syncWishlistToShopify(customerId, wishlistData[customerId]);
-                            console.log(`[SHOPIFY] Synced to Shopify metafields`);
                         }
                     } catch (syncError) {
                         console.error('[SHOPIFY] Error with sync operations (non-critical):', syncError);
@@ -15545,24 +15095,20 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
                         count: finalCount
                     });
                 } else {
-                    console.log(`[SHOPIFY] Firebase removal unsuccessful, falling back to local storage`);
                 }
                 
             } catch (firebaseError) {
                 console.error('[SHOPIFY] Firebase removal failed, falling back to local storage:', firebaseError.message);
             }
         } else {
-            console.log(`[SHOPIFY] Firebase not available, using local storage fallback`);
         }
 
         // ✅ FALLBACK: Use local storage if Firebase fails or isn't available
-        console.log(`[SHOPIFY] Using local storage fallback for removal...`);
         
         try {
             const wishlistData = await loadWishlistData();
             
             if (!wishlistData[customerId] || !Array.isArray(wishlistData[customerId])) {
-                console.log(`[SHOPIFY] No wishlist found for customer ${customerId}`);
                 return res.json({ 
                     success: true, 
                     message: 'Item not in wishlist',
@@ -15571,7 +15117,6 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             }
 
             const originalCount = wishlistData[customerId].length;
-            console.log(`[SHOPIFY] Original wishlist size: ${originalCount}`);
 
             // Find and remove the matching item
             const itemIndex = wishlistData[customerId].findIndex(item => {
@@ -15589,7 +15134,6 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             });
 
             if (itemIndex === -1) {
-                console.log(`[SHOPIFY] Item not found in local wishlist`);
                 return res.json({ 
                     success: true, 
                     message: 'Item not found in wishlist',
@@ -15601,7 +15145,6 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             wishlistData[customerId].splice(itemIndex, 1);
             const finalCount = wishlistData[customerId].length;
             
-            console.log(`[SHOPIFY] Removed item, new count: ${finalCount}`);
 
             // Invalidate caches for this customer
             publicWishlistResponseCache.delete(customerId);
@@ -15609,12 +15152,10 @@ app.post('/api/public/wishlist/remove', async (req, res) => {
             
             // Save the updated data
             await saveWishlistData(wishlistData);
-            console.log(`[SHOPIFY] Saved updated wishlist data`);
 
             // Sync to Shopify metafields
             try {
                 await syncWishlistToShopify(customerId, wishlistData[customerId]);
-                console.log(`[SHOPIFY] Synced to Shopify metafields`);
             } catch (syncError) {
                 console.error('[SHOPIFY] Error syncing to Shopify (non-critical):', syncError);
             }
@@ -15651,7 +15192,6 @@ app.post('/api/public/wishlist/migrate', async (req, res) => {
             });
         }
 
-        console.log(`[MIGRATION] Migrating wishlist from device ${deviceId} to customer ${customerId} (${customerEmail})`);
 
         let migratedCount = 0;
 
@@ -15659,7 +15199,6 @@ app.post('/api/public/wishlist/migrate', async (req, res) => {
         const wishlistData = await loadWishlistData();
         
         if (wishlistData[deviceId] && wishlistData[deviceId].length > 0) {
-            console.log(`[MIGRATION] Found ${wishlistData[deviceId].length} items for device ${deviceId}`);
             
             // Ensure customer wishlist exists
             if (!wishlistData[customerId]) {
@@ -15691,19 +15230,16 @@ app.post('/api/public/wishlist/migrate', async (req, res) => {
             delete wishlistData[deviceId];
             await saveWishlistData(wishlistData);
             
-            console.log(`[MIGRATION] Migrated ${migratedCount} items from device to public storage`);
         }
 
         // 2. Migrate in Firebase
         if (firebaseEnabled && wishlistService && customerEmail) {
             try {
-                console.log(`[MIGRATION] Migrating Firebase entries from device ${deviceId} to customer ${customerId}`);
                 
                 // Get device wishlist from Firebase
                 const deviceFirebaseItems = await wishlistService.getWishlist(deviceId, `device@${deviceId}.guest`);
                 
                 if (deviceFirebaseItems.length > 0) {
-                    console.log(`[MIGRATION] Found ${deviceFirebaseItems.length} items in Firebase for device ${deviceId}`);
                     
                     // Add each item to customer's Firebase wishlist
                     for (const item of deviceFirebaseItems) {
@@ -15730,7 +15266,6 @@ app.post('/api/public/wishlist/migrate', async (req, res) => {
                     // Remove device wishlist from Firebase
                     await wishlistService.clearWishlist(deviceId, `device@${deviceId}.guest`);
                     
-                    console.log(`[MIGRATION] Successfully migrated Firebase entries`);
                 }
             } catch (firebaseError) {
                 console.error('[MIGRATION] Error migrating Firebase data:', firebaseError.message);
@@ -15785,7 +15320,6 @@ app.post('/api/sync/firebase-to-public', async (req, res) => {
         
         if (customerId) {
             // Sync specific customer
-            console.log(`[SYNC] Manual sync requested for customer: ${customerId}`);
             const success = await syncFirebaseToPublicStorage(customerId);
             
             res.json({
@@ -15797,7 +15331,6 @@ app.post('/api/sync/firebase-to-public', async (req, res) => {
             });
         } else {
             // Sync all customers
-            console.log('[SYNC] Manual full sync requested');
             const success = await syncAllFirebaseToPublicStorage();
             
             res.json({
@@ -15886,7 +15419,6 @@ app.post('/api/debug/link-customer', async (req, res) => {
             });
         }
 
-        console.log(`[DEBUG] Attempting to link Shopify customer ${shopifyCustomerId} to Flutter session data`);
 
         // For now, let's manually copy the test data we know exists
         // This is a temporary solution to test the concept
@@ -15921,7 +15453,6 @@ app.post('/api/debug/link-customer', async (req, res) => {
 
         await saveWishlistData(wishlistData);
 
-        console.log(`[DEBUG] Successfully linked customer ${shopifyCustomerId} with 2 test items`);
 
         res.json({
             success: true,
@@ -15950,14 +15481,12 @@ app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
             });
         }
 
-        console.log(`[DEBUG] Clearing wishlist for customer: ${customerId}`);
 
         const wishlistData = await loadWishlistData();
         
         if (wishlistData[customerId]) {
             wishlistData[customerId] = [];
             await saveWishlistData(wishlistData);
-            console.log(`[DEBUG] Successfully cleared wishlist for customer ${customerId}`);
         }
 
         res.json({
@@ -15978,19 +15507,9 @@ app.delete('/api/debug/clear-customer-wishlist', async (req, res) => {
 // Apply store credit by simply deducting from customer balance
 app.post('/apply-store-credit', async (req, res) => {
   try {
-    console.log('📧 Store credit request received:');
-    console.log('   Headers:', JSON.stringify(req.headers, null, 2));
-    console.log('   Raw body:', req.body);
-    console.log('   Body type:', typeof req.body);
-    console.log('   Body keys:', Object.keys(req.body || {}));
     
     const { customerEmail, storeCreditAmount, cartTotal, productTotal } = req.body;
     
-    console.log(`💳 [STORE_CREDIT] Store credit deduction request:`);
-    console.log(`   Customer: ${customerEmail}`);
-    console.log(`   Available store credit: ${storeCreditAmount}€`);
-    console.log(`   Cart total: ${cartTotal}€`);
-    console.log(`   Product total (excluding shipping): ${productTotal}€`);
     
     if (!customerEmail || !storeCreditAmount) {
       return res.status(400).json({
@@ -16004,7 +15523,6 @@ app.post('/apply-store-credit', async (req, res) => {
     
     // Calculate the actual amount to deduct (minimum of available store credit and product total)
     const amountToDeduct = Math.min(parseFloat(storeCreditAmount), baseTotal);
-    console.log(`💰 Will deduct ${amountToDeduct}€ from store credit balance (applied to products only)`);
     
     if (amountToDeduct <= 0) {
       return res.status(400).json({
@@ -16054,7 +15572,6 @@ app.post('/apply-store-credit', async (req, res) => {
     );
 
     // Debug: log response from Shopify to help diagnose missing customers/store credit
-    console.log('[DEBUG] customerResponse.data:', JSON.stringify(customerResponse.data, null, 2));
 
     const customers = customerResponse.data?.data?.customers?.edges || [];
     if (customers.length === 0) {
@@ -16065,7 +15582,6 @@ app.post('/apply-store-credit', async (req, res) => {
     }
 
     const customer = customers[0].node;
-    console.log(`👤 Found customer: ${customer.email} (${customer.id})`);
 
     // Calculate available store credit
     const storeCreditAccounts = customer.storeCreditAccounts?.edges || [];
@@ -16080,7 +15596,6 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     });
 
-    console.log(`💰 Customer has ${totalStoreCredit}€ store credit available`);
 
     if (totalStoreCredit < amountToDeduct) {
       return res.status(400).json({
@@ -16115,13 +15630,9 @@ app.post('/apply-store-credit', async (req, res) => {
     if (existingReservations.length > 0) {
       // Found existing reservation - CREATE A NEW DISCOUNT CODE for it
       const existingRes = existingReservations[0];
-      console.log(`♻️ Found existing reservation ${existingRes.id} - creating NEW discount code (old one may be used/expired)`);
-      console.log(`   Old reservation amount: ${existingRes.amount}€`);
-      console.log(`   New requested amount: ${amountToDeduct}€`);
       
       // Update the reservation with the new amount AND discount code
       const newDiscountCode = `STORE_CREDIT_${Date.now()}_${existingRes.id.toUpperCase()}`;
-      console.log(`💳 Creating NEW discount code: ${newDiscountCode} for existing reservation with updated amount`);
       
       existingRes.amount = amountToDeduct; // Update to the new amount!
       existingRes.discountCode = newDiscountCode;
@@ -16166,7 +15677,6 @@ app.post('/apply-store-credit', async (req, res) => {
           return res.status(500).json({ success: false, error: 'Failed to create new discount code', debugInfo: discountErrors });
         }
         
-        console.log(`✅ Created NEW discount code for existing reservation: ${newDiscountCode}`);
         
         return res.status(200).json({
           success: true,
@@ -16188,7 +15698,6 @@ app.post('/apply-store-credit', async (req, res) => {
     const reservationId = generateReservationId();
     const reservationDiscountCode = `STORE_CREDIT_${Date.now()}_${reservationId.toUpperCase()}`;
     
-    console.log(`💳 Creating reservation ${reservationId} and discount code: ${reservationDiscountCode} for ${amountToDeduct}€ (money NOT deducted yet)`);
     
     // Create reservation to track this transaction
     const reservation = {
@@ -16231,7 +15740,6 @@ app.post('/apply-store-credit', async (req, res) => {
       }
     };
 
-    console.log('📋 Sending Admin API variables:', JSON.stringify(discountInput, null, 2));
 
     let lastErrorResponse = null;
     let createdDiscountCode = null;
@@ -16243,7 +15751,6 @@ app.post('/apply-store-credit', async (req, res) => {
         { headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' } }
       );
 
-      console.log('📋 Discount response:', JSON.stringify(discountResponse.data, null, 2));
       lastErrorResponse = discountResponse.data;
 
       if (Array.isArray(discountResponse.data?.errors) && discountResponse.data.errors.length) {
@@ -16264,7 +15771,6 @@ app.post('/apply-store-credit', async (req, res) => {
       }
 
       // Success
-      console.log('✅ Admin API reported success for discount creation (no userErrors)');
       createdDiscountCode = reservationDiscountCode; // Use the reservation code
       
       // Do NOT mark reservation as debited - money hasn't been deducted yet
@@ -16286,7 +15792,6 @@ app.post('/apply-store-credit', async (req, res) => {
     }
 
     // Success: return created code in the format Flutter app expects
-    console.log(`💰 Store credit reservation of ${amountToDeduct}€ created and discount code ready`);
     
     res.json({
       success: true,
@@ -16313,7 +15818,6 @@ app.post('/apply-store-credit', async (req, res) => {
 // Function to fetch return shipping labels and tracking from Shopify
 async function fetchShopifyReturnShipping(orderId) {
   try {
-    console.log(`🔍 Fetching return shipping data for order: ${orderId}`);
     
     const query = `
       query GetReturnLabelAndTracking($orderId: ID!, $first: Int = 10) {
@@ -16379,7 +15883,6 @@ async function fetchShopifyReturnShipping(orderId) {
 
     const data = response.data?.data?.node;
     if (!data || !data.returns) {
-      console.log(`ℹ️ No return data found for order ${orderId}`);
       return null;
     }
 
@@ -16426,7 +15929,6 @@ async function fetchShopifyReturnShipping(orderId) {
       shippingData.returns.push(returnData);
     });
 
-    console.log(`✅ Found shipping data for ${shippingData.returns.length} returns`);
     return shippingData;
 
   } catch (error) {
@@ -16439,7 +15941,6 @@ async function fetchShopifyReturnShipping(orderId) {
 app.get('/api/returns/:orderId/shipping', async (req, res) => {
   try {
     const { orderId } = req.params;
-    console.log(`📦 API: Fetching return shipping data for order: ${orderId}`);
 
     const shippingData = await fetchShopifyReturnShipping(orderId);
     
@@ -16481,7 +15982,6 @@ app.post('/ai/analyze-image', async (req, res) => {
     const shopifyLanguage = (language || 'DE').toUpperCase();
     const shopifyCountry = (country || 'DE').toUpperCase();
     
-    console.log(`🌍 Locale: language=${shopifyLanguage}, country=${shopifyCountry}`);
     
     if (!image) {
       return res.status(400).json({ error: 'No image provided' });
@@ -16491,9 +15991,6 @@ app.post('/ai/analyze-image', async (req, res) => {
     const geminiKey = process.env.GEMINI_API_KEY;
     const visionKey = process.env.GOOGLE_CLOUD_VISION_KEY;
     
-    console.log('🔑 API Keys status:');
-    console.log(`   GEMINI_API_KEY: ${geminiKey ? '✅ SET (' + geminiKey.substring(0, 8) + '...)' : '❌ NOT SET'}`);
-    console.log(`   GOOGLE_CLOUD_VISION_KEY: ${visionKey ? '✅ SET' : '❌ NOT SET'}`);
     
     if (!geminiKey && !visionKey) {
       console.error('❌ No AI API key configured');
@@ -16502,7 +15999,6 @@ app.post('/ai/analyze-image', async (req, res) => {
     
     // Try Gemini first (smarter), fall back to Cloud Vision
     if (geminiKey) {
-      console.log('🔍 Analyzing image with Google Gemini AI...');
     
       try {
         // Use Gemini 2.5 Flash (latest stable model)
@@ -16840,17 +16336,14 @@ CRITICAL FORMATTING RULES:
       const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
       
       if (geminiText) {
-        console.log('📝 Gemini raw response:', geminiText);
         
         // With responseSchema, Gemini output should be valid JSON - parse directly first
         let analysis;
         try {
           analysis = JSON.parse(geminiText);
-          console.log('✅ [JSON] Direct parse successful!');
           // Clean arrays just in case
           analysis = cleanParsedArrays(analysis);
         } catch (directParseError) {
-          console.log('⚠️ Direct parse failed, using robust parser...');
           // Fall back to robust parser
           analysis = robustParseAIJson(geminiText, {
             detectedObjects: [],
@@ -16868,17 +16361,6 @@ CRITICAL FORMATTING RULES:
         }
         
         if (analysis.matchingProducts?.length > 0 || analysis.searchTerms?.length > 0) {
-          console.log(`✅ Gemini analysis complete!`);
-          console.log(`   Main Object: ${analysis.mainObject}`);
-          console.log(`   Confidence: ${analysis.confidence}`);
-          console.log(`   User Intent: ${analysis.userIntent}`);
-          console.log(`   Product Type: ${analysis.productType}`);
-          console.log(`   Matching Products: ${analysis.matchingProducts?.join(', ')}`);
-          console.log(`   Labels: ${analysis.labels?.join(', ')}`);
-          console.log(`   Colors: ${analysis.colors?.join(', ')}`);
-          console.log(`   Search terms: ${analysis.searchTerms?.join(', ')}`);
-          console.log(`   🎯 DETECTED OBJECTS: [${analysis.detectedObjects?.join(', ')}]`);
-          console.log(`   🎯 Needs User Selection: ${analysis.needsUserSelection}`);
           
           // ============================================
           // DIRECTLY FETCH PRODUCTS FROM SHOPIFY
@@ -16913,8 +16395,6 @@ CRITICAL FORMATTING RULES:
             
             // DON'T add generic labels - they return too many irrelevant results
             
-            console.log('🔍 Shopify search queries:', searchQueries);
-            console.log('🎯 Looking for matchingProducts:', analysis.matchingProducts);
             
             // Query Shopify Storefront API with locale support for translations
             const shopifyQuery = `
@@ -16970,7 +16450,6 @@ CRITICAL FORMATTING RULES:
             // Execute searches for matching products - run more queries to catch all products
             for (const query of searchQueries.slice(0, 10)) {
               try {
-                console.log(`🔎 Executing Shopify search: "${query}" (lang: ${shopifyLanguage}, country: ${shopifyCountry})`);
                 const shopifyResponse = await axios.post(
                   config.apiUrl,  // Use Storefront API, not Admin API
                   {
@@ -17046,7 +16525,6 @@ CRITICAL FORMATTING RULES:
                         score += 0.9;
                         isRelevant = true;
                         matchedProductName = mp;
-                        console.log(`✅ Product "${product.title}" (handle: ${product.handle}) matches "${mp}" (word: ${wordMatch}, upper: ${upperCaseMatch}, contains: ${containsMatch}, handle: ${handleMatch})`);
                         break;
                       }
                     }
@@ -17056,7 +16534,6 @@ CRITICAL FORMATTING RULES:
                     
                     // Skip completely irrelevant products
                     if (!isRelevant) {
-                      console.log(`⏭️ Skipping irrelevant: "${product.title}" - no match in [${(analysis.matchingProducts || []).join(', ')}]`);
                       continue;
                     }
                     
@@ -17085,7 +16562,6 @@ CRITICAL FORMATTING RULES:
                   }
                 }
               } catch (searchError) {
-                console.log(`⚠️ Search query "${query}" failed:`, searchError.message);
               }
             }
             
@@ -17093,11 +16569,7 @@ CRITICAL FORMATTING RULES:
             products.sort((a, b) => b.relevanceScore - a.relevanceScore);
             products = products.slice(0, 15); // Top 15 results
             
-            console.log(`📦 Found ${products.length} products from Shopify:`);
-            products.forEach((p, i) => console.log(`   ${i + 1}. ${p.title} (score: ${p.relevanceScore.toFixed(2)})`));
-            
           } catch (shopifyError) {
-            console.log('⚠️ Shopify product fetch failed:', shopifyError.message);
           }
           
           // Build search terms for fallback
@@ -17148,20 +16620,16 @@ CRITICAL FORMATTING RULES:
             _debug_gemini_parsed: analysis
           });
         } else {
-          console.log('⚠️ Gemini returned no useful data, falling back...');
         }
       }
       
       throw new Error('Could not parse Gemini response');
       
       } catch (geminiError) {
-        console.log('⚠️ Gemini failed:', geminiError.message);
-        console.log('⚠️ Full error:', geminiError.response?.data || geminiError);
       }
     } // Close if (geminiKey)
     
     // Fallback to Cloud Vision
-    console.log('🔄 Falling back to Cloud Vision...');
     // visionKey already declared at top of function
     if (!visionKey) {
       return res.status(500).json({ error: 'No AI API key available' });
@@ -17238,7 +16706,6 @@ CRITICAL FORMATTING RULES:
             ? productNames.join(' OR ')
             : [...new Set(searchTerms)].slice(0, 3).join(' OR ');
             
-          console.log(`🔍 [Cloud Vision Fallback] Searching Shopify: "${searchQuery}"`);
           
           const shopifyQuery = `
             query SearchProducts($query: String!) {
@@ -17293,9 +16760,7 @@ CRITICAL FORMATTING RULES:
             relevanceScore: 0.6 // Lower score for Cloud Vision fallback
           }));
           
-          console.log(`✅ [Cloud Vision Fallback] Found ${products.length} products`);
         } catch (shopifyError) {
-          console.log(`⚠️ [Cloud Vision Fallback] Shopify search failed:`, shopifyError.message);
         }
       }
       
@@ -17331,24 +16796,18 @@ app.post('/ai/analyze-selected-object', async (req, res) => {
     const shopifyLanguage = (language || 'DE').toUpperCase();
     const shopifyCountry = (country || 'DE').toUpperCase();
     
-    console.log(`🎯 [SELECTED] Analyzing selected object: "${selectedObject || customQuery}"`);
-    console.log(`   Language: ${shopifyLanguage}, Country: ${shopifyCountry}`);
-    console.log(`   Image provided: ${image ? 'yes (' + (image.length / 1024).toFixed(1) + ' KB)' : 'NO'}`);
     
     if (!image) {
-      console.log(`❌ [SELECTED] No image provided`);
       return res.status(400).json({ error: 'No image provided' });
     }
     
     const geminiKey = process.env.GEMINI_API_KEY;
     if (!geminiKey) {
-      console.log(`❌ [SELECTED] Gemini API key missing`);
       return res.status(500).json({ error: 'Gemini API not configured' });
     }
     
     // Determine what the user wants to focus on
     const focusOn = customQuery || selectedObject;
-    console.log(`🎯 [SELECTED] User selected to focus on: "${focusOn}"`);
     
     let geminiResponse;
     try {
@@ -17455,27 +16914,22 @@ INSTRUCTIONS:
         }
       );
     } catch (geminiErr) {
-      console.log(`❌ [SELECTED] Gemini API call failed: ${geminiErr.message}`);
       return res.status(500).json({ error: 'AI analysis failed', details: geminiErr.message });
     }
     
     const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
     
     if (!geminiText) {
-      console.log('❌ [SELECTED] No text in Gemini response');
       return res.status(500).json({ error: 'AI returned empty response' });
     }
     
-    console.log('📝 [SELECTED] Gemini response:', geminiText.substring(0, 500));
     
     // With responseSchema, should parse directly
     let analysis;
     try {
       analysis = JSON.parse(geminiText);
-      console.log('✅ [SELECTED] Direct JSON parse successful');
       analysis = cleanParsedArrays(analysis);
     } catch (parseErr) {
-      console.log('⚠️ [SELECTED] Direct parse failed, using robust parser');
       analysis = robustParseAIJson(geminiText, {
         focusedObject: focusOn,
         userIntent: null,
@@ -17485,15 +16939,11 @@ INSTRUCTIONS:
       });
     }
     
-    console.log(`📊 [SELECTED] Parsed analysis:`, JSON.stringify(analysis, null, 2).substring(0, 500));
-    console.log(`🎯 [SELECTED] Product Type: ${analysis.productType}`);
-    console.log(`🎯 [SELECTED] Matching Products: [${analysis.matchingProducts?.join(', ')}]`);
     
     // Fetch products from Shopify with translations
     let products = [];
     
     if (analysis.matchingProducts && analysis.matchingProducts.length > 0) {
-      console.log(`🎯 [SELECTED] AI returned ${analysis.matchingProducts.length} matching products: ${analysis.matchingProducts.join(', ')}`);
       const shopifyQuery = `
         query searchProducts($query: String!, $lang: LanguageCode!, $country: CountryCode!) @inContext(language: $lang, country: $country) {
           products(first: 20, query: $query, sortKey: RELEVANCE) {
@@ -17546,13 +16996,11 @@ INSTRUCTIONS:
             for (const mp of analysis.matchingProducts) {
               if (titleLower.includes(mp.toLowerCase())) {
                 isRelevant = true;
-                console.log(`✅ [SELECTED] "${p.title}" matches "${mp}"`);
                 break;
               }
             }
             
             if (!isRelevant) {
-              console.log(`⏭️ [SELECTED] Skipping irrelevant "${p.title}"`);
               continue;
             }
             
@@ -17573,15 +17021,12 @@ INSTRUCTIONS:
             });
           }
         } catch (e) {
-          console.log(`[SELECTED] Search for ${productName} failed:`, e.message);
         }
       }
       
-      console.log(`📦 [SELECTED] Found ${products.length} relevant products`);
     }
     
     // Always return what we found, even if empty
-    console.log(`✅ [SELECTED] Returning response with ${products.length} products`);
     
     // Helper to clean arrays - remove empty strings, whitespace, punctuation-only entries
     const cleanArray = (arr) => {
@@ -17687,12 +17132,10 @@ async function findSuncoUserId(externalId, email) {
       { headers: { 'Authorization': getSuncoAuthHeader() } }
     );
     if (data.user?.id) {
-      console.log(`🔍 Sunco user found by externalId: ${data.user.id}`);
       return data.user.id;
     }
   } catch (err) {
     if (err.response?.status === 404) {
-      console.log(`ℹ️ Sunco user not found by externalId:${externalId} - trying email fallback`);
     } else {
       console.error(`⚠️ Sunco externalId lookup error:`, err.response?.data || err.message);
     }
@@ -17707,10 +17150,8 @@ async function findSuncoUserId(externalId, email) {
       );
       const users = data.users || [];
       if (users.length > 0) {
-        console.log(`🔍 Sunco user found by email (${email}): ${users[0].id}`);
         return users[0].id;
       } else {
-        console.log(`⚠️ No Sunco user found by email: ${email}`);
       }
     } catch (err) {
       console.error(`⚠️ Sunco email lookup error:`, err.response?.data || err.message);
@@ -17732,10 +17173,8 @@ async function findMessagingConversationId(ticketId) {
     );
     const requesterId = ticketData.ticket?.requester_id;
     if (!requesterId) {
-      console.log(`⚠️ No requester_id on ticket ${ticketId}`);
       return { conversationId: null, suncoUserId: null };
     }
-    console.log(`🔍 Ticket ${ticketId} requester_id: ${requesterId}`);
 
     // Step 2: Get the requester's external_id AND email
     const { data: userData } = await axios.get(
@@ -17745,15 +17184,12 @@ async function findMessagingConversationId(ticketId) {
     const externalId = userData.user?.external_id;
     const userEmail = userData.user?.email;
     if (!externalId && !userEmail) {
-      console.log(`⚠️ No external_id or email for requester ${requesterId} - cannot find Sunco user`);
       return { conversationId: null, suncoUserId: null };
     }
-    console.log(`🔍 Requester external_id: ${externalId}, email: ${userEmail}`);
 
     // Step 3: Find the Sunco user (tries externalId first, then email fallback)
     const suncoUserId = await findSuncoUserId(externalId, userEmail);
     if (!suncoUserId) {
-      console.log(`⚠️ No Sunco user found for externalId: ${externalId} / email: ${userEmail}`);
       return { conversationId: null, suncoUserId: null };
     }
 
@@ -17764,13 +17200,11 @@ async function findMessagingConversationId(ticketId) {
     );
     const conversations = convoData.conversations || [];
     if (conversations.length === 0) {
-      console.log(`⚠️ No conversations found for Sunco user ${suncoUserId}`);
       return { conversationId: null, suncoUserId };
     }
 
     // Return the most recent conversation and the user ID
     const conversationId = conversations[0].id;
-    console.log(`✅ Found messaging conversation: ${conversationId} (${conversations.length} total conversations for user)`);
     return { conversationId, suncoUserId };
 
   } catch (err) {
@@ -17845,10 +17279,8 @@ app.post('/zendesk/messaging/context', async (req, res) => {
           if (spent && spent.amount) {
             totalSpent = `${spent.amount} ${spent.currencyCode || 'EUR'}`;
           }
-          console.log(`📊 Shopify Admin: ${orderCount} orders, ${totalSpent} spent`);
         }
       } catch (adminErr) {
-        console.warn('⚠️ Shopify Admin lookup failed, using client values:', adminErr.message);
       }
     }
 
@@ -17920,7 +17352,6 @@ app.post('/zendesk/messaging/context', async (req, res) => {
             : 'unknown';
     }
 
-    console.log('💬 Zendesk messaging context prepared:', diagnostics);
 
     return res.json({
       success: true,
@@ -17978,7 +17409,6 @@ app.post('/zendesk/tickets', async (req, res) => {
     const fullMessage = message + customerContext;
     
     if (!isZendeskConfigured()) {
-      console.log('⚠️ Zendesk not configured, using request API');
       const response = await axios.post(
         `${ZENDESK_BASE_URL}/api/v2/requests.json`,
         {
@@ -17995,7 +17425,6 @@ app.post('/zendesk/tickets', async (req, res) => {
         { headers: { 'Content-Type': 'application/json' } }
       );
       
-      console.log('✅ Zendesk request created:', response.data.request?.id);
       return res.json({
         success: true,
         ticketId: response.data.request?.id?.toString(),
@@ -18027,7 +17456,6 @@ app.post('/zendesk/tickets', async (req, res) => {
       }
     );
     
-    console.log('✅ Zendesk ticket created:', response.data.ticket?.id);
     res.json({
       success: true,
       ticketId: response.data.ticket?.id?.toString(),
@@ -18082,7 +17510,6 @@ app.post('/zendesk/tickets/:ticketId/comments', async (req, res) => {
       );
       requesterId = ticketResponse.data.ticket?.requester_id;
     } catch (e) {
-      console.log('⚠️ Could not get ticket requester, comment will be from API user');
     }
     
     // Add comment with author_id set to the original requester
@@ -18107,7 +17534,6 @@ app.post('/zendesk/tickets/:ticketId/comments', async (req, res) => {
       }
     );
     
-    console.log('✅ Comment added to ticket:', ticketId, requesterId ? `(as requester ${requesterId})` : '');
     res.json({ success: true });
     
   } catch (error) {
@@ -18216,7 +17642,6 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
         const subject = (ticket.subject || '');
         const isGhostTicket = /^Conversation with /i.test(subject);
         if (isGhostTicket) {
-          console.log(`🤖 Skipping AI agent ghost ticket #${ticket.id} (${ticket.status}, subject="${subject}")`);
         }
         return !isGhostTicket;
       })
@@ -18229,7 +17654,6 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
       description: ticket.description ? ticket.description.substring(0, 150) : '',
     }));
 
-    console.log(`📋 Found ${tickets.length} tickets for ${email}`);
     return res.json({ tickets });
 
   } catch (err) {
@@ -18255,8 +17679,7 @@ app.post('/zendesk/tickets/:ticketId/close', async (req, res) => {
   }
 
   try {
-    // First try to set status to closed directly
-    // If the ticket is open/new/pending, Zendesk requires it to be solved first
+    // Get current ticket status
     const { data: ticketData } = await axios.get(
       `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
       { headers: { 'Authorization': getZendeskAuthHeader() } }
@@ -18267,22 +17690,30 @@ app.post('/zendesk/tickets/:ticketId/close', async (req, res) => {
       return res.json({ success: true, message: 'Already closed' });
     }
 
+    // Zendesk requires: open/pending → solved → closed
+    // To solve, a ticket needs an assignee — use the API admin user
     if (currentStatus !== 'solved') {
-      // Must solve before closing
-      await axios.put(
-        `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
-        { ticket: { status: 'solved' } },
-        { headers: { 'Authorization': getZendeskAuthHeader() } }
-      );
+      try {
+        // Solve the ticket — Zendesk auto-assigns to the API user
+        await axios.put(
+          `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+          { ticket: { status: 'solved' } },
+          { headers: { 'Authorization': getZendeskAuthHeader() } }
+        );
+      } catch (solveErr) {
+        console.error(`⚠️ Could not solve ticket #${ticketId}:`, solveErr.response?.data || solveErr.message);
+        // If we can't solve it, we can't close it — return error
+        return res.status(500).json({ error: 'Cannot solve ticket before closing', details: solveErr.response?.data?.error || solveErr.message });
+      }
     }
 
+    // Now close the solved ticket
     await axios.put(
       `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
       { ticket: { status: 'closed' } },
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
 
-    console.log(`🗑️ Closed ticket #${ticketId}`);
     return res.json({ success: true });
 
   } catch (err) {
@@ -18321,7 +17752,6 @@ app.post('/zendesk/messaging/new-conversation', async (req, res) => {
               { ticket: { status: 'closed' } },
               { headers: { 'Authorization': getZendeskAuthHeader() } }
             );
-            console.log(`🔒 Closed solved ticket #${ticket.id}`);
           } catch (e) {
             console.error(`❌ Failed to close ticket #${ticket.id}:`, e.response?.data || e.message);
           }
@@ -18342,12 +17772,10 @@ app.post('/zendesk/messaging/new-conversation', async (req, res) => {
             `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${suncoUserId}`,
             { headers: { 'Authorization': getSuncoAuthHeader() } }
           );
-          console.log(`🗑️ Deleted Sunco user ${suncoUserId} for ${email} — app will recreate on re-login`);
         } catch (e) {
           console.error('❌ Failed to delete Sunco user:', e.response?.data || e.message);
         }
       } else {
-        console.log(`ℹ️ No Sunco user found for ${shopifyCustomerId}/${email} — nothing to clear`);
       }
     }
 
@@ -18430,7 +17858,6 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
         isAgent: comment.via?.channel !== 'messaging_sdk',
       }));
 
-    console.log(`💬 Found ${messages.length} messages for ticket ${ticketId}`);
     return res.json({ messages });
 
   } catch (err) {
@@ -18454,18 +17881,15 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
   if (ZENDESK_WEBHOOK_SECRET) {
     const providedSecret = req.headers['webhooksecret'];
     if (providedSecret !== ZENDESK_WEBHOOK_SECRET) {
-      console.warn('⚠️ Zendesk webhook: invalid secret');
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
 
   const { ticket_id, ticket_status, requester_email, requester_name, external_id } = req.body;
 
-  console.log(`🎫 Zendesk webhook: ticket ${ticket_id} → ${ticket_status}`);
 
   // The trigger only fires on solved/closed, so no need to check status language
   if (ticket_id && isZendeskConfigured()) {
-    console.log(`✅ Ticket ${ticket_id} resolved for ${requester_email || external_id || 'unknown'}`);
 
     const solvedMessage = [
       'Dein Anliegen wurde gelöst! ✅',
@@ -18494,16 +17918,13 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
               }
             }
           );
-          console.log(`📨 Solved message sent via Messaging SDK for ticket ${ticket_id} (conversation: ${conversationId})`);
           messageSent = true;
         } catch (suncoErr) {
           console.error(`❌ Sunshine API failed for ticket ${ticket_id}:`, suncoErr.response?.data || suncoErr.message);
         }
       } else {
-        console.log(`⚠️ Could not find messaging conversation for ticket ${ticket_id} - trying ticket comment fallback`);
       }
     } else {
-      console.log('⚠️ Sunshine Conversations not configured (ZENDESK_SUNCO_APP_ID, ZENDESK_SUNCO_KEY_ID, ZENDESK_SUNCO_KEY_SECRET) - using ticket comment fallback');
     }
 
     // FALLBACK: Add ticket comment (visible in Zendesk web, may not appear in Messaging SDK for solved tickets)
@@ -18514,7 +17935,6 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
           { ticket: { comment: { body: solvedMessage, public: true } } },
           { headers: { 'Authorization': getZendeskAuthHeader(), 'Content-Type': 'application/json' } }
         );
-        console.log(`📨 Solved notification added as ticket comment for ticket ${ticket_id} (fallback - may not appear in app)`);
       } catch (err) {
         console.error(`❌ Failed to send solved notification for ticket ${ticket_id}:`, err.response?.data || err.message);
       }
@@ -18524,23 +17944,9 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
   res.json({ received: true });
 });
 
-console.log(`🎫 Zendesk proxy configured: ${isZendeskConfigured() ? 'Full API access' : 'Anonymous requests only'}`);
-console.log(`☀️ Sunshine Conversations: ${isSuncoConfigured() ? 'Configured (Messaging SDK delivery enabled)' : 'NOT configured (falling back to ticket comments)'}`);
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Combined Auth Server running on port ${PORT}`);
-  console.log(`OAuth endpoints ready at: ${config.issuer}`);
-  console.log(`Mobile endpoints ready at: ${config.issuer}/auth/*`);
-  console.log(`Customer endpoints ready at: ${config.issuer}/customer/*`);
-  console.log(`🔥 Return management endpoints ready at: ${config.issuer}/returns/*`);
-  console.log(`Admin token configured: ${config.adminToken ? 'YES' : 'NO'}`);
-  console.log(`Storefront token configured: ${config.storefrontToken ? 'YES' : 'NO'}`);
   
   // 🔥 PRODUCTION: Show new configuration
-  console.log('✅ PRODUCTION Authentication Server Configuration:');
-  console.log(`   - Access Token Lifetime: ${Math.round(config.tokenLifetimes.accessToken / (24 * 60 * 60))} days`);
-  console.log(`   - Refresh Token Lifetime: ${Math.round(config.tokenLifetimes.refreshToken / (24 * 60 * 60))} days`);
-  console.log(`   - Refresh Warning: ${config.refreshThresholds.warningDays} days before expiry`);
-  console.log(`   - Users will stay logged in for MONTHS!`);
 });
