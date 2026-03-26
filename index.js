@@ -17997,20 +17997,61 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
           const conversations = convoData.conversations || [];
 
           if (conversations.length > 0) {
-            // In single-conversation mode (most common), there's just one conversation
-            // containing messages from ALL tickets. Use the first one.
-            const convoId = conversations[0].id;
+            let targetConvoId = null;
+            let needsTimeFilter = false;
 
-            // Step 4: Fetch all messages from the conversation
+            // Multi-conversation mode: try to match ticket → specific conversation
+            if (conversations.length > 1) {
+              // Strategy 1: Match by metadata (zen:ticket_id or similar)
+              const ticketIdStr = String(ticketId);
+              for (const convo of conversations) {
+                const meta = convo.metadata || {};
+                const linked = meta['zen:ticket_id'] || meta['ticketId'] || meta['zendesk.ticketId'];
+                if (linked && String(linked) === ticketIdStr) {
+                  targetConvoId = convo.id;
+                  break;
+                }
+              }
+
+              // Strategy 2: Match by creation time proximity (within 5 min of ticket)
+              if (!targetConvoId) {
+                const ticketCreatedAt = new Date(thisTicket.created_at).getTime();
+                let bestMatch = null;
+                let bestDiff = Infinity;
+                for (const convo of conversations) {
+                  const convoTime = new Date(convo.createdAt || convo.created_at || 0).getTime();
+                  const diff = Math.abs(convoTime - ticketCreatedAt);
+                  if (diff < bestDiff) {
+                    bestDiff = diff;
+                    bestMatch = convo;
+                  }
+                }
+                if (bestMatch && bestDiff < 5 * 60 * 1000) {
+                  targetConvoId = bestMatch.id;
+                }
+              }
+
+              // Strategy 3: No match found — fall back to first conversation + time filter
+              if (!targetConvoId) {
+                targetConvoId = conversations[0].id;
+                needsTimeFilter = true;
+              }
+            } else {
+              // Single conversation — use it, but may need time filtering if multiple tickets
+              targetConvoId = conversations[0].id;
+              needsTimeFilter = true;
+            }
+
+            // Fetch messages from the matched conversation
             const { data: msgData } = await axios.get(
-              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convoId}/messages?page[size]=100`,
+              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${targetConvoId}/messages?page[size]=100`,
               { headers: { 'Authorization': getSuncoAuthHeader() } }
             );
             let allMessages = msgData.messages || [];
 
-            // Step 5: If there are multiple messaging tickets, filter by time window
-            // so each ticket shows only its own messages (not the entire conversation)
-            if (userEmail) {
+            // Time-window filtering: only needed when multiple tickets share one conversation
+            // (single-conversation mode / legacy). Skip if we matched a specific conversation.
+            if (needsTimeFilter && userEmail) {
               try {
                 const query = `type:ticket requester:${userEmail}`;
                 const { data: searchData } = await axios.get(
