@@ -17193,9 +17193,9 @@ async function findMessagingConversationId(ticketId) {
       return { conversationId: null, suncoUserId: null };
     }
 
-    // Step 4: List conversations for this user (most recent first)
+    // Step 4: List conversations for this user
     const { data: convoData } = await axios.get(
-      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=5`,
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=20`,
       { headers: { 'Authorization': getSuncoAuthHeader() } }
     );
     const conversations = convoData.conversations || [];
@@ -17203,9 +17203,75 @@ async function findMessagingConversationId(ticketId) {
       return { conversationId: null, suncoUserId };
     }
 
-    // Return the most recent conversation and the user ID
-    const conversationId = conversations[0].id;
-    return { conversationId, suncoUserId };
+    // Try to match the conversation to the specific ticket
+    // Sunshine Conversations stores the Zendesk ticket ID in metadata
+    const ticketIdStr = String(ticketId);
+    for (const convo of conversations) {
+      const meta = convo.metadata || {};
+      // Check known metadata keys where Zendesk stores the linked ticket ID
+      const linkedTicketId = meta['zen:ticket_id'] || meta['ticketId'] || meta['zendesk.ticketId'];
+      if (linkedTicketId && String(linkedTicketId) === ticketIdStr) {
+        return { conversationId: convo.id, suncoUserId };
+      }
+    }
+
+    // Fallback: if metadata matching fails, try to match by checking each
+    // conversation's messages against the ticket creation time
+    // For now, if only one conversation exists, use it; otherwise return null
+    // to avoid showing the wrong conversation
+    if (conversations.length === 1) {
+      return { conversationId: conversations[0].id, suncoUserId };
+    }
+
+    // Multiple conversations but no metadata match — try reverse lookup via
+    // Zendesk ticket's "via" source which may contain the Sunshine conversation ID
+    try {
+      const { data: auditData } = await axios.get(
+        `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}/audits.json?page[size]=1`,
+        { headers: { 'Authorization': getZendeskAuthHeader() } }
+      );
+      const audits = auditData.audits || [];
+      if (audits.length > 0) {
+        // The first audit's source may contain the Sunshine conversation ID
+        const sourceId = audits[0]?.via?.source?.from?.ticket_id
+          || audits[0]?.via?.source?.rel;
+        // Check for conversation ID in the metadata of the audit
+        const auditMeta = audits[0]?.metadata?.custom || {};
+        const suncoConvoId = auditMeta['sunshine_conversation_id'];
+        if (suncoConvoId) {
+          const match = conversations.find(c => c.id === suncoConvoId);
+          if (match) return { conversationId: match.id, suncoUserId };
+        }
+      }
+    } catch (auditErr) {
+      // Non-critical, continue to time-based fallback
+    }
+
+    // Last resort: match by creation time proximity
+    // Get ticket creation time and find the closest conversation
+    const ticketCreatedAt = ticketData.ticket?.created_at;
+    if (ticketCreatedAt) {
+      const ticketTime = new Date(ticketCreatedAt).getTime();
+      let bestMatch = null;
+      let bestDiff = Infinity;
+      for (const convo of conversations) {
+        // Use the conversation's first activity timestamp
+        const convoTime = new Date(convo.createdAt || convo.created_at || 0).getTime();
+        const diff = Math.abs(convoTime - ticketTime);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestMatch = convo;
+        }
+      }
+      // Only accept if within 5 minutes of ticket creation
+      if (bestMatch && bestDiff < 5 * 60 * 1000) {
+        return { conversationId: bestMatch.id, suncoUserId };
+      }
+    }
+
+    // Cannot determine which conversation belongs to this ticket
+    console.warn(`⚠️ Could not match ticket ${ticketId} to a specific Sunshine conversation among ${conversations.length} conversations`);
+    return { conversationId: null, suncoUserId };
 
   } catch (err) {
     console.error(`❌ Failed to find messaging conversation for ticket ${ticketId}:`, err.response?.data || err.message);
@@ -17825,6 +17891,70 @@ app.get('/zendesk/tickets/:ticketId', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Debug: Inspect Sunshine Conversations for a ticket
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/zendesk/tickets/:ticketId/debug-conversations', async (req, res) => {
+  const { ticketId } = req.params;
+  if (!isZendeskConfigured() || !isSuncoConfigured()) {
+    return res.status(503).json({ error: 'Not configured' });
+  }
+  try {
+    const { data: ticketData } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    const requesterId = ticketData.ticket?.requester_id;
+    const { data: userData } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/users/${requesterId}.json`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    const externalId = userData.user?.external_id;
+    const userEmail = userData.user?.email;
+    const suncoUserId = await findSuncoUserId(externalId, userEmail);
+    if (!suncoUserId) return res.json({ error: 'No Sunco user found', externalId, userEmail });
+
+    const { data: convoData } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=20`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+
+    // Also get ticket audits for cross-reference
+    let audits = [];
+    try {
+      const { data: auditData } = await axios.get(
+        `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}/audits.json?page[size]=1`,
+        { headers: { 'Authorization': getZendeskAuthHeader() } }
+      );
+      audits = (auditData.audits || []).map(a => ({
+        id: a.id,
+        via: a.via,
+        metadata: a.metadata,
+        created_at: a.created_at,
+      }));
+    } catch (_) {}
+
+    return res.json({
+      ticketId,
+      ticketCreatedAt: ticketData.ticket?.created_at,
+      ticketSubject: ticketData.ticket?.subject,
+      suncoUserId,
+      conversations: (convoData.conversations || []).map(c => ({
+        id: c.id,
+        type: c.type,
+        metadata: c.metadata,
+        createdAt: c.createdAt,
+        activeSwitchboardIntegration: c.activeSwitchboardIntegration,
+        pendingSwitchboardIntegration: c.pendingSwitchboardIntegration,
+      })),
+      ticketAudits: audits,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Get Ticket Comments (conversation messages for a specific ticket)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -17854,14 +17984,46 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
             { headers: { 'Authorization': getSuncoAuthHeader() } }
           );
           const suncoMessages = (msgData.messages || [])
-            .filter(m => m.content?.type === 'text' && m.content?.text)
-            .map(m => ({
-              id: m.id,
-              body: m.content.text,
-              authorId: m.author?.userId || m.author?.displayName || null,
-              createdAt: m.received,
-              isAgent: m.author?.type === 'business',
-            }));
+            .map(m => {
+              const type = m.content?.type;
+              let body = '';
+
+              if (type === 'text') {
+                body = m.content.text || '';
+              } else if (type === 'carousel' || type === 'list') {
+                // Structured messages (AI bot product suggestions, etc.)
+                const items = m.content.items || [];
+                body = items.map(item => {
+                  let line = item.title || '';
+                  if (item.description) line += `\n${item.description}`;
+                  // Extract link actions (buttons/links the bot sends)
+                  const actions = item.actions || [];
+                  actions.forEach(a => {
+                    if (a.type === 'link' && a.uri) {
+                      line += `\n${a.text || a.uri}: ${a.uri}`;
+                    } else if (a.type === 'webview' && a.uri) {
+                      line += `\n${a.text || a.uri}: ${a.uri}`;
+                    }
+                  });
+                  return line;
+                }).filter(Boolean).join('\n\n');
+              } else if (type === 'image') {
+                body = m.content.altText || m.content.text || '[Image]';
+              } else if (type === 'file') {
+                body = m.content.text || '[File]';
+              }
+
+              if (!body.trim()) return null;
+
+              return {
+                id: m.id,
+                body: body.trim(),
+                authorId: m.author?.userId || m.author?.displayName || null,
+                createdAt: m.received,
+                isAgent: m.author?.type === 'business',
+              };
+            })
+            .filter(Boolean);
 
           return res.json({ messages: suncoMessages });
         }
