@@ -17836,6 +17836,13 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
   }
 
   try {
+    // First get the ticket to know who the requester is
+    const { data: ticketData } = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}.json`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    const requesterId = ticketData.ticket?.requester_id;
+
     const { data } = await axios.get(
       `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}/comments.json?sort_order=asc`,
       { headers: { 'Authorization': getZendeskAuthHeader() } }
@@ -17848,7 +17855,8 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
         body: comment.body,
         authorId: comment.author_id,
         createdAt: comment.created_at,
-        isAgent: comment.via?.channel !== 'messaging_sdk',
+        // A message is from an agent/bot if it was NOT written by the ticket requester
+        isAgent: comment.author_id !== requesterId,
       }));
 
     return res.json({ messages });
