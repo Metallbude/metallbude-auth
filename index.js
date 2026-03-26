@@ -17972,60 +17972,131 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
     const requesterId = ticketData.ticket?.requester_id;
-    const isMessagingTicket = /^Conversation with /i.test(ticketData.ticket?.subject || '');
+    const thisTicket = ticketData.ticket;
+    const isMessagingTicket = /^Conversation with /i.test(thisTicket?.subject || '');
 
     // For messaging SDK tickets, fetch messages from Sunshine Conversations API
     if (isMessagingTicket && isSuncoConfigured()) {
       try {
-        const { conversationId } = await findMessagingConversationId(ticketId);
-        if (conversationId) {
-          const { data: msgData } = await axios.get(
-            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/messages?page[size]=100`,
+        // Step 1: Get the requester's identity for Sunshine lookup
+        const { data: userData } = await axios.get(
+          `${ZENDESK_BASE_URL}/api/v2/users/${requesterId}.json`,
+          { headers: { 'Authorization': getZendeskAuthHeader() } }
+        );
+        const externalId = userData.user?.external_id;
+        const userEmail = userData.user?.email;
+
+        // Step 2: Find the Sunco user
+        const suncoUserId = await findSuncoUserId(externalId, userEmail);
+        if (suncoUserId) {
+          // Step 3: Get user's conversations
+          const { data: convoData } = await axios.get(
+            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=20`,
             { headers: { 'Authorization': getSuncoAuthHeader() } }
           );
-          const suncoMessages = (msgData.messages || [])
-            .map(m => {
-              const type = m.content?.type;
-              let body = '';
+          const conversations = convoData.conversations || [];
 
-              if (type === 'text') {
-                body = m.content.text || '';
-              } else if (type === 'carousel' || type === 'list') {
-                // Structured messages (AI bot product suggestions, etc.)
-                const items = m.content.items || [];
-                body = items.map(item => {
-                  let line = item.title || '';
-                  if (item.description) line += `\n${item.description}`;
-                  // Extract link actions (buttons/links the bot sends)
-                  const actions = item.actions || [];
-                  actions.forEach(a => {
-                    if (a.type === 'link' && a.uri) {
-                      line += `\n${a.text || a.uri}: ${a.uri}`;
-                    } else if (a.type === 'webview' && a.uri) {
-                      line += `\n${a.text || a.uri}: ${a.uri}`;
+          if (conversations.length > 0) {
+            // In single-conversation mode (most common), there's just one conversation
+            // containing messages from ALL tickets. Use the first one.
+            const convoId = conversations[0].id;
+
+            // Step 4: Fetch all messages from the conversation
+            const { data: msgData } = await axios.get(
+              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${convoId}/messages?page[size]=100`,
+              { headers: { 'Authorization': getSuncoAuthHeader() } }
+            );
+            let allMessages = msgData.messages || [];
+
+            // Step 5: If there are multiple messaging tickets, filter by time window
+            // so each ticket shows only its own messages (not the entire conversation)
+            if (userEmail) {
+              try {
+                const query = `type:ticket requester:${userEmail}`;
+                const { data: searchData } = await axios.get(
+                  `${ZENDESK_BASE_URL}/api/v2/search.json?query=${encodeURIComponent(query)}&sort_by=created_at&sort_order=asc&per_page=50`,
+                  { headers: { 'Authorization': getZendeskAuthHeader() } }
+                );
+                const messagingTickets = (searchData.results || [])
+                  .filter(t => /^Conversation with /i.test(t.subject || ''))
+                  .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+                if (messagingTickets.length > 1) {
+                  const ticketIndex = messagingTickets.findIndex(t => String(t.id) === String(ticketId));
+
+                  if (ticketIndex >= 0) {
+                    let startTime = null;
+                    let endTime = null;
+
+                    // Start boundary: previous ticket's updated_at
+                    // (messages before this belong to the previous ticket)
+                    if (ticketIndex > 0) {
+                      startTime = new Date(messagingTickets[ticketIndex - 1].updated_at);
                     }
-                  });
-                  return line;
-                }).filter(Boolean).join('\n\n');
-              } else if (type === 'image') {
-                body = m.content.altText || m.content.text || '[Image]';
-              } else if (type === 'file') {
-                body = m.content.text || '[File]';
+
+                    // End boundary: next ticket's created_at
+                    // (messages from here on belong to the next ticket)
+                    if (ticketIndex < messagingTickets.length - 1) {
+                      endTime = new Date(messagingTickets[ticketIndex + 1].created_at);
+                    }
+
+                    console.log(`📨 Ticket ${ticketId}: filtering messages [${startTime?.toISOString() || 'beginning'} → ${endTime?.toISOString() || 'now'}] (${ticketIndex + 1}/${messagingTickets.length})`);
+
+                    allMessages = allMessages.filter(m => {
+                      const msgTime = new Date(m.received);
+                      if (startTime && msgTime < startTime) return false;
+                      if (endTime && msgTime > endTime) return false;
+                      return true;
+                    });
+                  }
+                }
+              } catch (searchErr) {
+                console.error(`⚠️ Could not fetch ticket list for time filtering:`, searchErr.message);
+                // Continue without filtering — shows all messages (better than nothing)
               }
+            }
 
-              if (!body.trim()) return null;
+            // Step 6: Map Sunshine messages to our response format
+            const suncoMessages = allMessages
+              .map(m => {
+                const type = m.content?.type;
+                let body = '';
 
-              return {
-                id: m.id,
-                body: body.trim(),
-                authorId: m.author?.userId || m.author?.displayName || null,
-                createdAt: m.received,
-                isAgent: m.author?.type === 'business',
-              };
-            })
-            .filter(Boolean);
+                if (type === 'text') {
+                  body = m.content.text || '';
+                } else if (type === 'carousel' || type === 'list') {
+                  const items = m.content.items || [];
+                  body = items.map(item => {
+                    let line = item.title || '';
+                    if (item.description) line += `\n${item.description}`;
+                    const actions = item.actions || [];
+                    actions.forEach(a => {
+                      if ((a.type === 'link' || a.type === 'webview') && a.uri) {
+                        line += `\n${a.text || a.uri}: ${a.uri}`;
+                      }
+                    });
+                    return line;
+                  }).filter(Boolean).join('\n\n');
+                } else if (type === 'image') {
+                  body = m.content.altText || m.content.text || '[Image]';
+                } else if (type === 'file') {
+                  body = m.content.text || '[File]';
+                }
 
-          return res.json({ messages: suncoMessages });
+                if (!body.trim()) return null;
+
+                return {
+                  id: m.id,
+                  body: body.trim(),
+                  authorId: m.author?.userId || m.author?.displayName || null,
+                  createdAt: m.received,
+                  isAgent: m.author?.type === 'business',
+                };
+              })
+              .filter(Boolean);
+
+            return res.json({ messages: suncoMessages });
+          }
         }
       } catch (suncoErr) {
         console.error(`⚠️ Sunshine conversation fetch failed for ticket ${ticketId}, falling back to comments:`, suncoErr.response?.data || suncoErr.message);
