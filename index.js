@@ -18319,9 +18319,12 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/zendesk/webhook/chat-reply', async (req, res) => {
-  // Always acknowledge quickly so Zendesk doesn't retry
-  res.json({ received: true });
+  // 🛑 ENDPOINT DISABLED — DO NOT ENABLE UNTIL CLEVERPUSH API IS VERIFIED
+  console.log('🛑 Chat reply webhook DISABLED — request blocked');
+  res.json({ received: true, disabled: true });
+  return;
 
+  // eslint-disable-next-line no-unreachable
   try {
     // Verify webhook authenticity
     if (ZENDESK_WEBHOOK_SECRET) {
@@ -18373,6 +18376,12 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       return;
     }
 
+    // SAFETY: Validate subscriptionId is a real, non-empty string
+    if (typeof subscriptionId !== 'string' || subscriptionId.trim().length < 10) {
+      console.error(`🛑 SAFETY BLOCK: Invalid subscriptionId "${subscriptionId}" for ${requester_email} — refusing to send`);
+      return;
+    }
+
     // Build notification text
     const agentName = current_user_name || 'Metallbude Support';
     const previewText = latest_comment
@@ -18380,16 +18389,23 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       : 'Du hast eine neue Nachricht.';
 
     // Send targeted push via CleverPush API
+    // CRITICAL: The field MUST be "subscriptionId" (singular, camelCase).
+    // The channel field MUST be "channelId" (not "channel").
+    // If either field name is wrong, CleverPush silently broadcasts to ALL subscribers.
+    // Verified from CleverPush API docs: "Will broadcast to all subscriptions if not given."
     const notificationPayload = {
-      channel: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+      channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
       title: agentName,
       text: previewText,
-      subscribers: [subscriptionId],
+      subscriptionId: subscriptionId,
       customData: {
         type: 'zendesk_chat_reply',
         ticketId: String(ticket_id),
       }
     };
+
+    // SAFETY: Log exact payload so we can verify targeting
+    console.log(`📤 CleverPush payload: subscriptionId=${subscriptionId}, channelId=${notificationPayload.channelId}`);
 
     const cpResponse = await axios.post(
       'https://api.cleverpush.com/notification/send',
@@ -18403,7 +18419,14 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       }
     );
 
-    console.log(`✅ Push notification sent for ticket #${ticket_id} → ${requester_email} (notificationId: ${cpResponse.data?.id || 'sent'})`);
+    // SAFETY: Check response for signs of broadcast
+    const responseData = cpResponse.data || {};
+    const recipientCount = responseData.recipientCount || responseData.subscribers || responseData.count;
+    if (recipientCount && recipientCount > 5) {
+      console.error(`🛑 BROADCAST DETECTED! CleverPush sent to ${recipientCount} recipients instead of 1! Response: ${JSON.stringify(responseData)}`);
+    } else {
+      console.log(`✅ Push notification sent for ticket #${ticket_id} → ${requester_email} (response: ${JSON.stringify(responseData)})`);
+    }
 
   } catch (error) {
     console.error('❌ Chat reply push notification failed:', error.response?.data || error.message);
