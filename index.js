@@ -18319,19 +18319,13 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/zendesk/webhook/chat-reply', async (req, res) => {
-  // 🛑 ENDPOINT DISABLED — DO NOT ENABLE UNTIL CLEVERPUSH API IS VERIFIED
-  console.log('🛑 Chat reply webhook DISABLED — request blocked');
-  res.json({ received: true, disabled: true });
-  return;
-
-  // eslint-disable-next-line no-unreachable
   try {
     // Verify webhook authenticity
     if (ZENDESK_WEBHOOK_SECRET) {
       const providedSecret = req.headers['webhooksecret'];
       if (providedSecret !== ZENDESK_WEBHOOK_SECRET) {
         console.warn('⚠️ Chat reply webhook: invalid secret');
-        return;
+        return res.status(401).json({ error: 'unauthorized' });
       }
     }
 
@@ -18339,14 +18333,14 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
 
     if (!requester_email || !ticket_id) {
       console.warn('⚠️ Chat reply webhook: missing ticket_id or requester_email');
-      return;
+      return res.json({ received: true, skipped: 'missing fields' });
     }
 
     console.log(`🔔 Chat reply webhook: ticket #${ticket_id} by ${current_user_name || 'agent'} → ${requester_email}`);
 
     if (!config.cleverpushApiKey) {
       console.warn('⚠️ Chat reply webhook: CLEVERPUSH_API_KEY not configured');
-      return;
+      return res.json({ received: true, skipped: 'no api key' });
     }
 
     // Look up the customer's CleverPush subscription ID
@@ -18373,20 +18367,18 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
 
     if (!subscriptionId) {
       console.log(`⚠️ No push subscription found for ${requester_email} — cannot send notification`);
-      return;
+      return res.json({ received: true, skipped: 'no subscription' });
     }
 
     // SAFETY: Validate subscriptionId is a real, non-empty string
     if (typeof subscriptionId !== 'string' || subscriptionId.trim().length < 10) {
       console.error(`🛑 SAFETY BLOCK: Invalid subscriptionId "${subscriptionId}" for ${requester_email} — refusing to send`);
-      return;
+      return res.json({ received: true, skipped: 'invalid subscription' });
     }
 
-    // Build notification text
+    // Build notification text — send full message (no truncation)
     const agentName = current_user_name || 'Metallbude Support';
-    const previewText = latest_comment
-      ? (latest_comment.length > 100 ? latest_comment.substring(0, 100) + '…' : latest_comment)
-      : 'Du hast eine neue Nachricht.';
+    const messageText = latest_comment || 'Du hast eine neue Nachricht.';
 
     // Send targeted push via CleverPush API
     // CRITICAL: The field MUST be "subscriptionId" (singular, camelCase).
@@ -18396,11 +18388,12 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
     const notificationPayload = {
       channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
       title: agentName,
-      text: previewText,
+      text: messageText,
       subscriptionId: subscriptionId,
       customData: {
         type: 'zendesk_chat_reply',
         ticketId: String(ticket_id),
+        fullMessage: messageText,
       }
     };
 
@@ -18428,8 +18421,10 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       console.log(`✅ Push notification sent for ticket #${ticket_id} → ${requester_email} (response: ${JSON.stringify(responseData)})`);
     }
 
+    res.json({ received: true, sent: true });
   } catch (error) {
     console.error('❌ Chat reply push notification failed:', error.response?.data || error.message);
+    res.json({ received: true, error: 'send failed' });
   }
 });
 
