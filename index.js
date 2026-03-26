@@ -18384,7 +18384,7 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       channel: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
       title: agentName,
       text: previewText,
-      subscriptionIds: [subscriptionId],
+      subscribers: [subscriptionId],
       customData: {
         type: 'zendesk_chat_reply',
         ticketId: String(ticket_id),
