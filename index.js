@@ -17636,15 +17636,6 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
     );
 
     const tickets = (data.results || [])
-      .filter(ticket => {
-        // Skip AI agent ghost tickets — auto-created by messaging SDK
-        // These have the default English "Conversation with ..." subject and are never solved by a human
-        const subject = (ticket.subject || '');
-        const isGhostTicket = /^Conversation with /i.test(subject);
-        if (isGhostTicket) {
-        }
-        return !isGhostTicket;
-      })
       .map(ticket => ({
       id: ticket.id,
       subject: ticket.subject,
@@ -17652,6 +17643,8 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
       createdAt: ticket.created_at,
       updatedAt: ticket.updated_at,
       description: ticket.description ? ticket.description.substring(0, 150) : '',
+      // Flag AI agent conversations so the app can display them differently
+      isAiConversation: /^Conversation with /i.test(ticket.subject || ''),
     }));
 
     return res.json({ tickets });
