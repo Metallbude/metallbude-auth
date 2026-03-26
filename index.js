@@ -18248,6 +18248,168 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 });
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLEVERPUSH SUBSCRIPTION STORAGE
+// Stores CleverPush subscription IDs mapped to customer emails in Firestore
+// so we can send targeted push notifications (e.g., Zendesk chat replies)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.post('/cleverpush/store-subscription', async (req, res) => {
+  try {
+    const { email, subscriptionId, platform, appVersion, country, language } = req.body;
+
+    if (!email || !subscriptionId) {
+      return res.status(400).json({ success: false, error: 'email and subscriptionId are required' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, error: 'Invalid email format' });
+    }
+
+    if (!firebaseEnabled || !wishlistService) {
+      // Fallback: store in memory if Firebase isn't available
+      if (!global._pushSubscriptions) global._pushSubscriptions = {};
+      global._pushSubscriptions[email.toLowerCase()] = {
+        subscriptionId,
+        platform: platform || 'unknown',
+        appVersion: appVersion || 'unknown',
+        country: country || 'unknown',
+        language: language || 'de',
+        updatedAt: new Date().toISOString()
+      };
+      console.log(`📱 Stored push subscription (memory) for ${email}`);
+      return res.json({ success: true, storage: 'memory' });
+    }
+
+    // Store in Firestore
+    const db = wishlistService.db;
+    const docRef = db.collection('push_subscriptions').doc(email.toLowerCase());
+    await docRef.set({
+      email: email.toLowerCase(),
+      subscriptionId,
+      platform: platform || 'unknown',
+      appVersion: appVersion || 'unknown',
+      country: country || 'unknown',
+      language: language || 'de',
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    console.log(`📱 Stored push subscription for ${email} (${platform || 'unknown'})`);
+    return res.json({ success: true, storage: 'firestore' });
+
+  } catch (error) {
+    console.error('❌ Failed to store push subscription:', error.message);
+    return res.status(500).json({ success: false, error: 'Failed to store subscription' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK WEBHOOK - Chat Reply Push Notifications
+// Sends a push notification via CleverPush when an agent replies to a ticket
+// Configure in Zendesk Admin > Apps and integrations > Webhooks
+// URL: https://metallbude-auth.onrender.com/zendesk/webhook/chat-reply
+// Method: POST, Content-Type: application/json
+// Header: webhooksecret = <your ZENDESK_WEBHOOK_SECRET>
+// Body (JSON): {"ticket_id":"{{ticket.id}}","requester_email":"{{ticket.requester.email}}","requester_name":"{{ticket.requester.name}}","ticket_subject":"{{ticket.title}}","latest_comment":"{{ticket.latest_comment}}","current_user_name":"{{current_user.name}}"}
+// Then create a Trigger:
+//   Conditions: Ticket > Channel is Messaging, Current user is not requester
+//   Actions: Notify active webhook "Chat Reply Push"
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.post('/zendesk/webhook/chat-reply', async (req, res) => {
+  // Always acknowledge quickly so Zendesk doesn't retry
+  res.json({ received: true });
+
+  try {
+    // Verify webhook authenticity
+    if (ZENDESK_WEBHOOK_SECRET) {
+      const providedSecret = req.headers['webhooksecret'];
+      if (providedSecret !== ZENDESK_WEBHOOK_SECRET) {
+        console.warn('⚠️ Chat reply webhook: invalid secret');
+        return;
+      }
+    }
+
+    const { ticket_id, requester_email, requester_name, ticket_subject, latest_comment, current_user_name } = req.body;
+
+    if (!requester_email || !ticket_id) {
+      console.warn('⚠️ Chat reply webhook: missing ticket_id or requester_email');
+      return;
+    }
+
+    console.log(`🔔 Chat reply webhook: ticket #${ticket_id} by ${current_user_name || 'agent'} → ${requester_email}`);
+
+    if (!config.cleverpushApiKey) {
+      console.warn('⚠️ Chat reply webhook: CLEVERPUSH_API_KEY not configured');
+      return;
+    }
+
+    // Look up the customer's CleverPush subscription ID
+    let subscriptionId = null;
+    const emailKey = requester_email.toLowerCase();
+
+    // Try Firestore first
+    if (firebaseEnabled && wishlistService) {
+      try {
+        const db = wishlistService.db;
+        const doc = await db.collection('push_subscriptions').doc(emailKey).get();
+        if (doc.exists) {
+          subscriptionId = doc.data().subscriptionId;
+        }
+      } catch (fbErr) {
+        console.error('❌ Firestore lookup failed:', fbErr.message);
+      }
+    }
+
+    // Fallback to in-memory store
+    if (!subscriptionId && global._pushSubscriptions && global._pushSubscriptions[emailKey]) {
+      subscriptionId = global._pushSubscriptions[emailKey].subscriptionId;
+    }
+
+    if (!subscriptionId) {
+      console.log(`⚠️ No push subscription found for ${requester_email} — cannot send notification`);
+      return;
+    }
+
+    // Build notification text
+    const agentName = current_user_name || 'Metallbude Support';
+    const previewText = latest_comment
+      ? (latest_comment.length > 100 ? latest_comment.substring(0, 100) + '…' : latest_comment)
+      : 'Du hast eine neue Nachricht.';
+
+    // Send targeted push via CleverPush API
+    const notificationPayload = {
+      channel: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+      title: agentName,
+      text: previewText,
+      subscriptionIds: [subscriptionId],
+      customData: {
+        type: 'zendesk_chat_reply',
+        ticketId: String(ticket_id),
+      }
+    };
+
+    const cpResponse = await axios.post(
+      'https://api.cleverpush.com/notification/send',
+      notificationPayload,
+      {
+        headers: {
+          'Authorization': config.cleverpushApiKey,
+          'Content-Type': 'application/json'
+        },
+        timeout: 10000
+      }
+    );
+
+    console.log(`✅ Push notification sent for ticket #${ticket_id} → ${requester_email} (notificationId: ${cpResponse.data?.id || 'sent'})`);
+
+  } catch (error) {
+    console.error('❌ Chat reply push notification failed:', error.response?.data || error.message);
+  }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   
