@@ -17842,7 +17842,35 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
     const requesterId = ticketData.ticket?.requester_id;
+    const isMessagingTicket = /^Conversation with /i.test(ticketData.ticket?.subject || '');
 
+    // For messaging SDK tickets, fetch messages from Sunshine Conversations API
+    if (isMessagingTicket && isSuncoConfigured()) {
+      try {
+        const { conversationId } = await findMessagingConversationId(ticketId);
+        if (conversationId) {
+          const { data: msgData } = await axios.get(
+            `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${conversationId}/messages?page[size]=100`,
+            { headers: { 'Authorization': getSuncoAuthHeader() } }
+          );
+          const suncoMessages = (msgData.messages || [])
+            .filter(m => m.content?.type === 'text' && m.content?.text)
+            .map(m => ({
+              id: m.id,
+              body: m.content.text,
+              authorId: m.author?.userId || m.author?.displayName || null,
+              createdAt: m.received,
+              isAgent: m.author?.type === 'business',
+            }));
+
+          return res.json({ messages: suncoMessages });
+        }
+      } catch (suncoErr) {
+        console.error(`⚠️ Sunshine conversation fetch failed for ticket ${ticketId}, falling back to comments:`, suncoErr.response?.data || suncoErr.message);
+      }
+    }
+
+    // Fallback: fetch from ticket comments API (for human agent tickets)
     const { data } = await axios.get(
       `${ZENDESK_BASE_URL}/api/v2/tickets/${encodeURIComponent(ticketId)}/comments.json?sort_order=asc`,
       { headers: { 'Authorization': getZendeskAuthHeader() } }
