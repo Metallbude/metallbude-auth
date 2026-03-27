@@ -17803,6 +17803,49 @@ app.delete('/zendesk/tickets/:ticketId', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Get latest active conversation ID for a user
+// Used by the app to call showConversation(id) and skip the conversation list
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/zendesk/conversations/latest', async (req, res) => {
+  const { email, shopifyCustomerId } = req.query;
+  if (!email && !shopifyCustomerId) {
+    return res.status(400).json({ error: 'email or shopifyCustomerId required' });
+  }
+  if (!isSuncoConfigured()) {
+    return res.json({ conversationId: null, reason: 'sunco not configured' });
+  }
+  try {
+    const suncoUserId = await findSuncoUserId(shopifyCustomerId || '', email || '');
+    if (!suncoUserId) {
+      return res.json({ conversationId: null, reason: 'no sunco user' });
+    }
+    const { data: convoData } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations?filter[userId]=${suncoUserId}&page[size]=10`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    const conversations = convoData.conversations || [];
+    if (conversations.length === 0) {
+      return res.json({ conversationId: null, reason: 'no conversations' });
+    }
+    // Return the most recently active conversation
+    // Sort by last activity (most recent first)
+    const sorted = conversations.sort((a, b) => {
+      const aTime = new Date(a.lastUpdatedAt || a.createdAt || 0).getTime();
+      const bTime = new Date(b.lastUpdatedAt || b.createdAt || 0).getTime();
+      return bTime - aTime;
+    });
+    return res.json({
+      conversationId: sorted[0].id,
+      totalConversations: conversations.length,
+    });
+  } catch (err) {
+    console.error('❌ Failed to get latest conversation:', err.response?.data || err.message);
+    return res.json({ conversationId: null, reason: 'error' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Prepare New Conversation
 // 1. Closes all solved tickets (prevents Zendesk from reopening them)
 // 2. Deletes the Sunshine Conversations USER — the SDK will recreate a
