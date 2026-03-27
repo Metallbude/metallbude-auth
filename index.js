@@ -17782,6 +17782,27 @@ app.post('/zendesk/tickets/:ticketId/close', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK - Force delete a ticket (moves to trash, bypasses status restrictions)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.delete('/zendesk/tickets/:ticketId', async (req, res) => {
+  const { ticketId } = req.params;
+  if (!ticketId || !isZendeskConfigured()) {
+    return res.status(400).json({ error: 'Missing ticketId or Zendesk not configured' });
+  }
+  try {
+    await axios.delete(
+      `${ZENDESK_BASE_URL}/api/v2/tickets/${ticketId}.json`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    return res.json({ success: true, deleted: ticketId });
+  } catch (err) {
+    console.error(`❌ Failed to delete ticket #${ticketId}:`, err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to delete ticket', details: err.response?.data || err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK - Prepare New Conversation
 // 1. Closes all solved tickets (prevents Zendesk from reopening them)
 // 2. Deletes the Sunshine Conversations USER — the SDK will recreate a
