@@ -18271,33 +18271,54 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
     if (!firebaseEnabled || !wishlistService) {
       // Fallback: store in memory if Firebase isn't available
       if (!global._pushSubscriptions) global._pushSubscriptions = {};
-      global._pushSubscriptions[email.toLowerCase()] = {
+      const existing = global._pushSubscriptions[email.toLowerCase()];
+      const devices = existing?.devices || [];
+      // Replace existing entry for same subscriptionId, or add new
+      const filtered = devices.filter(d => d.subscriptionId !== subscriptionId);
+      filtered.push({
         subscriptionId,
         platform: platform || 'unknown',
         appVersion: appVersion || 'unknown',
-        country: country || 'unknown',
-        language: language || 'de',
+        updatedAt: new Date().toISOString()
+      });
+      // Keep max 5 devices per email
+      global._pushSubscriptions[email.toLowerCase()] = {
+        subscriptionId, // Keep for backward compat
+        devices: filtered.slice(-5),
         updatedAt: new Date().toISOString()
       };
-      console.log(`📱 Stored push subscription (memory) for ${email}`);
+      console.log(`📱 Stored push subscription (memory) for ${email} — ${filtered.length} device(s)`);
       return res.json({ success: true, storage: 'memory' });
     }
 
-    // Store in Firestore
+    // Store in Firestore — multi-device: add to devices array
     const db = wishlistService.db;
     const docRef = db.collection('push_subscriptions').doc(email.toLowerCase());
-    await docRef.set({
-      email: email.toLowerCase(),
+    const doc = await docRef.get();
+    const existingDevices = doc.exists ? (doc.data().devices || []) : [];
+
+    // Replace existing entry for same subscriptionId, or add new
+    const filteredDevices = existingDevices.filter(d => d.subscriptionId !== subscriptionId);
+    filteredDevices.push({
       subscriptionId,
       platform: platform || 'unknown',
       appVersion: appVersion || 'unknown',
-      country: country || 'unknown',
+      updatedAt: new Date().toISOString()
+    });
+
+    // Keep max 5 devices per email
+    const finalDevices = filteredDevices.slice(-5);
+
+    await docRef.set({
+      email: email.toLowerCase(),
+      subscriptionId, // Keep latest for backward compat
+      devices: finalDevices,
       language: language || 'de',
       updatedAt: new Date().toISOString()
     }, { merge: true });
 
-    console.log(`📱 Stored push subscription for ${email} (${platform || 'unknown'})`);
-    return res.json({ success: true, storage: 'firestore' });
+    console.log(`📱 Stored push subscription for ${email} (${platform || 'unknown'}) — ${finalDevices.length} device(s)`);
+    return res.json({ success: true, storage: 'firestore', deviceCount: finalDevices.length });
 
   } catch (error) {
     console.error('❌ Failed to store push subscription:', error.message);
@@ -18336,6 +18357,13 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       return res.json({ received: true, skipped: 'missing fields' });
     }
 
+    // Skip automated Zendesk messages (auto-close reminders, system messages)
+    const senderName = (current_user_name || '').toLowerCase().trim();
+    if (senderName === 'system' || senderName === 'chat bot' || senderName === '') {
+      console.log(`⏭️ Skipping automated message for ticket #${ticket_id} (sender: "${current_user_name || '(empty)'}")`);
+      return res.json({ received: true, skipped: 'automated message' });
+    }
+
     console.log(`🔔 Chat reply webhook: ticket #${ticket_id} by ${current_user_name || 'agent'} → ${requester_email}`);
 
     if (!config.cleverpushApiKey) {
@@ -18343,8 +18371,8 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       return res.json({ received: true, skipped: 'no api key' });
     }
 
-    // Look up the customer's CleverPush subscription ID
-    let subscriptionId = null;
+    // Look up the customer's CleverPush subscription IDs (multi-device)
+    let subscriptionIds = [];
     const emailKey = requester_email.toLowerCase();
 
     // Try Firestore first
@@ -18353,7 +18381,17 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
         const db = wishlistService.db;
         const doc = await db.collection('push_subscriptions').doc(emailKey).get();
         if (doc.exists) {
-          subscriptionId = doc.data().subscriptionId;
+          const data = doc.data();
+          // Multi-device: read from devices array
+          if (data.devices && Array.isArray(data.devices)) {
+            subscriptionIds = data.devices
+              .map(d => d.subscriptionId)
+              .filter(id => typeof id === 'string' && id.trim().length >= 10);
+          }
+          // Backward compat: fall back to single subscriptionId
+          if (subscriptionIds.length === 0 && data.subscriptionId) {
+            subscriptionIds = [data.subscriptionId];
+          }
         }
       } catch (fbErr) {
         console.error('❌ Firestore lookup failed:', fbErr.message);
@@ -18361,64 +18399,84 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
     }
 
     // Fallback to in-memory store
-    if (!subscriptionId && global._pushSubscriptions && global._pushSubscriptions[emailKey]) {
-      subscriptionId = global._pushSubscriptions[emailKey].subscriptionId;
+    if (subscriptionIds.length === 0 && global._pushSubscriptions && global._pushSubscriptions[emailKey]) {
+      const memData = global._pushSubscriptions[emailKey];
+      if (memData.devices && Array.isArray(memData.devices)) {
+        subscriptionIds = memData.devices
+          .map(d => d.subscriptionId)
+          .filter(id => typeof id === 'string' && id.trim().length >= 10);
+      }
+      if (subscriptionIds.length === 0 && memData.subscriptionId) {
+        subscriptionIds = [memData.subscriptionId];
+      }
     }
 
-    if (!subscriptionId) {
+    if (subscriptionIds.length === 0) {
       console.log(`⚠️ No push subscription found for ${requester_email} — cannot send notification`);
       return res.json({ received: true, skipped: 'no subscription' });
     }
 
-    // SAFETY: Validate subscriptionId is a real, non-empty string
-    if (typeof subscriptionId !== 'string' || subscriptionId.trim().length < 10) {
-      console.error(`🛑 SAFETY BLOCK: Invalid subscriptionId "${subscriptionId}" for ${requester_email} — refusing to send`);
-      return res.json({ received: true, skipped: 'invalid subscription' });
+    // SAFETY: Cap at 5 devices max
+    if (subscriptionIds.length > 5) {
+      console.error(`🛑 SAFETY BLOCK: Too many subscriptionIds (${subscriptionIds.length}) for ${requester_email} — capping at 5`);
+      subscriptionIds = subscriptionIds.slice(-5);
     }
 
     // Build notification text — send full message (no truncation)
     const agentName = current_user_name || 'Metallbude Support';
     const messageText = latest_comment || 'Du hast eine neue Nachricht.';
 
-    // Send targeted push via CleverPush API
+    // Send targeted push via CleverPush API to each device
     // CRITICAL: The field MUST be "subscriptionId" (singular, camelCase).
     // The channel field MUST be "channelId" (not "channel").
     // If either field name is wrong, CleverPush silently broadcasts to ALL subscribers.
     // Verified from CleverPush API docs: "Will broadcast to all subscriptions if not given."
-    const notificationPayload = {
-      channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
-      title: agentName,
-      text: messageText,
-      subscriptionId: subscriptionId,
-      customData: {
-        type: 'zendesk_chat_reply',
-        ticketId: String(ticket_id),
-        fullMessage: messageText,
-      }
-    };
+    let successCount = 0;
+    let lastResponse = null;
 
-    // SAFETY: Log exact payload so we can verify targeting
-    console.log(`📤 CleverPush payload: subscriptionId=${subscriptionId}, channelId=${notificationPayload.channelId}`);
+    for (const subId of subscriptionIds) {
+      const notificationPayload = {
+        channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+        title: agentName,
+        text: messageText,
+        subscriptionId: subId,
+        customData: {
+          type: 'zendesk_chat_reply',
+          ticketId: String(ticket_id),
+          fullMessage: messageText,
+        }
+      };
 
-    const cpResponse = await axios.post(
-      'https://api.cleverpush.com/notification/send',
-      notificationPayload,
-      {
-        headers: {
-          'Authorization': config.cleverpushApiKey,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
+      // SAFETY: Log exact payload so we can verify targeting
+      console.log(`📤 CleverPush payload: subscriptionId=${subId}, channelId=${notificationPayload.channelId}`);
+
+      try {
+        const cpResponse = await axios.post(
+          'https://api.cleverpush.com/notification/send',
+          notificationPayload,
+          {
+            headers: {
+              'Authorization': config.cleverpushApiKey,
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000
+          }
+        );
+        lastResponse = cpResponse.data || {};
+        successCount++;
+      } catch (cpErr) {
+        console.error(`❌ CleverPush send failed for ${subId}:`, cpErr.response?.data || cpErr.message);
       }
-    );
+    }
 
     // SAFETY: Check response for signs of broadcast
-    const responseData = cpResponse.data || {};
-    const recipientCount = responseData.recipientCount || responseData.subscribers || responseData.count;
-    if (recipientCount && recipientCount > 5) {
-      console.error(`🛑 BROADCAST DETECTED! CleverPush sent to ${recipientCount} recipients instead of 1! Response: ${JSON.stringify(responseData)}`);
-    } else {
-      console.log(`✅ Push notification sent for ticket #${ticket_id} → ${requester_email} (response: ${JSON.stringify(responseData)})`);
+    if (lastResponse) {
+      const recipientCount = lastResponse.recipientCount || lastResponse.subscribers || lastResponse.count;
+      if (recipientCount && recipientCount > 5) {
+        console.error(`🛑 BROADCAST DETECTED! CleverPush sent to ${recipientCount} recipients instead of 1! Response: ${JSON.stringify(lastResponse)}`);
+      } else {
+        console.log(`✅ Push notification sent for ticket #${ticket_id} → ${requester_email} (${successCount}/${subscriptionIds.length} devices, response: ${JSON.stringify(lastResponse)})`);
+      }
     }
 
     res.json({ received: true, sent: true });
