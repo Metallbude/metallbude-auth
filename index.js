@@ -17694,14 +17694,26 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
   }
 
   try {
-    // Search for tickets by requester email, sorted by most recent first
-    const query = `type:ticket requester:${email}`;
+    // Step 1: Find the Zendesk user ID for this email
+    const userSearch = await axios.get(
+      `${ZENDESK_BASE_URL}/api/v2/users/search.json?query=${encodeURIComponent(email)}`,
+      { headers: { 'Authorization': getZendeskAuthHeader() } }
+    );
+    const zendeskUser = (userSearch.data.users || []).find(
+      u => (u.email || '').toLowerCase() === email.toLowerCase()
+    );
+
+    if (!zendeskUser) {
+      return res.json({ tickets: [] });
+    }
+
+    // Step 2: Use the real-time Tickets API (no indexing delay unlike search.json)
     const { data } = await axios.get(
-      `${ZENDESK_BASE_URL}/api/v2/search.json?query=${encodeURIComponent(query)}&sort_by=created_at&sort_order=desc&per_page=20`,
+      `${ZENDESK_BASE_URL}/api/v2/users/${zendeskUser.id}/tickets/requested.json?sort_by=updated_at&sort_order=desc&per_page=20`,
       { headers: { 'Authorization': getZendeskAuthHeader() } }
     );
 
-    const tickets = (data.results || [])
+    const tickets = (data.tickets || [])
       .map(ticket => ({
       id: ticket.id,
       subject: ticket.subject,
@@ -17709,7 +17721,6 @@ app.get('/zendesk/tickets/by-email', async (req, res) => {
       createdAt: ticket.created_at,
       updatedAt: ticket.updated_at,
       description: ticket.description ? ticket.description.substring(0, 150) : '',
-      // Flag AI agent conversations so the app can display them differently
       isAiConversation: /^Conversation with /i.test(ticket.subject || ''),
     }));
 
@@ -18421,10 +18432,14 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       return res.json({ received: true, skipped: 'missing fields' });
     }
 
-    // Skip automated Zendesk messages (auto-close reminders, system messages)
+    // Skip only truly internal system events (empty comments, status changes)
+    // Allow trigger/automation messages that have actual content (e.g. idle reminders)
     const senderName = (current_user_name || '').toLowerCase().trim();
-    if (senderName === 'system' || senderName === 'chat bot' || senderName === '') {
-      console.log(`⏭️ Skipping automated message for ticket #${ticket_id} (sender: "${current_user_name || '(empty)'}")`);
+    const commentText = (latest_comment || '').trim();
+    const isSystemSender = senderName === 'system' || senderName === 'chat bot' || senderName === '';
+    const hasNoContent = !commentText || commentText.length < 3;
+    if (isSystemSender && hasNoContent) {
+      console.log(`⏭️ Skipping empty system message for ticket #${ticket_id} (sender: "${current_user_name || '(empty)'}")`);
       return res.json({ received: true, skipped: 'automated message' });
     }
 
