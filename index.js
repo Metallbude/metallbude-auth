@@ -18329,6 +18329,33 @@ app.post('/zendesk/webhook/ticket-status', async (req, res) => {
 // so we can send targeted push notifications (e.g., Zendesk chat replies)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// GET endpoint to check stored subscription for debugging
+app.get('/cleverpush/check-subscription', async (req, res) => {
+  try {
+    const email = (req.query.email || '').toLowerCase().trim();
+    if (!email) return res.status(400).json({ error: 'email query param required' });
+
+    if (firebaseEnabled && wishlistService) {
+      const db = wishlistService.db;
+      const doc = await db.collection('push_subscriptions').doc(email).get();
+      if (doc.exists) {
+        const data = doc.data();
+        return res.json({ found: true, devices: (data.devices || []).length, updatedAt: data.updatedAt, subscriptionId: data.subscriptionId ? data.subscriptionId.substring(0, 8) + '...' : null });
+      }
+      return res.json({ found: false });
+    }
+
+    // Memory fallback
+    if (global._pushSubscriptions && global._pushSubscriptions[email]) {
+      const data = global._pushSubscriptions[email];
+      return res.json({ found: true, storage: 'memory', devices: (data.devices || []).length });
+    }
+    return res.json({ found: false });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/cleverpush/store-subscription', async (req, res) => {
   try {
     const { email, subscriptionId, platform, appVersion, country, language } = req.body;
@@ -18432,16 +18459,34 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
       return res.json({ received: true, skipped: 'missing fields' });
     }
 
-    // Skip only truly internal system events (empty comments, status changes)
-    // Allow trigger/automation messages that have actual content (e.g. idle reminders)
+    // Skip system/bot messages that have no real content (empty auto-messages)
     const senderName = (current_user_name || '').toLowerCase().trim();
-    const commentText = (latest_comment || '').trim();
-    const isSystemSender = senderName === 'system' || senderName === 'chat bot' || senderName === '';
-    const hasNoContent = !commentText || commentText.length < 3;
+    const isSystemSender = senderName === 'system' || senderName === 'chat bot' || senderName === '' || senderName === 'answer bot';
+    const hasNoContent = !latest_comment || latest_comment.trim() === '';
     if (isSystemSender && hasNoContent) {
-      console.log(`⏭️ Skipping empty system message for ticket #${ticket_id} (sender: "${current_user_name || '(empty)'}")`);
-      return res.json({ received: true, skipped: 'automated message' });
+      console.log(`⏭️ Skipping empty system/bot message for ticket #${ticket_id} (sender: "${current_user_name || '(empty)'}")`);
+      return res.json({ received: true, skipped: 'empty system message' });
     }
+
+    // ── Deduplication: prevent the same message from sending multiple pushes ──
+    // Zendesk sometimes fires the webhook multiple times for the same event.
+    // We use ticket_id + message content as a dedup key with a 60-second window.
+    const crypto = require('crypto');
+    const dedupContent = `${ticket_id}:${(latest_comment || '').trim()}`;
+    const dedupKey = crypto.createHash('sha256').update(dedupContent).digest('hex').substring(0, 16);
+    
+    if (!global._webhookDedup) {
+      global._webhookDedup = new Map();
+    }
+    
+    if (global._webhookDedup.has(dedupKey)) {
+      console.log(`⏭️ Duplicate webhook for ticket #${ticket_id} — already sent within 60s (sender: "${current_user_name || '(empty)'}")`);
+      return res.json({ received: true, skipped: 'duplicate' });
+    }
+    
+    // Mark as processed, auto-expire after 60 seconds
+    global._webhookDedup.set(dedupKey, Date.now());
+    setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
 
     console.log(`🔔 Chat reply webhook: ticket #${ticket_id} by ${current_user_name || 'agent'} → ${requester_email}`);
 
