@@ -18774,6 +18774,12 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
       return res.json({ received: true, skipped: 'unknown event' });
     }
 
+    // Problem events: log but don't send push (not actionable in-app)
+    if (eventType === 'problem') {
+      console.log(`⚠️ Shipment webhook: problem event for ${requester_email} (order: ${order_number || '?'}, ticket: #${ticket_id || '?'}) — no push sent`);
+      return res.json({ received: true, skipped: 'problem event (no push)', event: eventType });
+    }
+
     // ── Deduplication (60-second window) ──
     const crypto = require('crypto');
     const dedupContent = `shipment:${requester_email}:${eventType}:${order_number || ticket_id}`;
@@ -18844,12 +18850,9 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
     if (eventType === 'shipped') {
       title = 'Deine Bestellung ist unterwegs! 📦';
       text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
-    } else if (eventType === 'delivered') {
+    } else {
       title = 'Deine Bestellung wurde zugestellt! ✅';
       text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
-    } else {
-      title = 'Versandupdate zu deiner Bestellung ⚠️';
-      text = `Es gibt ein Update zu deiner Bestellung${orderLabel}. Bitte prüfe den Sendungsstatus.`;
     }
 
     // Send targeted push to each device
