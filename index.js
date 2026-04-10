@@ -18669,25 +18669,107 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
     const tagList = (tags || '').toLowerCase();
     const comment = (latest_comment || '').toLowerCase();
 
-    // Check tags first, then fall back to comment text analysis
+    // Check tags first (exact word match to avoid 'nicht_zugestellt' matching 'zugestellt')
     if (!eventType) {
-      if (tagList.includes('zugestellt') || tagList.includes('delivered')) {
+      const tagArr = tagList.split(/[\s,]+/);
+      if (tagArr.includes('zugestellt') || tagArr.includes('delivered') || tagArr.includes('paqato_delivered')) {
         eventType = 'delivered';
-      } else if (tagList.includes('versandt') || tagList.includes('shipped') || tagList.includes('in_transit') || tagList.includes('unterwegs')) {
+      } else if (tagArr.includes('versandt') || tagArr.includes('shipped') || tagArr.includes('in_transit') || tagArr.includes('unterwegs') || tagArr.includes('paqato_shipped')) {
         eventType = 'shipped';
+      } else if (tagArr.includes('nicht_zugestellt') || tagArr.includes('undelivered') || tagArr.includes('exception') || tagArr.includes('problem')) {
+        eventType = 'problem';
       }
     }
 
-    // Parse Paqato comment text for shipment events
+    // Parse Paqato comment text for shipment events (all 59 Paqato event types)
+    // Order matters: check PROBLEM first, then DELIVERED, then SHIPPED
+    // because "nicht zugestellt" contains "zugestellt"
     if (!eventType && comment) {
-      if (comment.includes('zugestellt') || comment.includes('delivered') || comment.includes('wurde abgeholt') || comment.includes('erfolgreich zugestellt')) {
+      // PROBLEM: delivery issues, damage, refusal, returns
+      if (
+        comment.includes('nicht zugestellt') ||
+        comment.includes('konnte nicht zugestellt') ||
+        comment.includes('adressfehler') ||
+        comment.includes('adresse ist nicht korrekt') ||
+        comment.includes('empfängeradresse') ||
+        comment.includes('beschädigt') ||
+        comment.includes('fehlgeleitet') ||
+        comment.includes('falsch sortiert') ||
+        comment.includes('annahme verweigert') ||
+        comment.includes('rücksendung') ||
+        comment.includes('zurück gesendet') ||
+        comment.includes('vernichtet') ||
+        comment.includes('storniert') ||
+        comment.includes('nicht abgeholt') ||
+        comment.includes('verzögerung') ||
+        comment.includes('nicht erreichen') ||
+        (comment.includes('zustellversuch') && comment.includes('nicht'))
+      ) {
+        eventType = 'problem';
+      }
+      // DELIVERED: package reached the customer
+      else if (
+        comment.includes('erfolgreich zugestellt') ||
+        comment.includes('zugestellt an empfänger') ||
+        comment.includes('an nachbarn übergeben') ||
+        comment.includes('an dritte übergeben') ||
+        comment.includes('an ehepartner übergeben') ||
+        comment.includes('an familienmitglied übergeben') ||
+        comment.includes('an einem gesicherten ort') ||
+        comment.includes('an die hauspoststelle') ||
+        comment.includes('aus der paketstation entnommen') ||
+        (comment.includes('aus der postfiliale') && comment.includes('abgeholt')) ||
+        comment.includes('delivered') ||
+        comment.includes('wurde abgeholt')
+      ) {
         eventType = 'delivered';
-      } else if (comment.includes('versandt') || comment.includes('versendet') || comment.includes('shipped') || comment.includes('unterwegs') || comment.includes('in zustellung') || comment.includes('sendung ist auf dem weg') || comment.includes('paket wurde') || comment.includes('tracking')) {
+      }
+      // SHIPPED: package in transit, being processed, or ready for pickup
+      else if (
+        comment.includes('paket gepackt') ||
+        comment.includes('versanddaten') ||
+        comment.includes('daten zu ihrem paket') ||
+        comment.includes('paketzentrum') ||
+        comment.includes('zustellfahrzeug') ||
+        comment.includes('in zustellung') ||
+        comment.includes('auf dem weg') ||
+        comment.includes('paket abgeholt') ||
+        comment.includes('voraussichtliche zustellung') ||
+        comment.includes('spedition übergeben') ||
+        comment.includes('avisierung') ||
+        comment.includes('postfiliale') ||
+        comment.includes('paketstation') ||
+        comment.includes('sortierung') ||
+        comment.includes('versandbestätigung') ||
+        comment.includes('paketankündigung') ||
+        comment.includes('im zustellfahrzeug') ||
+        comment.includes('angekommen') ||
+        comment.includes('neu verpackt') ||
+        comment.includes('eingelagert') ||
+        comment.includes('liefertermin') ||
+        comment.includes('zollabfertigung') ||
+        comment.includes('versandt') ||
+        comment.includes('versendet') ||
+        comment.includes('shipped') ||
+        comment.includes('unterwegs') ||
+        comment.includes('sendung ist auf dem weg') ||
+        comment.includes('tracking') ||
+        comment.includes('zur abholung')
+      ) {
+        eventType = 'shipped';
+      }
+      // Fallback: any Paqato comment mentioning shipment terms → treat as shipped
+      else if (
+        comment.includes('sendung') ||
+        comment.includes('paket') ||
+        comment.includes('lieferung') ||
+        comment.includes('versand')
+      ) {
         eventType = 'shipped';
       }
     }
 
-    if (!eventType || (eventType !== 'shipped' && eventType !== 'delivered')) {
+    if (!eventType || !['shipped', 'delivered', 'problem'].includes(eventType)) {
       console.log(`⏭️ Shipment webhook: unknown event "${eventType}" for ticket #${ticket_id}`);
       return res.json({ received: true, skipped: 'unknown event' });
     }
@@ -18762,9 +18844,12 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
     if (eventType === 'shipped') {
       title = 'Deine Bestellung ist unterwegs! 📦';
       text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
-    } else {
+    } else if (eventType === 'delivered') {
       title = 'Deine Bestellung wurde zugestellt! ✅';
       text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
+    } else {
+      title = 'Versandupdate zu deiner Bestellung ⚠️';
+      text = `Es gibt ein Update zu deiner Bestellung${orderLabel}. Bitte prüfe den Sendungsstatus.`;
     }
 
     // Send targeted push to each device
