@@ -195,9 +195,10 @@ const config = {
   shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || 'metallbude-de.myshopify.com',
   storefrontToken: process.env.SHOPIFY_STOREFRONT_TOKEN,
   adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
-  // ✅ FIXED: Use consistent API version (2024-10) for both Storefront and Admin APIs
-  apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
-  adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2024-10/graphql.json',
+  // Shopify API version — update quarterly (https://shopify.dev/docs/api/usage/versioning)
+  apiVersion: '2026-01',
+  apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2026-01/graphql.json',
+  adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2026-01/graphql.json',
   cleverpushChannelId: process.env.CLEVERPUSH_CHANNEL_ID,
   cleverpushApiKey: process.env.CLEVERPUSH_API_KEY,
   mailerSendApiKey: process.env.MAILERSEND_API_KEY,
@@ -2081,9 +2082,12 @@ app.post('/raffle/pick-winner', async (req, res) => {
 });
 
 
-// 🔥 FIXED: Customer Account API URL (correct format for 2024-10 API)
-const CUSTOMER_ACCOUNT_API_URL = `https://shopify.com/${config.shopDomain}/account/customer/api/2024-10/graphql`;
-// Alternative for some shops: `https://${config.shopDomain}.myshopify.com/account/customer/api/2024-10/graphql`
+// Extract shop handle from full domain (e.g., 'metallbude-de' from 'metallbude-de.myshopify.com')
+const SHOP_HANDLE = config.shopDomain.replace('.myshopify.com', '');
+const CUSTOMER_ACCOUNT_API_URLS = [
+  `https://shopify.com/${SHOP_HANDLE}/account/customer/api/${config.apiVersion}/graphql`,
+  `https://${config.shopDomain}/account/customer/api/${config.apiVersion}/graphql`,
+];
 
 // Helper functions
 function generateVerificationCode() {
@@ -2232,7 +2236,7 @@ async function createReturnViaAdminAPI(returnData) {
     };
 
     const response = await axios.post(
-      `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
+      `https://${config.shopDomain}/admin/api/${config.apiVersion}/graphql.json`,
       { query: mutation, variables },
       {
         headers: {
@@ -2704,9 +2708,8 @@ async function submitShopifyReturnRequest(returnRequest, customerToken) {
 
     // ⚠️ FIXED: Try multiple Customer Account API URL formats
     const customerApiUrls = [
-      `https://shopify.com/${config.shopDomain}/account/customer/api/2024-10/graphql`,
-      `https://${config.shopDomain}.myshopify.com/account/customer/api/2024-10/graphql`,
-      `https://${config.shopDomain}/customer/account/api/2024-10/graphql`
+      ...CUSTOMER_ACCOUNT_API_URLS,
+      `https://${config.shopDomain}/customer/account/api/${config.apiVersion}/graphql`
     ];
 
     let response = null;
@@ -2858,16 +2861,33 @@ async function getShopifyCustomerReturns(customerToken) {
       }
     `;
 
-    const response = await axios.post(
-      CUSTOMER_ACCOUNT_API_URL,
-      { query },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${customerToken}`,
-        }
+    let response = null;
+    let lastError = null;
+    for (const apiUrl of CUSTOMER_ACCOUNT_API_URLS) {
+      try {
+        response = await axios.post(
+          apiUrl,
+          { query },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${customerToken}`,
+            },
+            timeout: 10000
+          }
+        );
+        break;
+      } catch (urlError) {
+        console.error(`❌ Customer returns failed with ${apiUrl}:`, urlError?.response?.status, urlError?.message);
+        lastError = urlError;
+        continue;
       }
-    );
+    }
+
+    if (!response) {
+      console.error('❌ All Customer Account API URLs failed for returns');
+      return [];
+    }
 
     if (response.data.errors) {
       console.error('❌ GraphQL errors:', response.data.errors);
@@ -5266,8 +5286,7 @@ app.get('/auth/validate', authenticateAppToken, (req, res) => {
 // 🔥 UPDATED: Now returns ALL active discounts with product/collection targeting info
 app.get('/check-app-discount', authenticateAppToken, async (req, res) => {
   try {
-    // Use 2025-10 API for discount queries (supports status:active filter)
-    const discountApiUrl = 'https://metallbude-de.myshopify.com/admin/api/2025-10/graphql.json';
+    const discountApiUrl = `https://metallbude-de.myshopify.com/admin/api/${config.apiVersion}/graphql.json`;
     
     // 🔥 UPDATED: Query now includes customerGets.items to get product/collection targeting
     const query = `
@@ -10953,7 +10972,7 @@ app.post('/customer/orders/:orderId/reorder', authenticateAppToken, async (req, 
         `;
 
         const cartResponse = await axios.post(
-          'https://metallbude-de.myshopify.com/api/2024-10/graphql.json',
+          `https://metallbude-de.myshopify.com/api/${config.apiVersion}/graphql.json`,
           {
             query: createCartMutation,
             variables: {
@@ -11564,7 +11583,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         };
 
         const draftResponse = await axios.post(
-          `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
+          `https://${config.shopDomain}/admin/api/${config.apiVersion}/graphql.json`,
           { query: draftMutation, variables: draftVariables },
           {
             headers: {
@@ -11612,7 +11631,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
           `;
 
           const requestResponse = await axios.post(
-            `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
+            `https://${config.shopDomain}/admin/api/${config.apiVersion}/graphql.json`,
             { 
               query: requestMutation, 
               variables: { 
@@ -11673,7 +11692,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
       };
 
       const alternateResponse = await axios.post(
-        `https://${config.shopDomain}/admin/api/2024-10/graphql.json`,
+        `https://${config.shopDomain}/admin/api/${config.apiVersion}/graphql.json`,
         { query: alternateMutation, variables: alternateVariables },
         {
           headers: {
@@ -11755,7 +11774,7 @@ app.post('/returns', authenticateAppToken, async (req, res) => {
         }
 
         const restResponse = await axios.post(
-          `https://${config.shopDomain}/admin/api/2024-10/orders/${numericOrderId}/return_requests.json`,
+          `https://${config.shopDomain}/admin/api/${config.apiVersion}/orders/${numericOrderId}/return_requests.json`,
           returnRequestPayload,
           {
             headers: {
@@ -12480,7 +12499,7 @@ app.get('/customer/addresses', authenticateAppToken, async (req, res) => {
     
     
     const response = await axios.get(
-      `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses.json`,
+      `https://${config.shopDomain}/admin/api/${config.apiVersion}/customers/${customerNumericId}/addresses.json`,
       {
         headers: {
           'X-Shopify-Access-Token': config.adminToken,
@@ -12523,7 +12542,7 @@ app.post('/customer/address', authenticateAppToken, async (req, res) => {
     
     
     const response = await axios.post(
-      `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses.json`,
+      `https://${config.shopDomain}/admin/api/${config.apiVersion}/customers/${customerNumericId}/addresses.json`,
       {
         address: {
           first_name: address.firstName || '',
@@ -12583,7 +12602,7 @@ app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) 
     
     
     // CRITICAL: Use REST API instead of GraphQL for address updates
-    const shopifyRestUrl = `https://${config.shopDomain}/admin/api/2024-10/customers/${customerId.split('/').pop()}/addresses/${addressId.split('/').pop()}.json`;
+    const shopifyRestUrl = `https://${config.shopDomain}/admin/api/${config.apiVersion}/customers/${customerId.split('/').pop()}/addresses/${addressId.split('/').pop()}.json`;
     
     
     const response = await axios.put(
@@ -12655,7 +12674,7 @@ app.delete('/customer/address/:addressId', authenticateAppToken, async (req, res
     
     
     const response = await axios.delete(
-      `https://${config.shopDomain}/admin/api/2024-10/customers/${customerNumericId}/addresses/${addressNumericId}.json`,
+      `https://${config.shopDomain}/admin/api/${config.apiVersion}/customers/${customerNumericId}/addresses/${addressNumericId}.json`,
       {
         headers: {
           'X-Shopify-Access-Token': config.adminToken,
@@ -16734,7 +16753,7 @@ CRITICAL FORMATTING RULES:
           `;
           
           const shopifyResponse = await axios.post(
-            `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2024-01/graphql.json`,
+            `https://${process.env.SHOPIFY_STORE_DOMAIN}/api/${config.apiVersion}/graphql.json`,
             { query: shopifyQuery, variables: { query: searchQuery } },
             {
               headers: {
