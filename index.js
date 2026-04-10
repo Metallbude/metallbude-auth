@@ -18620,6 +18620,169 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ZENDESK WEBHOOK - Shipment Status Updates (Paqato → Push Notification)
+// Configure a Zendesk Trigger to fire when Paqato adds shipping tags.
+// URL: https://metallbude-auth.onrender.com/zendesk/webhook/shipment-update
+// Method: POST, Content-Type: application/json
+// Header: webhooksecret = <your ZENDESK_WEBHOOK_SECRET>
+// ═══════════════════════════════════════════════════════════════════════════════
+app.post('/zendesk/webhook/shipment-update', async (req, res) => {
+  try {
+    // Verify webhook authenticity via shared secret
+    if (ZENDESK_WEBHOOK_SECRET) {
+      const providedSecret = req.headers['webhooksecret'];
+      if (providedSecret !== ZENDESK_WEBHOOK_SECRET) {
+        console.warn('⚠️ Shipment webhook: invalid secret');
+        return res.status(401).json({ error: 'unauthorized' });
+      }
+    }
+
+    const { ticket_id, requester_email, requester_name, shipment_status, order_number, carrier, tracking_url, tags } = req.body;
+
+    if (!requester_email) {
+      console.warn('⚠️ Shipment webhook: missing requester_email');
+      return res.json({ received: true, skipped: 'missing email' });
+    }
+
+    // Determine shipment event from tags or explicit status
+    let eventType = (shipment_status || '').toLowerCase();
+    const tagList = (tags || '').toLowerCase();
+
+    // Paqato typically adds tags like "versandt", "zugestellt", "shipped", "delivered"
+    if (!eventType) {
+      if (tagList.includes('zugestellt') || tagList.includes('delivered')) {
+        eventType = 'delivered';
+      } else if (tagList.includes('versandt') || tagList.includes('shipped') || tagList.includes('in_transit') || tagList.includes('unterwegs')) {
+        eventType = 'shipped';
+      }
+    }
+
+    if (!eventType || (eventType !== 'shipped' && eventType !== 'delivered')) {
+      console.log(`⏭️ Shipment webhook: unknown event "${eventType}" for ticket #${ticket_id}`);
+      return res.json({ received: true, skipped: 'unknown event' });
+    }
+
+    // ── Deduplication (60-second window) ──
+    const crypto = require('crypto');
+    const dedupContent = `shipment:${requester_email}:${eventType}:${order_number || ticket_id}`;
+    const dedupKey = crypto.createHash('sha256').update(dedupContent).digest('hex').substring(0, 16);
+
+    if (!global._webhookDedup) global._webhookDedup = new Map();
+    if (global._webhookDedup.has(dedupKey)) {
+      console.log(`⏭️ Duplicate shipment webhook for ${requester_email} (${eventType})`);
+      return res.json({ received: true, skipped: 'duplicate' });
+    }
+    global._webhookDedup.set(dedupKey, Date.now());
+    setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
+
+    console.log(`📦 Shipment webhook: ${eventType} for ${requester_email} (order: ${order_number || '?'}, ticket: #${ticket_id || '?'})`);
+
+    if (!config.cleverpushApiKey) {
+      console.warn('⚠️ Shipment webhook: CLEVERPUSH_API_KEY not configured');
+      return res.json({ received: true, skipped: 'no api key' });
+    }
+
+    // Look up CleverPush subscription IDs by email
+    let subscriptionIds = [];
+    const emailKey = requester_email.toLowerCase();
+
+    if (firebaseEnabled && wishlistService) {
+      try {
+        const db = wishlistService.db;
+        const doc = await db.collection('push_subscriptions').doc(emailKey).get();
+        if (doc.exists) {
+          const data = doc.data();
+          if (data.devices && Array.isArray(data.devices)) {
+            subscriptionIds = data.devices
+              .map(d => d.subscriptionId)
+              .filter(id => typeof id === 'string' && id.trim().length >= 10);
+          }
+          if (subscriptionIds.length === 0 && data.subscriptionId) {
+            subscriptionIds = [data.subscriptionId];
+          }
+        }
+      } catch (fbErr) {
+        console.error('❌ Firestore lookup failed:', fbErr.message);
+      }
+    }
+
+    if (subscriptionIds.length === 0 && global._pushSubscriptions && global._pushSubscriptions[emailKey]) {
+      const memData = global._pushSubscriptions[emailKey];
+      if (memData.devices && Array.isArray(memData.devices)) {
+        subscriptionIds = memData.devices
+          .map(d => d.subscriptionId)
+          .filter(id => typeof id === 'string' && id.trim().length >= 10);
+      }
+      if (subscriptionIds.length === 0 && memData.subscriptionId) {
+        subscriptionIds = [memData.subscriptionId];
+      }
+    }
+
+    if (subscriptionIds.length === 0) {
+      console.log(`⚠️ No push subscription for ${requester_email} — skipping shipment push`);
+      return res.json({ received: true, skipped: 'no subscription' });
+    }
+
+    if (subscriptionIds.length > 5) subscriptionIds = subscriptionIds.slice(-5);
+
+    // Build notification content
+    const orderLabel = order_number ? ` #${order_number}` : '';
+    let title, text;
+
+    if (eventType === 'shipped') {
+      title = 'Deine Bestellung ist unterwegs! 📦';
+      text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
+    } else {
+      title = 'Deine Bestellung wurde zugestellt! ✅';
+      text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
+    }
+
+    // Send targeted push to each device
+    let successCount = 0;
+    for (const subId of subscriptionIds) {
+      const payload = {
+        channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+        title,
+        text,
+        subscriptionId: subId,
+        url: tracking_url || null,
+        customData: {
+          type: 'shipment_update',
+          event: eventType,
+          orderNumber: order_number || null,
+          trackingUrl: tracking_url || null,
+        }
+      };
+
+      console.log(`📤 Shipment push: ${eventType} → ${subId.substring(0, 8)}...`);
+
+      try {
+        await axios.post(
+          'https://api.cleverpush.com/notification/send',
+          payload,
+          {
+            headers: {
+              'Authorization': config.cleverpushApiKey,
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000
+          }
+        );
+        successCount++;
+      } catch (cpErr) {
+        console.error(`❌ CleverPush send failed for ${subId}:`, cpErr.response?.data || cpErr.message);
+      }
+    }
+
+    console.log(`✅ Shipment push sent: ${eventType} for ${requester_email} (${successCount}/${subscriptionIds.length} devices)`);
+    res.json({ received: true, sent: true, event: eventType, devices: successCount });
+  } catch (error) {
+    console.error('❌ Shipment webhook failed:', error.message);
+    res.json({ received: true, error: 'send failed' });
+  }
+});
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   
