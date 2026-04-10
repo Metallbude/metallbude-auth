@@ -18638,22 +18638,32 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
       }
     }
 
-    const { ticket_id, requester_email, requester_name, shipment_status, order_number, carrier, tracking_url, tags } = req.body;
+    const { ticket_id, requester_email, requester_name, shipment_status, order_number, carrier, tracking_url, tags, latest_comment } = req.body;
 
     if (!requester_email) {
       console.warn('⚠️ Shipment webhook: missing requester_email');
       return res.json({ received: true, skipped: 'missing email' });
     }
 
-    // Determine shipment event from tags or explicit status
+    // Determine shipment event from explicit status, tags, or comment text
     let eventType = (shipment_status || '').toLowerCase();
     const tagList = (tags || '').toLowerCase();
+    const comment = (latest_comment || '').toLowerCase();
 
-    // Paqato typically adds tags like "versandt", "zugestellt", "shipped", "delivered"
+    // Check tags first, then fall back to comment text analysis
     if (!eventType) {
       if (tagList.includes('zugestellt') || tagList.includes('delivered')) {
         eventType = 'delivered';
       } else if (tagList.includes('versandt') || tagList.includes('shipped') || tagList.includes('in_transit') || tagList.includes('unterwegs')) {
+        eventType = 'shipped';
+      }
+    }
+
+    // Parse Paqato comment text for shipment events
+    if (!eventType && comment) {
+      if (comment.includes('zugestellt') || comment.includes('delivered') || comment.includes('wurde abgeholt') || comment.includes('erfolgreich zugestellt')) {
+        eventType = 'delivered';
+      } else if (comment.includes('versandt') || comment.includes('versendet') || comment.includes('shipped') || comment.includes('unterwegs') || comment.includes('in zustellung') || comment.includes('sendung ist auf dem weg') || comment.includes('paket wurde') || comment.includes('tracking')) {
         eventType = 'shipped';
       }
     }
@@ -18739,8 +18749,17 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
     }
 
     // Send targeted push to each device
+    // CRITICAL: "subscriptionId" (singular, camelCase) MUST be present in payload.
+    // If missing or wrong field name, CleverPush silently broadcasts to ALL subscribers!
     let successCount = 0;
+    let lastResponse = null;
     for (const subId of subscriptionIds) {
+      // SAFETY: Validate subscriptionId before sending
+      if (!subId || typeof subId !== 'string' || subId.trim().length < 10) {
+        console.error(`🛑 SAFETY: Invalid subscriptionId "${subId}" — skipping to prevent broadcast`);
+        continue;
+      }
+
       const payload = {
         channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
         title,
@@ -18755,10 +18774,11 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
         }
       };
 
-      console.log(`📤 Shipment push: ${eventType} → ${subId.substring(0, 8)}...`);
+      // SAFETY: Log exact payload so we can verify targeting
+      console.log(`📤 Shipment push: ${eventType} → subscriptionId=${subId}, channelId=${payload.channelId}`);
 
       try {
-        await axios.post(
+        const cpResponse = await axios.post(
           'https://api.cleverpush.com/notification/send',
           payload,
           {
@@ -18769,13 +18789,22 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
             timeout: 10000
           }
         );
+        lastResponse = cpResponse.data || {};
         successCount++;
       } catch (cpErr) {
         console.error(`❌ CleverPush send failed for ${subId}:`, cpErr.response?.data || cpErr.message);
       }
     }
 
-    console.log(`✅ Shipment push sent: ${eventType} for ${requester_email} (${successCount}/${subscriptionIds.length} devices)`);
+    // SAFETY: Check response for signs of accidental broadcast
+    if (lastResponse) {
+      const recipientCount = lastResponse.recipientCount || lastResponse.subscribers || lastResponse.count;
+      if (recipientCount && recipientCount > 5) {
+        console.error(`🛑 BROADCAST DETECTED! CleverPush sent to ${recipientCount} recipients instead of targeted! Response: ${JSON.stringify(lastResponse)}`);
+      } else {
+        console.log(`✅ Shipment push sent: ${eventType} for ${requester_email} (${successCount}/${subscriptionIds.length} devices, response: ${JSON.stringify(lastResponse)})`);
+      }
+    }
     res.json({ received: true, sent: true, event: eventType, devices: successCount });
   } catch (error) {
     console.error('❌ Shipment webhook failed:', error.message);
