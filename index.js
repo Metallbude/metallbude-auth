@@ -1173,63 +1173,95 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
     const discounts = Array.isArray(payload?.discount_codes) ? payload.discount_codes : [];
     
     
-    // 🔥 NEW: Handle store credit reservations - deduct money when order confirmed
+    // Handle store credit reservations - deduct money when order confirmed
+    console.log(`📦 [WEBHOOK orders/create] email=${email}, order=${payload?.name || payload?.id}, discountCodes=${JSON.stringify(discounts.map(d => d?.code))}`);
+    console.log(`📦 [WEBHOOK] Total reservations in memory: ${storeCreditReservations.size}`);
+    for (const [k, v] of storeCreditReservations.entries()) {
+      console.log(`📦 [WEBHOOK] Reservation key="${k}" email=${v.email} status=${v.status} amount=${v.amount} code=${v.discountCode}`);
+    }
+
     for (const d of discounts) {
       const code = String(d?.code || '');
       
-      
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
+        console.log(`📦 [WEBHOOK] Processing store credit code: ${code}`);
         
-        // Extract reservation ID from discount code (format: STORE_CREDIT_{timestamp}_{reservationId})
-        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, ''); // Get {timestamp}_{reservationId}
+        // Code format: STORE_CREDIT_{timestamp}_{reservationId.toUpperCase()}
+        // ReservationId format: RES_{base36}_{random} (contains underscores!)
+        // So codeSuffix = "{timestamp}_RES_{base36}_{random}" — find RES_ and take everything from there
+        const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
+        const resIndex = codeSuffix.indexOf('RES_');
+        const extractedId = resIndex >= 0 ? codeSuffix.substring(resIndex) : codeSuffix;
+        console.log(`📦 [WEBHOOK] Extracted ID from code: "${extractedId}"`);
         
-        const parts = codeSuffix.split('_');
-        
-        const reservationId = parts.pop(); // Keep original case - don't use .toLowerCase()
-        
-        if (reservationId) {
-          const reservation = storeCreditReservations.get(reservationId);
-          
-          if (reservation && reservation.status === 'reserved') {
-            
-            try {
-              // NOW actually deduct the money from Shopify store credit account
-              const amountStr = Number(reservation.amount).toFixed(2);
-              const debitResult = await tryDebitWithFallbacks({ 
-                customerGid: reservation.customerGid, 
-                storeCreditAccountId: reservation.storeCreditAccountId, 
-                amountStr: amountStr 
-              });
-              
-              if (debitResult.success) {
-                // Update local ledger
-                const currentBalance = getStoreCredit(reservation.email) || 0;
-                const newBalance = Math.max(0, currentBalance - reservation.amount);
-                setStoreCredit(reservation.email, newBalance);
-                await persistStoreCreditLedger();
-                
-                // Mark reservation as finalized
-                reservation.status = 'finalized';
-                reservation.finalizedAt = Date.now();
-                reservation.debitedAt = Date.now();
-                reservation.orderId = payload?.id;
-                reservation.orderName = payload?.name;
-                storeCreditReservations.set(reservationId, reservation);
-                await persistStoreCreditReservations();
-                
-              } else {
-                console.error(`❌ Failed to deduct store credit for reservation ${reservationId}:`, debitResult.errors);
-                // Keep reservation as 'reserved' so it can be retried or cleaned up later
-              }
-            } catch (error) {
-              console.error(`❌ Error processing store credit deduction for reservation ${reservationId}:`, error);
+        // Lookup: try exact, then case-insensitive (code uses .toUpperCase()), then match by discountCode
+        let reservation = storeCreditReservations.get(extractedId);
+        let matchedKey = extractedId;
+        if (!reservation) {
+          const lowerExtracted = extractedId.toLowerCase();
+          for (const [key, val] of storeCreditReservations.entries()) {
+            if (key.toLowerCase() === lowerExtracted || key.toUpperCase() === extractedId) {
+              reservation = val;
+              matchedKey = key;
+              console.log(`📦 [WEBHOOK] Matched via case-insensitive: key="${key}"`);
+              break;
             }
-            
-          } else if (reservation && reservation.status === 'finalized') {
-          } else if (reservation) {
-          } else {
           }
+        }
+        if (!reservation) {
+          // Fallback: match by discount code stored in reservation
+          for (const [key, val] of storeCreditReservations.entries()) {
+            if (val.discountCode === code) {
+              reservation = val;
+              matchedKey = key;
+              console.log(`📦 [WEBHOOK] Matched via discountCode field: key="${key}"`);
+              break;
+            }
+          }
+        }
+        
+        if (!reservation) {
+          console.error(`❌ [WEBHOOK] No reservation found for extractedId="${extractedId}" code=${code}`);
+          continue;
+        }
+        
+        console.log(`📦 [WEBHOOK] Found reservation: key="${matchedKey}" status=${reservation.status} amount=${reservation.amount}`);
+        
+        if (reservation.status === 'reserved') {
+          try {
+            const amountStr = Number(reservation.amount).toFixed(2);
+            console.log(`📦 [WEBHOOK] Attempting debit: amount=${amountStr} customerGid=${reservation.customerGid} accountId=${reservation.storeCreditAccountId}`);
+            const debitResult = await tryDebitWithFallbacks({ 
+              customerGid: reservation.customerGid, 
+              storeCreditAccountId: reservation.storeCreditAccountId, 
+              amountStr: amountStr 
+            });
+            
+            if (debitResult.success) {
+              console.log(`✅ [WEBHOOK] Debit successful for reservation ${matchedKey}`);
+              const currentBalance = getStoreCredit(reservation.email) || 0;
+              const newBalance = Math.max(0, currentBalance - reservation.amount);
+              setStoreCredit(reservation.email, newBalance);
+              await persistStoreCreditLedger();
+              
+              reservation.status = 'finalized';
+              reservation.finalizedAt = Date.now();
+              reservation.debitedAt = Date.now();
+              reservation.orderId = payload?.id;
+              reservation.orderName = payload?.name;
+              storeCreditReservations.set(matchedKey, reservation);
+              await persistStoreCreditReservations();
+              console.log(`✅ [WEBHOOK] Reservation ${matchedKey} finalized. New balance: ${newBalance}`);
+            } else {
+              console.error(`❌ [WEBHOOK] Debit FAILED for ${matchedKey}:`, JSON.stringify(debitResult.errors));
+            }
+          } catch (error) {
+            console.error(`❌ [WEBHOOK] Error processing deduction for ${matchedKey}:`, error?.message || error);
+          }
+        } else if (reservation.status === 'finalized') {
+          console.log(`📦 [WEBHOOK] Reservation ${matchedKey} already finalized, skipping`);
         } else {
+          console.log(`📦 [WEBHOOK] Reservation ${matchedKey} unexpected status: ${reservation.status}`);
         }
       }
     }
@@ -5871,6 +5903,9 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
                           id
                           title
                           handle
+                          featuredImage {
+                            url
+                          }
                         }
                       }
                     }
@@ -6001,7 +6036,7 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
               title: variant.title,
               sku: variant.sku,
               price: variant.price,
-              image: variant.image?.url || null,
+              image: variant.image?.url || variant.product?.featuredImage?.url || null,
               product: variant.product ? {
                 id: variant.product.id,
                 title: variant.product.title,
@@ -6066,7 +6101,7 @@ app.get('/customer/orders', authenticateAppToken, async (req, res) => {
             if (!variant) return { id: lineItem.id, title: lineItem.title, quantity: lineItem.quantity, variant: null, totalPrice: { amount: '0.00', currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' } };
             const itemPrice = parseFloat(variant.price || '0');
             const quantity = lineItem.quantity || 0;
-            return { id: lineItem.id, title: lineItem.title, quantity: quantity, variant: { id: variant.id, title: variant.title, sku: variant.sku, price: variant.price, image: variant.image?.url || null, product: variant.product ? { id: variant.product.id, title: variant.product.title, handle: variant.product.handle } : null }, totalPrice: { amount: (itemPrice * quantity).toFixed(2), currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' } };
+            return { id: lineItem.id, title: lineItem.title, quantity: quantity, variant: { id: variant.id, title: variant.title, sku: variant.sku, price: variant.price, image: variant.image?.url || variant.product?.featuredImage?.url || null, product: variant.product ? { id: variant.product.id, title: variant.product.title, handle: variant.product.handle } : null }, totalPrice: { amount: (itemPrice * quantity).toFixed(2), currencyCode: order.currentTotalPriceSet?.shopMoney?.currencyCode || 'EUR' } };
           }).filter(item => item !== null) || [],
           note: order.note || '',
           tags: order.tags || [],
@@ -15666,7 +15701,7 @@ app.post('/apply-store-credit', async (req, res) => {
           code: newDiscountCode,
           startsAt: new Date().toISOString(),
           endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
-          combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: false },
+          combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
           customerGets: {
             value: {
               discountAmount: {
@@ -15744,7 +15779,7 @@ app.post('/apply-store-credit', async (req, res) => {
         code: reservationDiscountCode, // Use the reservation code, not a new random one
         startsAt: new Date().toISOString(),
         endsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Expires in 24 hours
-        combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: false },
+        combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true },
         customerGets: {
           value: {
             discountAmount: {
