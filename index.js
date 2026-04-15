@@ -18920,134 +18920,61 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PAQATO WEBHOOK - Direct Shipment Status Updates → Push Notification
-// PAQATO sends shipment events directly via their webhook system.
-// Setup: Contact PAQATO Customer Success Team to configure:
+// PAQATO WEBHOOK - Direct Shipment Status → Push Notification (no Zendesk)
+// PAQATO sends shipment events directly via their Sendungsstatus WebHook.
+// Setup: Contact PAQATO Customer Success to configure:
 //   URL: https://metallbude-auth.onrender.com/paqato/webhook/shipment-status
-//   Auth: Custom header "X-Paqato-Secret" = <PAQATO_WEBHOOK_SECRET>
+//   Custom header: X-Paqato-Secret = <PAQATO_WEBHOOK_SECRET>
 // PAQATO also sends HMAC security in the body (timestamp + token + signature).
 // Docs: https://docs.paqato.com/docs/sendungsstatus
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const PAQATO_WEBHOOK_SECRET = process.env.PAQATO_WEBHOOK_SECRET;
-const PAQATO_HMAC_KEY = process.env.PAQATO_HMAC_KEY; // Shared key from PAQATO for HMAC verification
+const PAQATO_HMAC_KEY = process.env.PAQATO_HMAC_KEY;
 
-// PAQATO eventId → category mapping (59 events)
-// See: https://docs.paqato.com/docs/liste-aller-benachrichtigungen-notifications-1
+// PAQATO eventId → category (all 59 events)
 const PAQATO_EVENT_CATEGORIES = {
   // SHIPPED / IN TRANSIT
-  1: 'shipped',   // Paket gepackt
-  2: 'shipped',   // Versanddaten an Carrier
-  3: 'shipped',   // Versanddaten an PAQATO
-  4: 'shipped',   // Sortierung im Paketzentrum
-  5: 'shipped',   // Im Zustellfahrzeug
-  18: 'shipped',  // In Postfiliale/Paketstation hinterlegt (for forwarding)
-  19: 'shipped',  // Zollabfertigung
-  26: 'shipped',  // Zur Abholung im Paketzentrum
-  27: 'shipped',  // Paket neu verpackt
-  28: 'shipped',  // Lagerung/Eingelagert
-  33: 'shipped',  // Paket abgeholt (vom Carrier)
-  34: 'shipped',  // Voraussichtliche Zustellung
-  35: 'shipped',  // An Spedition übergeben
-  36: 'shipped',  // Avisierung geplant
-  38: 'shipped',  // Avisierung erfolgreich (Liefertermin vereinbart)
-  39: 'shipped',  // Im Zustellfahrzeug (Spedition)
-  40: 'shipped',  // In Zustellung
-  41: 'shipped',  // Zustellfahrzeug angekommen
-  44: 'shipped',  // Paketstation als neuer Lieferort
-  45: 'shipped',  // In Zustellung zum neuen Lieferort
-  47: 'shipped',  // In Filiale zur Abholung
-  48: 'shipped',  // Ablageort/Nachbar als neuer Lieferort
-  50: 'shipped',  // Zustellretoure wird bearbeitet
-  51: 'shipped',  // Paketzentrum verlassen
-  52: 'shipped',  // Im Paketzentrum angekommen
-  53: 'shipped',  // Im ersten Paketzentrum
-  54: 'shipped',  // Im Ziel-Depot
-  55: 'shipped',  // Im Zielland angekommen
-  56: 'shipped',  // Retoure abgeholt
-  57: 'shipped',  // Liefertermin vereinbart
-
+  1: 'shipped', 2: 'shipped', 3: 'shipped', 4: 'shipped', 5: 'shipped',
+  18: 'shipped', 19: 'shipped', 26: 'shipped', 27: 'shipped', 28: 'shipped',
+  33: 'shipped', 34: 'shipped', 35: 'shipped', 36: 'shipped', 38: 'shipped',
+  39: 'shipped', 40: 'shipped', 41: 'shipped', 44: 'shipped', 45: 'shipped',
+  47: 'shipped', 48: 'shipped', 50: 'shipped', 51: 'shipped', 52: 'shipped',
+  53: 'shipped', 54: 'shipped', 55: 'shipped', 56: 'shipped', 57: 'shipped',
   // DELIVERED
-  6: 'delivered',  // Erfolgreich zugestellt
-  7: 'delivered',  // An andere Person übergeben
-  8: 'delivered',  // An Ehegatten übergeben
-  9: 'delivered',  // An Familienmitglied übergeben
-  10: 'delivered', // An Nachbarn übergeben
-  11: 'delivered', // An gesichertem Ort abgelegt
-  12: 'delivered', // In Postfiliale/Paketstation zur Abholung
-  16: 'delivered', // Aus Paketstation entnommen
-  17: 'delivered', // Aus Postfiliale abgeholt
-  30: 'delivered', // An Hauspoststelle übergeben
-  42: 'delivered', // Erfolgreich zugestellt (Spedition)
-
+  6: 'delivered', 7: 'delivered', 8: 'delivered', 9: 'delivered',
+  10: 'delivered', 11: 'delivered', 12: 'delivered', 16: 'delivered',
+  17: 'delivered', 30: 'delivered', 42: 'delivered',
   // PROBLEM
-  13: 'problem',   // Adressfehler
-  14: 'problem',   // Paket beschädigt
-  15: 'problem',   // Paket fehlgeleitet
-  20: 'problem',   // Nicht zugestellt
-  21: 'problem',   // Annahme verweigert
-  22: 'problem',   // Nachnahme nicht eingelöst
-  23: 'problem',   // Zustellversuch 1 fehlgeschlagen
-  24: 'problem',   // Zustellversuch 2 fehlgeschlagen
-  25: 'problem',   // Zustellversuch 3 fehlgeschlagen
-  29: 'problem',   // Rücksendung
-  31: 'problem',   // Vernichtet
-  32: 'problem',   // Nicht zugestellt, Weiterleitung Filiale
-  37: 'problem',   // Avisierung nicht möglich
-  43: 'problem',   // Paketmarke storniert
-  46: 'problem',   // Am Lieferort nicht zustellbar
-  49: 'problem',   // Zustellversuch 4 fehlgeschlagen
-  58: 'problem',   // Adresse falsch/unvollständig im Paketzentrum
-  59: 'problem',   // Nicht zugestellt, Weiterleitung Filiale (Abholinfos per Brief)
+  13: 'problem', 14: 'problem', 15: 'problem', 20: 'problem', 21: 'problem',
+  22: 'problem', 23: 'problem', 24: 'problem', 25: 'problem', 29: 'problem',
+  31: 'problem', 32: 'problem', 37: 'problem', 43: 'problem', 46: 'problem',
+  49: 'problem', 58: 'problem', 59: 'problem',
 };
 
-// Verify PAQATO HMAC signature
 function verifyPaqatoHmac(timestamp, token, signature) {
-  if (!PAQATO_HMAC_KEY) return true; // Skip if key not configured yet
+  if (!PAQATO_HMAC_KEY) return true;
   const expected = crypto.createHmac('sha256', PAQATO_HMAC_KEY)
     .update(String(timestamp) + String(token))
     .digest('hex');
-  return crypto.timingSafeEqual(
-    Buffer.from(expected, 'hex'),
-    Buffer.from(signature, 'hex')
-  );
+  return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));
 }
 
-// Look up customer email from Shopify order number
-async function lookupCustomerEmailByOrder(orderNumber) {
+async function lookupCustomerByOrder(orderNumber) {
   if (!config.adminToken) return null;
   try {
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query: `{
-          orders(first: 1, query: "name:#${orderNumber}") {
-            edges {
-              node {
-                name
-                email
-                customer { email firstName lastName }
-              }
-            }
-          }
-        }`
-      },
-      {
-        headers: {
-          'X-Shopify-Access-Token': config.adminToken,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
-    const order = response.data?.data?.orders?.edges?.[0]?.node;
-    if (order) {
-      return {
-        email: order.customer?.email || order.email,
-        name: order.customer?.firstName || order.email?.split('@')[0] || 'Kunde'
-      };
-    }
-    return null;
+    const resp = await axios.post(config.adminApiUrl, {
+      query: `{ orders(first: 1, query: "name:#${orderNumber}") { edges { node { name email customer { email firstName lastName } } } } }`
+    }, {
+      headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' },
+      timeout: 10000
+    });
+    const order = resp.data?.data?.orders?.edges?.[0]?.node;
+    if (!order) return null;
+    return {
+      email: order.customer?.email || order.email,
+      name: order.customer?.firstName || order.email?.split('@')[0] || 'Kunde'
+    };
   } catch (err) {
     console.error(`❌ Shopify order lookup failed for #${orderNumber}:`, err.message);
     return null;
@@ -19056,7 +18983,7 @@ async function lookupCustomerEmailByOrder(orderNumber) {
 
 app.post('/paqato/webhook/shipment-status', async (req, res) => {
   try {
-    // ── Auth: check shared secret header (if configured) ──
+    // Auth: shared secret header
     if (PAQATO_WEBHOOK_SECRET) {
       const provided = req.headers['x-paqato-secret'] || req.headers['webhooksecret'];
       if (provided !== PAQATO_WEBHOOK_SECRET) {
@@ -19067,7 +18994,7 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
 
     const { security, data } = req.body || {};
 
-    // ── Auth: verify HMAC signature from body ──
+    // Auth: HMAC signature verification
     if (security && security.signature) {
       try {
         if (!verifyPaqatoHmac(security.timestamp, security.token, security.signature)) {
@@ -19081,197 +19008,138 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     }
 
     if (!data) {
-      console.warn('⚠️ PAQATO webhook: missing data object');
       return res.status(400).json({ error: 'missing data' });
     }
 
-    const { carrier, trackingCode, orderNumber, shipmentState, shipmentType, events } = data;
+    const { carrier, trackingCode, orderNumber, shipmentState, events } = data;
 
-    // Determine event category from the latest event's eventId
+    // Determine event category from latest event
     let eventType = null;
     if (events && events.length > 0) {
-      // Latest event is the last in the array
-      const latestEvent = events[events.length - 1];
-      eventType = PAQATO_EVENT_CATEGORIES[latestEvent.eventId] || null;
-      console.log(`📦 PAQATO event: #${latestEvent.eventId} "${latestEvent.shortDescription}" → ${eventType || 'unmapped'}`);
+      const latest = events[events.length - 1];
+      eventType = PAQATO_EVENT_CATEGORIES[latest.eventId] || null;
+      console.log(`📦 PAQATO event: #${latest.eventId} "${latest.shortDescription}" → ${eventType || 'unmapped'}`);
     }
 
-    // Fallback to shipmentState if no event mapping
+    // Fallback to shipmentState
     if (!eventType) {
-      if (shipmentState === 'delivered') {
-        eventType = 'delivered';
-      } else if (shipmentState === 'undelivered') {
-        eventType = 'shipped'; // Still in transit
-      }
+      eventType = shipmentState === 'delivered' ? 'delivered' : (shipmentState === 'undelivered' ? 'shipped' : null);
     }
 
     if (!eventType || !['shipped', 'delivered', 'problem'].includes(eventType)) {
-      console.log(`⏭️ PAQATO webhook: unmapped event for order #${orderNumber || '?'}, shipmentState=${shipmentState}`);
       return res.json({ received: true, skipped: 'unmapped event' });
     }
 
-    // Problem events: log but don't send push
+    // Problem events → log only, no push
     if (eventType === 'problem') {
-      console.log(`⚠️ PAQATO webhook: problem event for order #${orderNumber || '?'} (${carrier || '?'}) — no push sent`);
-      return res.json({ received: true, skipped: 'problem event (no push)', event: eventType });
+      console.log(`⚠️ PAQATO: problem for order #${orderNumber || '?'} (${carrier || '?'}) — no push`);
+      return res.json({ received: true, skipped: 'problem event', event: eventType });
     }
 
-    // Look up customer email from order number via Shopify
     if (!orderNumber) {
-      console.warn('⚠️ PAQATO webhook: no orderNumber — cannot look up customer');
       return res.json({ received: true, skipped: 'no order number' });
     }
 
-    const customer = await lookupCustomerEmailByOrder(orderNumber);
+    // Look up customer email via Shopify
+    const customer = await lookupCustomerByOrder(orderNumber);
     if (!customer || !customer.email) {
-      console.warn(`⚠️ PAQATO webhook: no customer found for order #${orderNumber}`);
+      console.warn(`⚠️ PAQATO: no customer for order #${orderNumber}`);
       return res.json({ received: true, skipped: 'customer not found' });
     }
 
-    const requester_email = customer.email;
-    const requester_name = customer.name;
+    const emailKey = customer.email.toLowerCase();
 
-    // ── Deduplication (60-second window) ──
-    const dedupContent = `paqato:${requester_email}:${eventType}:${orderNumber}`;
-    const dedupKey = crypto.createHash('sha256').update(dedupContent).digest('hex').substring(0, 16);
-
+    // Deduplication (60s window)
+    const dedupKey = crypto.createHash('sha256').update(`paqato:${emailKey}:${eventType}:${orderNumber}`).digest('hex').substring(0, 16);
     if (!global._webhookDedup) global._webhookDedup = new Map();
     if (global._webhookDedup.has(dedupKey)) {
-      console.log(`⏭️ Duplicate PAQATO webhook for ${requester_email} (${eventType})`);
       return res.json({ received: true, skipped: 'duplicate' });
     }
     global._webhookDedup.set(dedupKey, Date.now());
     setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
 
-    console.log(`📦 PAQATO webhook: ${eventType} for ${requester_email} (order: #${orderNumber}, carrier: ${carrier || '?'})`);
+    console.log(`📦 PAQATO: ${eventType} for ${emailKey} (order #${orderNumber}, ${carrier || '?'})`);
 
     if (!config.cleverpushApiKey) {
-      console.warn('⚠️ PAQATO webhook: CLEVERPUSH_API_KEY not configured');
-      return res.json({ received: true, skipped: 'no api key' });
+      return res.json({ received: true, skipped: 'no cleverpush key' });
     }
 
-    // Look up CleverPush subscription IDs by email
+    // Look up CleverPush subscriptions
     let subscriptionIds = [];
-    const emailKey = requester_email.toLowerCase();
-
     if (firebaseEnabled && wishlistService) {
       try {
-        const db = wishlistService.db;
-        const doc = await db.collection('push_subscriptions').doc(emailKey).get();
+        const doc = await wishlistService.db.collection('push_subscriptions').doc(emailKey).get();
         if (doc.exists) {
           const d = doc.data();
           if (d.devices && Array.isArray(d.devices)) {
-            subscriptionIds = d.devices
-              .map(dev => dev.subscriptionId)
-              .filter(id => typeof id === 'string' && id.trim().length >= 10);
+            subscriptionIds = d.devices.map(dev => dev.subscriptionId).filter(id => typeof id === 'string' && id.trim().length >= 10);
           }
-          if (subscriptionIds.length === 0 && d.subscriptionId) {
-            subscriptionIds = [d.subscriptionId];
-          }
+          if (subscriptionIds.length === 0 && d.subscriptionId) subscriptionIds = [d.subscriptionId];
         }
       } catch (fbErr) {
         console.error('❌ Firestore lookup failed:', fbErr.message);
       }
     }
-
-    // Fallback to in-memory store
     if (subscriptionIds.length === 0 && global._pushSubscriptions && global._pushSubscriptions[emailKey]) {
-      const memData = global._pushSubscriptions[emailKey];
-      if (memData.devices && Array.isArray(memData.devices)) {
-        subscriptionIds = memData.devices
-          .map(dev => dev.subscriptionId)
-          .filter(id => typeof id === 'string' && id.trim().length >= 10);
+      const mem = global._pushSubscriptions[emailKey];
+      if (mem.devices && Array.isArray(mem.devices)) {
+        subscriptionIds = mem.devices.map(d => d.subscriptionId).filter(id => typeof id === 'string' && id.trim().length >= 10);
       }
-      if (subscriptionIds.length === 0 && memData.subscriptionId) {
-        subscriptionIds = [memData.subscriptionId];
-      }
+      if (subscriptionIds.length === 0 && mem.subscriptionId) subscriptionIds = [mem.subscriptionId];
     }
 
     if (subscriptionIds.length === 0) {
-      console.log(`⚠️ No push subscription for ${requester_email} — skipping PAQATO push`);
+      console.log(`⚠️ No push subscription for ${emailKey} — skipping`);
       return res.json({ received: true, skipped: 'no subscription' });
     }
-
     if (subscriptionIds.length > 5) subscriptionIds = subscriptionIds.slice(-5);
 
-    // Build tracking URL from PAQATO data
-    const trackingUrl = trackingCode
-      ? `https://metallbude.com/tracking?code=${encodeURIComponent(trackingCode)}&carrier=${encodeURIComponent(carrier || '')}`
-      : null;
-
-    // Build notification content
+    // Build notification
     const orderLabel = ` #${orderNumber}`;
-    let title, text;
+    const title = eventType === 'shipped'
+      ? 'Deine Bestellung ist unterwegs! 📦'
+      : 'Deine Bestellung wurde zugestellt! ✅';
+    const text = eventType === 'shipped'
+      ? `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`
+      : `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
 
-    if (eventType === 'shipped') {
-      title = 'Deine Bestellung ist unterwegs! 📦';
-      text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
-    } else {
-      title = 'Deine Bestellung wurde zugestellt! ✅';
-      text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
-    }
-
-    // Send targeted push to each device
     let successCount = 0;
     let lastResponse = null;
     for (const subId of subscriptionIds) {
-      if (!subId || typeof subId !== 'string' || subId.trim().length < 10) {
-        console.error(`🛑 SAFETY: Invalid subscriptionId "${subId}" — skipping to prevent broadcast`);
-        continue;
-      }
+      if (!subId || typeof subId !== 'string' || subId.trim().length < 10) continue;
 
       const payload = {
         channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
-        title,
-        text,
-        subscriptionId: subId,
-        url: trackingUrl,
-        customData: {
-          type: 'shipment_update',
-          source: 'paqato',
-          event: eventType,
-          orderNumber: orderNumber,
-          carrier: carrier || null,
-          trackingCode: trackingCode || null,
-        }
+        title, text, subscriptionId: subId,
+        url: trackingCode ? `https://metallbude.com/tracking?code=${encodeURIComponent(trackingCode)}&carrier=${encodeURIComponent(carrier || '')}` : null,
+        customData: { type: 'shipment_update', source: 'paqato', event: eventType, orderNumber, carrier: carrier || null }
       };
 
-      console.log(`📤 PAQATO push: ${eventType} → subscriptionId=${subId}, channelId=${payload.channelId}`);
-
+      console.log(`📤 PAQATO push: ${eventType} → sub=${subId}`);
       try {
-        const cpResponse = await axios.post(
-          'https://api.cleverpush.com/notification/send',
-          payload,
-          {
-            headers: {
-              'Authorization': config.cleverpushApiKey,
-              'Content-Type': 'application/json'
-            },
-            timeout: 10000
-          }
-        );
-        lastResponse = cpResponse.data || {};
+        const cpResp = await axios.post('https://api.cleverpush.com/notification/send', payload, {
+          headers: { 'Authorization': config.cleverpushApiKey, 'Content-Type': 'application/json' },
+          timeout: 10000
+        });
+        lastResponse = cpResp.data || {};
         successCount++;
       } catch (cpErr) {
-        console.error(`❌ CleverPush send failed for ${subId}:`, cpErr.response?.data || cpErr.message);
+        console.error(`❌ CleverPush failed for ${subId}:`, cpErr.response?.data || cpErr.message);
       }
     }
 
-    // SAFETY: Check for accidental broadcast
     if (lastResponse) {
-      const recipientCount = lastResponse.recipientCount || lastResponse.subscribers || lastResponse.count;
-      if (recipientCount && recipientCount > 5) {
-        console.error(`🛑 BROADCAST DETECTED! CleverPush sent to ${recipientCount} recipients instead of targeted! Response: ${JSON.stringify(lastResponse)}`);
+      const rc = lastResponse.recipientCount || lastResponse.subscribers || lastResponse.count;
+      if (rc && rc > 5) {
+        console.error(`🛑 BROADCAST DETECTED! ${rc} recipients! ${JSON.stringify(lastResponse)}`);
       } else {
-        console.log(`✅ PAQATO push sent: ${eventType} for ${requester_email} (${successCount}/${subscriptionIds.length} devices, response: ${JSON.stringify(lastResponse)})`);
+        console.log(`✅ PAQATO push sent: ${eventType} for ${emailKey} (${successCount}/${subscriptionIds.length} devices)`);
       }
     }
 
-    // Return 200 so PAQATO marks this as delivered (per their retry logic)
     res.json({ received: true, sent: true, event: eventType, devices: successCount });
   } catch (error) {
     console.error('❌ PAQATO webhook failed:', error.message);
-    // Still return 200 to prevent PAQATO retry storms during unexpected errors
     res.json({ received: true, error: 'processing failed' });
   }
 });
