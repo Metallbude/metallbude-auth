@@ -18675,6 +18675,225 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PAQATO DIRECT WEBHOOK - Shipment Status Updates
+// PAQATO calls this endpoint directly when shipment status changes.
+// URL: https://metallbude-auth.onrender.com/paqato/webhook/shipment-status
+// Method: POST, Content-Type: application/json
+// ═══════════════════════════════════════════════════════════════════════════════
+app.post('/paqato/webhook/shipment-status', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    console.log(`📦 [PAQATO DIRECT] Received webhook. Full payload: ${JSON.stringify(payload).substring(0, 2000)}`);
+    console.log(`📦 [PAQATO DIRECT] Headers: ${JSON.stringify(Object.fromEntries(Object.entries(req.headers).filter(([k]) => !k.startsWith('x-render'))))}`);
+
+    // PAQATO webhook payload fields (extract what's available)
+    // Common PAQATO fields: event, status, trackingNumber, orderNumber, carrier, 
+    // trackingUrl, recipientEmail, customerEmail, shopOrderNumber, etc.
+    const email = (
+      payload.recipientEmail || payload.customerEmail || payload.customer_email ||
+      payload.email || payload.recipient?.email || payload.order?.email || ''
+    ).toLowerCase();
+
+    const orderNumber = (
+      payload.orderNumber || payload.order_number || payload.shopOrderNumber ||
+      payload.reference || payload.order?.number || payload.order?.name || ''
+    );
+
+    const trackingUrl = (
+      payload.trackingUrl || payload.tracking_url || payload.trackingLink ||
+      payload.shipment?.trackingUrl || ''
+    );
+
+    const carrier = (
+      payload.carrier || payload.carrierName || payload.carrier_name ||
+      payload.shipment?.carrier || ''
+    );
+
+    // Determine event type from PAQATO status
+    const paqatoStatus = (
+      payload.event || payload.status || payload.shipmentStatus || payload.shipment_status || ''
+    ).toLowerCase();
+
+    const paqatoEventName = (payload.eventName || payload.event_name || '').toLowerCase();
+
+    let eventType = '';
+
+    // Map PAQATO statuses to our event types
+    const deliveredStatuses = ['delivered', 'zugestellt', 'delivery_success', 'picked_up_by_customer', 'aus-paketshop-abgeholt', 'erfolgreich-zugestellt'];
+    const shippedStatuses = ['shipped', 'in_transit', 'in-transit', 'out_for_delivery', 'versandt', 'unterwegs', 'created', 'label_created', 'picked_up', 'departure_scan', 'arrival_scan', 'in-zustellung', 'angekommen-im-zielland', 'paket-ist-auf-dem-weg'];
+    const problemStatuses = ['exception', 'failed_attempt', 'return', 'expired', 'damage', 'nicht-zugestellt', 'adressfehler', 'beschaedigt'];
+
+    const statusToCheck = paqatoStatus || paqatoEventName;
+
+    if (deliveredStatuses.some(s => statusToCheck.includes(s))) {
+      eventType = 'delivered';
+    } else if (problemStatuses.some(s => statusToCheck.includes(s))) {
+      eventType = 'problem';
+    } else if (shippedStatuses.some(s => statusToCheck.includes(s))) {
+      eventType = 'shipped';
+    }
+
+    // If we still don't know the event type, try to parse from description/message
+    if (!eventType) {
+      const description = (payload.description || payload.message || payload.statusMessage || payload.status_message || '').toLowerCase();
+      if (description.includes('zugestellt') && !description.includes('nicht')) {
+        eventType = 'delivered';
+      } else if (description.includes('nicht zugestellt') || description.includes('fehler') || description.includes('problem')) {
+        eventType = 'problem';
+      } else if (description.includes('versand') || description.includes('unterwegs') || description.includes('transit') || description.includes('shipping')) {
+        eventType = 'shipped';
+      }
+    }
+
+    console.log(`📦 [PAQATO DIRECT] Parsed: email=${email}, order=${orderNumber}, event=${eventType}, status=${paqatoStatus}, carrier=${carrier}`);
+
+    if (!email) {
+      console.log(`⚠️ [PAQATO DIRECT] No email in payload — cannot send push. Keys received: ${Object.keys(payload).join(', ')}`);
+      return res.json({ received: true, skipped: 'no email found in payload', parsedFields: { paqatoStatus, orderNumber, carrier } });
+    }
+
+    if (!eventType || !['shipped', 'delivered', 'problem'].includes(eventType)) {
+      console.log(`⏭️ [PAQATO DIRECT] Unknown event "${eventType}" (paqato status: "${paqatoStatus}") for ${email}`);
+      return res.json({ received: true, skipped: 'unknown event type', paqatoStatus, email });
+    }
+
+    if (eventType === 'problem') {
+      console.log(`⚠️ [PAQATO DIRECT] Problem event for ${email} (order: ${orderNumber}) — no push sent`);
+      return res.json({ received: true, skipped: 'problem event', event: eventType });
+    }
+
+    // ── Deduplication (60-second window) ──
+    const dedupContent = `paqato:${email}:${eventType}:${orderNumber}`;
+    const dedupKey = require('crypto').createHash('sha256').update(dedupContent).digest('hex').substring(0, 16);
+    if (!global._webhookDedup) global._webhookDedup = new Map();
+    if (global._webhookDedup.has(dedupKey)) {
+      console.log(`⏭️ [PAQATO DIRECT] Duplicate webhook for ${email} (${eventType})`);
+      return res.json({ received: true, skipped: 'duplicate' });
+    }
+    global._webhookDedup.set(dedupKey, Date.now());
+    setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
+
+    console.log(`📦 [PAQATO DIRECT] Processing: ${eventType} for ${email} (order: ${orderNumber})`);
+
+    if (!config.cleverpushApiKey) {
+      console.warn('⚠️ [PAQATO DIRECT] CLEVERPUSH_API_KEY not configured');
+      return res.json({ received: true, skipped: 'no api key' });
+    }
+
+    // Look up CleverPush subscription IDs by email
+    let subscriptionIds = [];
+    const emailKey = email.toLowerCase();
+
+    if (firebaseEnabled && wishlistService) {
+      try {
+        const db = wishlistService.db;
+        const doc = await db.collection('push_subscriptions').doc(emailKey).get();
+        if (doc.exists) {
+          const data = doc.data();
+          if (data.devices && Array.isArray(data.devices)) {
+            subscriptionIds = data.devices
+              .map(d => d.subscriptionId)
+              .filter(id => typeof id === 'string' && id.trim().length >= 10);
+          }
+          if (subscriptionIds.length === 0 && data.subscriptionId) {
+            subscriptionIds = [data.subscriptionId];
+          }
+        }
+      } catch (fbErr) {
+        console.error('❌ [PAQATO DIRECT] Firestore lookup failed:', fbErr.message);
+      }
+    }
+
+    if (subscriptionIds.length === 0 && global._pushSubscriptions && global._pushSubscriptions[emailKey]) {
+      const memData = global._pushSubscriptions[emailKey];
+      if (memData.devices && Array.isArray(memData.devices)) {
+        subscriptionIds = memData.devices
+          .map(d => d.subscriptionId)
+          .filter(id => typeof id === 'string' && id.trim().length >= 10);
+      }
+      if (subscriptionIds.length === 0 && memData.subscriptionId) {
+        subscriptionIds = [memData.subscriptionId];
+      }
+    }
+
+    if (subscriptionIds.length === 0) {
+      console.log(`⚠️ [PAQATO DIRECT] No push subscription for ${email} — skipping`);
+      return res.json({ received: true, skipped: 'no subscription', email });
+    }
+
+    if (subscriptionIds.length > 5) subscriptionIds = subscriptionIds.slice(-5);
+
+    // Build notification
+    const orderLabel = orderNumber ? ` #${orderNumber}` : '';
+    let title, text;
+    if (eventType === 'shipped') {
+      title = 'Deine Bestellung ist unterwegs! 📦';
+      text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
+    } else {
+      title = 'Deine Bestellung wurde zugestellt! ✅';
+      text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
+    }
+
+    let successCount = 0;
+    let lastResponse = null;
+    for (const subId of subscriptionIds) {
+      if (!subId || typeof subId !== 'string' || subId.trim().length < 10) {
+        console.error(`🛑 [PAQATO DIRECT] Invalid subscriptionId "${subId}" — skipping`);
+        continue;
+      }
+
+      const cpPayload = {
+        channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+        title,
+        text,
+        subscriptionId: subId,
+        url: trackingUrl || null,
+        customData: {
+          type: 'shipment_update',
+          event: eventType,
+          orderNumber: orderNumber || null,
+          trackingUrl: trackingUrl || null,
+        }
+      };
+
+      console.log(`📤 [PAQATO DIRECT] Sending push: ${eventType} → subscriptionId=${subId}`);
+
+      try {
+        const cpResponse = await axios.post(
+          'https://api.cleverpush.com/notification/send',
+          cpPayload,
+          {
+            headers: {
+              'Authorization': config.cleverpushApiKey,
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000
+          }
+        );
+        lastResponse = cpResponse.data || {};
+        successCount++;
+      } catch (cpErr) {
+        console.error(`❌ [PAQATO DIRECT] CleverPush send failed for ${subId}:`, cpErr.response?.data || cpErr.message);
+      }
+    }
+
+    if (lastResponse) {
+      const recipientCount = lastResponse.recipientCount || lastResponse.subscribers || lastResponse.count;
+      if (recipientCount && recipientCount > 5) {
+        console.error(`🛑 [PAQATO DIRECT] BROADCAST DETECTED! Sent to ${recipientCount} recipients!`);
+      } else {
+        console.log(`✅ [PAQATO DIRECT] Push sent: ${eventType} for ${email} (${successCount}/${subscriptionIds.length} devices)`);
+      }
+    }
+
+    res.json({ received: true, sent: true, event: eventType, email, devices: successCount });
+  } catch (error) {
+    console.error('❌ [PAQATO DIRECT] Webhook error:', error.message);
+    res.json({ received: true, error: 'processing failed', message: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK WEBHOOK - Shipment Status Updates (Paqato → Push Notification)
 // Configure a Zendesk Trigger to fire when Paqato adds shipping tags.
 // URL: https://metallbude-auth.onrender.com/zendesk/webhook/shipment-update
