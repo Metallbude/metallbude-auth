@@ -1174,17 +1174,11 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
     
     
     // Handle store credit reservations - deduct money when order confirmed
-    console.log(`📦 [WEBHOOK orders/create] email=${email}, order=${payload?.name || payload?.id}, discountCodes=${JSON.stringify(discounts.map(d => d?.code))}`);
-    console.log(`📦 [WEBHOOK] Total reservations in memory: ${storeCreditReservations.size}`);
-    for (const [k, v] of storeCreditReservations.entries()) {
-      console.log(`📦 [WEBHOOK] Reservation key="${k}" email=${v.email} status=${v.status} amount=${v.amount} code=${v.discountCode}`);
-    }
 
     for (const d of discounts) {
       const code = String(d?.code || '');
       
       if (code.startsWith(STORE_CREDIT_PREFIX)) {
-        console.log(`📦 [WEBHOOK] Processing store credit code: ${code}`);
         
         // Code format: STORE_CREDIT_{timestamp}_{reservationId.toUpperCase()}
         // ReservationId format: RES_{base36}_{random} (contains underscores!)
@@ -1192,7 +1186,6 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
         const codeSuffix = code.replace(STORE_CREDIT_PREFIX, '');
         const resIndex = codeSuffix.indexOf('RES_');
         const extractedId = resIndex >= 0 ? codeSuffix.substring(resIndex) : codeSuffix;
-        console.log(`📦 [WEBHOOK] Extracted ID from code: "${extractedId}"`);
         
         // Lookup: try exact, then case-insensitive (code uses .toUpperCase()), then match by discountCode
         let reservation = storeCreditReservations.get(extractedId);
@@ -1203,7 +1196,6 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
             if (key.toLowerCase() === lowerExtracted || key.toUpperCase() === extractedId) {
               reservation = val;
               matchedKey = key;
-              console.log(`📦 [WEBHOOK] Matched via case-insensitive: key="${key}"`);
               break;
             }
           }
@@ -1214,7 +1206,6 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
             if (val.discountCode === code) {
               reservation = val;
               matchedKey = key;
-              console.log(`📦 [WEBHOOK] Matched via discountCode field: key="${key}"`);
               break;
             }
           }
@@ -1225,12 +1216,11 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
           continue;
         }
         
-        console.log(`📦 [WEBHOOK] Found reservation: key="${matchedKey}" status=${reservation.status} amount=${reservation.amount}`);
+        console.log(`📦 [WEBHOOK] Found reservation: key="${matchedKey}" status=${reservation.status}`);
         
         if (reservation.status === 'reserved') {
           try {
             const amountStr = Number(reservation.amount).toFixed(2);
-            console.log(`📦 [WEBHOOK] Attempting debit: amount=${amountStr} customerGid=${reservation.customerGid} accountId=${reservation.storeCreditAccountId}`);
             const debitResult = await tryDebitWithFallbacks({ 
               customerGid: reservation.customerGid, 
               storeCreditAccountId: reservation.storeCreditAccountId, 
@@ -1238,7 +1228,6 @@ app.post('/webhooks/shopify/orders-create', express.raw({ type: 'application/jso
             });
             
             if (debitResult.success) {
-              console.log(`✅ [WEBHOOK] Debit successful for reservation ${matchedKey}`);
               const currentBalance = getStoreCredit(reservation.email) || 0;
               const newBalance = Math.max(0, currentBalance - reservation.amount);
               setStoreCredit(reservation.email, newBalance);
@@ -18210,8 +18199,6 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
                       endTime = new Date(messagingTickets[ticketIndex + 1].created_at);
                     }
 
-                    console.log(`📨 Ticket ${ticketId}: filtering messages [${startTime?.toISOString() || 'beginning'} → ${endTime?.toISOString() || 'now'}] (${ticketIndex + 1}/${messagingTickets.length})`);
-
                     allMessages = allMessages.filter(m => {
                       const msgTime = new Date(m.received);
                       if (startTime && msgTime < startTime) return false;
@@ -18635,9 +18622,6 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
         }
       };
 
-      // SAFETY: Log exact payload so we can verify targeting
-      console.log(`📤 CleverPush payload: subscriptionId=${subId}, channelId=${notificationPayload.channelId}`);
-
       try {
         const cpResponse = await axios.post(
           'https://api.cleverpush.com/notification/send',
@@ -18723,8 +18707,6 @@ app.get('/paqato/tracking/:orderNumber', authenticateAppToken, async (req, res) 
 app.post('/paqato/webhook/shipment-status', async (req, res) => {
   try {
     const payload = req.body || {};
-    console.log(`📦 [PAQATO DIRECT] Received webhook. Full payload: ${JSON.stringify(payload).substring(0, 2000)}`);
-    console.log(`📦 [PAQATO DIRECT] Headers: ${JSON.stringify(Object.fromEntries(Object.entries(req.headers).filter(([k]) => !k.startsWith('x-render'))))}`);
 
     // ── PAQATO nests all data under "data" ──
     const data = payload.data || {};
@@ -18761,8 +18743,6 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       eventType = 'shipped';
     }
     // eventId 2 (data transmitted), 4 (sorting), 51/53 (hub events) — skip, too noisy
-
-    console.log(`📦 [PAQATO DIRECT] Parsed: order=${orderNumber}, shipmentState=${shipmentState}, latestEventId=${latestEventId}, eventType=${eventType}, carrier=${carrier}, trackingCode=${trackingCode}`);
 
     if (!orderNumber) {
       console.log(`⚠️ [PAQATO DIRECT] No order number in payload — cannot process`);
@@ -18874,9 +18854,7 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       const orderNode = shopifyRes.data?.data?.orders?.edges?.[0]?.node;
       if (orderNode && orderNode.email) {
         email = orderNode.email.toLowerCase();
-        console.log(`📦 [PAQATO DIRECT] Shopify lookup: order #${orderNumber} → email=${email}`);
       } else {
-        console.log(`⚠️ [PAQATO DIRECT] Shopify lookup: no email found for order #${orderNumber}`);
       }
     } catch (shopifyErr) {
       console.error(`❌ [PAQATO DIRECT] Shopify lookup failed for order #${orderNumber}:`, shopifyErr.message);
@@ -18887,7 +18865,6 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       return res.json({ received: true, skipped: 'no email found for order', orderNumber });
     }
 
-    console.log(`📦 [PAQATO DIRECT] Processing: ${eventType} for ${email} (order: #${orderNumber})`);
 
     if (!config.cleverpushApiKey) {
       console.warn('⚠️ [PAQATO DIRECT] CLEVERPUSH_API_KEY not configured');
@@ -18978,7 +18955,6 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
         }
       };
 
-      console.log(`📤 [PAQATO DIRECT] Sending push: ${eventType} → subscriptionId=${subId}`);
 
       try {
         const cpResponse = await axios.post(
@@ -19183,7 +19159,6 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
     global._webhookDedup.set(dedupKey, Date.now());
     setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
 
-    console.log(`📦 Shipment webhook: ${eventType} for ${requester_email} (order: ${order_number || '?'}, ticket: #${ticket_id || '?'})`);
 
     if (!config.cleverpushApiKey) {
       console.warn('⚠️ Shipment webhook: CLEVERPUSH_API_KEY not configured');
@@ -19272,7 +19247,6 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
       };
 
       // SAFETY: Log exact payload so we can verify targeting
-      console.log(`📤 Shipment push: ${eventType} → subscriptionId=${subId}, channelId=${payload.channelId}`);
 
       try {
         const cpResponse = await axios.post(
