@@ -18675,6 +18675,46 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PAQATO TRACKING EVENTS — Fetch tracking timeline for app
+// GET /paqato/tracking/:orderNumber
+// Returns the stored PAQATO events for in-app shipment tracking timeline.
+// ═══════════════════════════════════════════════════════════════════════════════
+app.get('/paqato/tracking/:orderNumber', authenticateAppToken, async (req, res) => {
+  try {
+    const { orderNumber } = req.params;
+    if (!orderNumber) {
+      return res.status(400).json({ error: 'Missing order number' });
+    }
+
+    if (!firebaseEnabled || !wishlistService) {
+      return res.status(503).json({ error: 'Tracking service unavailable' });
+    }
+
+    const db = wishlistService.db;
+    const doc = await db.collection('paqato_tracking').doc(orderNumber).get();
+
+    if (!doc.exists) {
+      return res.json({ tracking: null, message: 'No tracking data found' });
+    }
+
+    const data = doc.data();
+    res.json({
+      tracking: {
+        orderNumber: data.orderNumber,
+        trackingCode: data.trackingCode,
+        carrier: data.carrier,
+        shipmentState: data.shipmentState,
+        events: (data.events || []).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)),
+        lastUpdated: data.lastUpdated,
+      }
+    });
+  } catch (error) {
+    console.error('❌ [PAQATO] Tracking fetch error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch tracking data' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PAQATO DIRECT WEBHOOK - Shipment Status Updates
 // PAQATO calls this endpoint directly when shipment status changes.
 // URL: https://metallbude-auth.onrender.com/paqato/webhook/shipment-status
@@ -18700,21 +18740,24 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     const latestEventId = latestEvent ? latestEvent.eventId : null;
     const latestEventDescription = latestEvent ? (latestEvent.shortDescription || '') : '';
 
-    // ── Map PAQATO shipmentState + eventId to our event types ──
+    // ── Map PAQATO shipmentState + eventId to our 3 notification types ──
     // PAQATO eventIds: 1=packed, 2=data transmitted, 4=sorting, 5=out for delivery,
     //   6=delivered, 20=not delivered, 33=picked up by carrier, 51=left hub, 53=first hub
-    // Only notify on meaningful status changes, not every intermediate sorting event
+    // We send exactly 3 notifications per order:
+    //   1. shipped   → eventId 1 (Sendung gepackt)
+    //   2. in_transit → eventId 33 (Sendung abgeholt) or 5 (In Zustellung) — whichever fires first
+    //   3. delivered  → eventId 6 or shipmentState=delivered
     let eventType = '';
 
     if (shipmentState === 'delivered' || latestEventId === 6) {
       eventType = 'delivered';
     } else if (latestEventId === 20) {
       eventType = 'problem';
-    } else if (latestEventId === 5) {
-      // Out for delivery — this is worth notifying about
-      eventType = 'out_for_delivery';
-    } else if ([1, 33].includes(latestEventId)) {
-      // Packed or picked up by carrier — first "shipped" notification
+    } else if (latestEventId === 5 || latestEventId === 33) {
+      // Out for delivery or picked up by carrier → second notification
+      eventType = 'in_transit';
+    } else if (latestEventId === 1) {
+      // Packed → first "shipped" notification
       eventType = 'shipped';
     }
     // eventId 2 (data transmitted), 4 (sorting), 51/53 (hub events) — skip, too noisy
@@ -18726,8 +18769,32 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       return res.json({ received: true, skipped: 'no order number' });
     }
 
-    if (!eventType || !['shipped', 'delivered', 'out_for_delivery', 'problem'].includes(eventType)) {
+    if (!eventType || !['shipped', 'delivered', 'in_transit', 'problem'].includes(eventType)) {
       console.log(`⏭️ [PAQATO DIRECT] No actionable event (shipmentState: "${shipmentState}", latestEventId: ${latestEventId}) — skipping`);
+      // Still store events for tracking timeline even if no notification
+      if (orderNumber && firebaseEnabled && wishlistService) {
+        try {
+          const db = wishlistService.db;
+          await db.collection('paqato_tracking').doc(orderNumber).set({
+            orderNumber,
+            trackingCode,
+            carrier,
+            shipmentState,
+            events: events.map(e => ({
+              id: e.id,
+              eventId: e.eventId,
+              timestamp: e.timestamp,
+              shortDescription: e.shortDescription || '',
+              longDescription: e.longDescription || '',
+              city: e.city || '',
+              country: e.country || '',
+            })),
+            lastUpdated: new Date().toISOString(),
+          }, { merge: true });
+        } catch (storeErr) {
+          console.warn(`⚠️ [PAQATO DIRECT] Failed to store tracking events:`, storeErr.message);
+        }
+      }
       return res.json({ received: true, skipped: 'no actionable event', shipmentState, latestEventId });
     }
 
@@ -18736,7 +18803,7 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       return res.json({ received: true, skipped: 'problem event', event: eventType });
     }
 
-    // ── Deduplication (60-second window) ──
+    // ── Deduplication: in-memory (60s burst) + Firestore (persistent) ──
     const dedupContent = `paqato:${orderNumber}:${eventType}:${trackingCode}`;
     const dedupKey = require('crypto').createHash('sha256').update(dedupContent).digest('hex').substring(0, 16);
     if (!global._webhookDedup) global._webhookDedup = new Map();
@@ -18746,6 +18813,47 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     }
     global._webhookDedup.set(dedupKey, Date.now());
     setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
+
+    // Persistent Firestore dedup — ensures each of the 3 notification types is sent only once per order
+    if (firebaseEnabled && wishlistService) {
+      try {
+        const db = wishlistService.db;
+        const dedupRef = db.collection('paqato_tracking').doc(orderNumber);
+        const dedupDoc = await dedupRef.get();
+        const sentNotifications = dedupDoc.exists ? (dedupDoc.data().sentNotifications || []) : [];
+        if (sentNotifications.includes(eventType)) {
+          console.log(`⏭️ [PAQATO DIRECT] Already sent ${eventType} for order ${orderNumber} — skipping`);
+          return res.json({ received: true, skipped: 'already notified', eventType, orderNumber });
+        }
+      } catch (dedupErr) {
+        console.warn(`⚠️ [PAQATO DIRECT] Firestore dedup check failed:`, dedupErr.message);
+      }
+    }
+
+    // ── Store PAQATO tracking events in Firestore (for in-app tracking timeline) ──
+    if (firebaseEnabled && wishlistService) {
+      try {
+        const db = wishlistService.db;
+        await db.collection('paqato_tracking').doc(orderNumber).set({
+          orderNumber,
+          trackingCode,
+          carrier,
+          shipmentState,
+          events: events.map(e => ({
+            id: e.id,
+            eventId: e.eventId,
+            timestamp: e.timestamp,
+            shortDescription: e.shortDescription || '',
+            longDescription: e.longDescription || '',
+            city: e.city || '',
+            country: e.country || '',
+          })),
+          lastUpdated: new Date().toISOString(),
+        }, { merge: true });
+      } catch (storeErr) {
+        console.warn(`⚠️ [PAQATO DIRECT] Failed to store tracking events:`, storeErr.message);
+      }
+    }
 
     // ── Look up customer email from Shopify Admin API using order number ──
     let email = '';
@@ -18835,9 +18943,15 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     if (eventType === 'shipped') {
       title = 'Deine Bestellung ist unterwegs! 📦';
       text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
-    } else if (eventType === 'out_for_delivery') {
-      title = 'Deine Bestellung wird heute zugestellt! 🚚';
-      text = `Deine Bestellung${orderLabel} ist beim Zusteller und wird heute geliefert.`;
+    } else if (eventType === 'in_transit') {
+      // Second notification: carrier picked up or out for delivery
+      if (latestEventId === 5) {
+        title = 'Deine Bestellung wird heute zugestellt! 🚚';
+        text = `Deine Bestellung${orderLabel} ist beim Zusteller und wird heute geliefert.`;
+      } else {
+        title = 'Dein Paket wurde abgeholt! 🚛';
+        text = `Deine Bestellung${orderLabel} wurde vom Versanddienstleister abgeholt und ist auf dem Weg.`;
+      }
     } else {
       title = 'Deine Bestellung wurde zugestellt! ✅';
       text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
@@ -18891,6 +19005,20 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
         console.error(`🛑 [PAQATO DIRECT] BROADCAST DETECTED! Sent to ${recipientCount} recipients!`);
       } else {
         console.log(`✅ [PAQATO DIRECT] Push sent: ${eventType} for ${email} (${successCount}/${subscriptionIds.length} devices)`);
+      }
+    }
+
+    // ── Persist sent notification type to Firestore for dedup ──
+    if (successCount > 0 && firebaseEnabled && wishlistService) {
+      try {
+        const db = wishlistService.db;
+        await db.collection('paqato_tracking').doc(orderNumber).set({
+          sentNotifications: require('firebase-admin').firestore.FieldValue.arrayUnion(eventType),
+          [`${eventType}SentAt`]: new Date().toISOString(),
+          email,
+        }, { merge: true });
+      } catch (persistErr) {
+        console.warn(`⚠️ [PAQATO DIRECT] Failed to persist dedup:`, persistErr.message);
       }
     }
 
