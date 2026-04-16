@@ -18686,94 +18686,100 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     console.log(`📦 [PAQATO DIRECT] Received webhook. Full payload: ${JSON.stringify(payload).substring(0, 2000)}`);
     console.log(`📦 [PAQATO DIRECT] Headers: ${JSON.stringify(Object.fromEntries(Object.entries(req.headers).filter(([k]) => !k.startsWith('x-render'))))}`);
 
-    // PAQATO webhook payload fields (extract what's available)
-    // Common PAQATO fields: event, status, trackingNumber, orderNumber, carrier, 
-    // trackingUrl, recipientEmail, customerEmail, shopOrderNumber, etc.
-    const email = (
-      payload.recipientEmail || payload.customerEmail || payload.customer_email ||
-      payload.email || payload.recipient?.email || payload.order?.email || ''
-    ).toLowerCase();
+    // ── PAQATO nests all data under "data" ──
+    const data = payload.data || {};
+    const orderNumber = (data.orderNumber || '').toString();
+    const carrier = data.carrier || '';
+    const trackingCode = data.trackingCode || '';
+    const shipmentState = (data.shipmentState || '').toLowerCase(); // "delivered", "undelivered", etc.
+    const shipmentType = data.shipmentType || ''; // "shipment", "reshipment"
 
-    const orderNumber = (
-      payload.orderNumber || payload.order_number || payload.shopOrderNumber ||
-      payload.reference || payload.order?.number || payload.order?.name || ''
-    );
+    // Get the latest event from the events array for more granular status
+    const events = Array.isArray(data.events) ? data.events : [];
+    const latestEvent = events.length > 0 ? events[events.length - 1] : null;
+    const latestEventId = latestEvent ? latestEvent.eventId : null;
+    const latestEventDescription = latestEvent ? (latestEvent.shortDescription || '') : '';
 
-    const trackingUrl = (
-      payload.trackingUrl || payload.tracking_url || payload.trackingLink ||
-      payload.shipment?.trackingUrl || ''
-    );
-
-    const carrier = (
-      payload.carrier || payload.carrierName || payload.carrier_name ||
-      payload.shipment?.carrier || ''
-    );
-
-    // Determine event type from PAQATO status
-    const paqatoStatus = (
-      payload.event || payload.status || payload.shipmentStatus || payload.shipment_status || ''
-    ).toLowerCase();
-
-    const paqatoEventName = (payload.eventName || payload.event_name || '').toLowerCase();
-
+    // ── Map PAQATO shipmentState + eventId to our event types ──
+    // PAQATO eventIds: 1=packed, 2=data transmitted, 4=sorting, 5=out for delivery,
+    //   6=delivered, 20=not delivered, 33=picked up by carrier, 51=left hub, 53=first hub
+    // Only notify on meaningful status changes, not every intermediate sorting event
     let eventType = '';
 
-    // Map PAQATO statuses to our event types
-    const deliveredStatuses = ['delivered', 'zugestellt', 'delivery_success', 'picked_up_by_customer', 'aus-paketshop-abgeholt', 'erfolgreich-zugestellt'];
-    const shippedStatuses = ['shipped', 'in_transit', 'in-transit', 'out_for_delivery', 'versandt', 'unterwegs', 'created', 'label_created', 'picked_up', 'departure_scan', 'arrival_scan', 'in-zustellung', 'angekommen-im-zielland', 'paket-ist-auf-dem-weg'];
-    const problemStatuses = ['exception', 'failed_attempt', 'return', 'expired', 'damage', 'nicht-zugestellt', 'adressfehler', 'beschaedigt'];
-
-    const statusToCheck = paqatoStatus || paqatoEventName;
-
-    if (deliveredStatuses.some(s => statusToCheck.includes(s))) {
+    if (shipmentState === 'delivered' || latestEventId === 6) {
       eventType = 'delivered';
-    } else if (problemStatuses.some(s => statusToCheck.includes(s))) {
+    } else if (latestEventId === 20) {
       eventType = 'problem';
-    } else if (shippedStatuses.some(s => statusToCheck.includes(s))) {
+    } else if (latestEventId === 5) {
+      // Out for delivery — this is worth notifying about
+      eventType = 'out_for_delivery';
+    } else if ([1, 33].includes(latestEventId)) {
+      // Packed or picked up by carrier — first "shipped" notification
       eventType = 'shipped';
     }
+    // eventId 2 (data transmitted), 4 (sorting), 51/53 (hub events) — skip, too noisy
 
-    // If we still don't know the event type, try to parse from description/message
-    if (!eventType) {
-      const description = (payload.description || payload.message || payload.statusMessage || payload.status_message || '').toLowerCase();
-      if (description.includes('zugestellt') && !description.includes('nicht')) {
-        eventType = 'delivered';
-      } else if (description.includes('nicht zugestellt') || description.includes('fehler') || description.includes('problem')) {
-        eventType = 'problem';
-      } else if (description.includes('versand') || description.includes('unterwegs') || description.includes('transit') || description.includes('shipping')) {
-        eventType = 'shipped';
-      }
+    console.log(`📦 [PAQATO DIRECT] Parsed: order=${orderNumber}, shipmentState=${shipmentState}, latestEventId=${latestEventId}, eventType=${eventType}, carrier=${carrier}, trackingCode=${trackingCode}`);
+
+    if (!orderNumber) {
+      console.log(`⚠️ [PAQATO DIRECT] No order number in payload — cannot process`);
+      return res.json({ received: true, skipped: 'no order number' });
     }
 
-    console.log(`📦 [PAQATO DIRECT] Parsed: email=${email}, order=${orderNumber}, event=${eventType}, status=${paqatoStatus}, carrier=${carrier}`);
-
-    if (!email) {
-      console.log(`⚠️ [PAQATO DIRECT] No email in payload — cannot send push. Keys received: ${Object.keys(payload).join(', ')}`);
-      return res.json({ received: true, skipped: 'no email found in payload', parsedFields: { paqatoStatus, orderNumber, carrier } });
-    }
-
-    if (!eventType || !['shipped', 'delivered', 'problem'].includes(eventType)) {
-      console.log(`⏭️ [PAQATO DIRECT] Unknown event "${eventType}" (paqato status: "${paqatoStatus}") for ${email}`);
-      return res.json({ received: true, skipped: 'unknown event type', paqatoStatus, email });
+    if (!eventType || !['shipped', 'delivered', 'out_for_delivery', 'problem'].includes(eventType)) {
+      console.log(`⏭️ [PAQATO DIRECT] No actionable event (shipmentState: "${shipmentState}", latestEventId: ${latestEventId}) — skipping`);
+      return res.json({ received: true, skipped: 'no actionable event', shipmentState, latestEventId });
     }
 
     if (eventType === 'problem') {
-      console.log(`⚠️ [PAQATO DIRECT] Problem event for ${email} (order: ${orderNumber}) — no push sent`);
+      console.log(`⚠️ [PAQATO DIRECT] Problem event (order: ${orderNumber}) — no push sent`);
       return res.json({ received: true, skipped: 'problem event', event: eventType });
     }
 
     // ── Deduplication (60-second window) ──
-    const dedupContent = `paqato:${email}:${eventType}:${orderNumber}`;
+    const dedupContent = `paqato:${orderNumber}:${eventType}:${trackingCode}`;
     const dedupKey = require('crypto').createHash('sha256').update(dedupContent).digest('hex').substring(0, 16);
     if (!global._webhookDedup) global._webhookDedup = new Map();
     if (global._webhookDedup.has(dedupKey)) {
-      console.log(`⏭️ [PAQATO DIRECT] Duplicate webhook for ${email} (${eventType})`);
+      console.log(`⏭️ [PAQATO DIRECT] Duplicate webhook for order ${orderNumber} (${eventType})`);
       return res.json({ received: true, skipped: 'duplicate' });
     }
     global._webhookDedup.set(dedupKey, Date.now());
     setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
 
-    console.log(`📦 [PAQATO DIRECT] Processing: ${eventType} for ${email} (order: ${orderNumber})`);
+    // ── Look up customer email from Shopify Admin API using order number ──
+    let email = '';
+    try {
+      const searchQuery = `name:#${orderNumber}`;
+      const gqlQuery = `query { orders(first: 1, query: "${searchQuery}") { edges { node { email } } } }`;
+      const shopifyRes = await axios.post(
+        config.adminApiUrl,
+        { query: gqlQuery },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+      const orderNode = shopifyRes.data?.data?.orders?.edges?.[0]?.node;
+      if (orderNode && orderNode.email) {
+        email = orderNode.email.toLowerCase();
+        console.log(`📦 [PAQATO DIRECT] Shopify lookup: order #${orderNumber} → email=${email}`);
+      } else {
+        console.log(`⚠️ [PAQATO DIRECT] Shopify lookup: no email found for order #${orderNumber}`);
+      }
+    } catch (shopifyErr) {
+      console.error(`❌ [PAQATO DIRECT] Shopify lookup failed for order #${orderNumber}:`, shopifyErr.message);
+    }
+
+    if (!email) {
+      console.log(`⚠️ [PAQATO DIRECT] No email for order #${orderNumber} — cannot send push`);
+      return res.json({ received: true, skipped: 'no email found for order', orderNumber });
+    }
+
+    console.log(`📦 [PAQATO DIRECT] Processing: ${eventType} for ${email} (order: #${orderNumber})`);
 
     if (!config.cleverpushApiKey) {
       console.warn('⚠️ [PAQATO DIRECT] CLEVERPUSH_API_KEY not configured');
@@ -18829,6 +18835,9 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     if (eventType === 'shipped') {
       title = 'Deine Bestellung ist unterwegs! 📦';
       text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
+    } else if (eventType === 'out_for_delivery') {
+      title = 'Deine Bestellung wird heute zugestellt! 🚚';
+      text = `Deine Bestellung${orderLabel} ist beim Zusteller und wird heute geliefert.`;
     } else {
       title = 'Deine Bestellung wurde zugestellt! ✅';
       text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
@@ -18847,12 +18856,11 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
         title,
         text,
         subscriptionId: subId,
-        url: trackingUrl || null,
         customData: {
           type: 'shipment_update',
           event: eventType,
           orderNumber: orderNumber || null,
-          trackingUrl: trackingUrl || null,
+          trackingCode: trackingCode || null,
         }
       };
 
