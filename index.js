@@ -18723,26 +18723,35 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     const latestEventDescription = latestEvent ? (latestEvent.shortDescription || '') : '';
 
     // ── Map PAQATO shipmentState + eventId to our 3 notification types ──
-    // PAQATO eventIds: 1=packed, 2=data transmitted, 4=sorting, 5=out for delivery,
-    //   6=delivered, 20=not delivered, 33=picked up by carrier, 51=left hub, 53=first hub
-    // We send exactly 3 notifications per order:
-    //   1. shipped   → eventId 1 (Sendung gepackt)
-    //   2. in_transit → eventId 33 (Sendung abgeholt) or 5 (In Zustellung) — whichever fires first
-    //   3. delivered  → eventId 6 or shipmentState=delivered
+    // Full mapping of all 59 PAQATO eventIds (see docs.paqato.com/docs/liste-aller-benachrichtigungen-notifications-1)
+    // We send exactly 3 notifications per order: shipped → in_transit → delivered
+    // Firestore dedup ensures each type fires at most once per order.
+    const DELIVERED_EVENTS = new Set([6, 7, 8, 9, 10, 11, 16, 17, 30, 42]);
+    //  6=zugestellt, 7=andere Person, 8=Ehegatte, 9=Familienmitglied, 10=Nachbar,
+    // 11=sicherer Ort, 16=aus Paketstation, 17=aus Postfiliale, 30=Hauspoststelle, 42=Spedition zugestellt
+    const PROBLEM_EVENTS = new Set([13, 14, 15, 20, 21, 22, 23, 24, 25, 29, 31, 32, 37, 43, 46, 49, 58, 59]);
+    // 13=Adressfehler, 14=beschädigt, 15=fehlgeleitet, 20=nicht zugestellt, 21=Annahme verweigert,
+    // 22=Nachnahme, 23-25=Zustellversuche 1-3, 29=Rücksendung, 31=vernichtet, 32=weitergeleitet,
+    // 37=Avisierung nicht möglich, 43=Paketmarke storniert, 46=Lieferort fehlgeschlagen,
+    // 49=4. Zustellversuch, 58=Adresse falsch am Zentrum, 59=weitergeleitet + Brief
+    const IN_TRANSIT_EVENTS = new Set([4, 5, 19, 33, 35, 39, 40, 41, 45, 51, 52, 53, 54, 55]);
+    //  4=Sortierung, 5=Zustellfahrzeug, 19=Zoll, 33=abgeholt, 35=an Spedition,
+    // 39=Spedition Zustellfahrzeug, 40=Spedition in Zustellung, 41=angekommen,
+    // 45=zum gewählten Lieferort, 51=Paketzentrum verlassen, 52-55=Hub/Depot/Zielland
+    const SHIPPED_EVENTS = new Set([1, 2, 3]);
+    //  1=gepackt, 2=Daten an Carrier, 3=Daten an PAQATO
+    // Skipped (informational, no notification): 12, 18, 26, 27, 28, 34, 36, 38, 44, 47, 48, 50, 56, 57
     let eventType = '';
 
-    if (shipmentState === 'delivered' || latestEventId === 6) {
+    if (shipmentState === 'delivered' || DELIVERED_EVENTS.has(latestEventId)) {
       eventType = 'delivered';
-    } else if (latestEventId === 20) {
+    } else if (PROBLEM_EVENTS.has(latestEventId)) {
       eventType = 'problem';
-    } else if (latestEventId === 5 || latestEventId === 33) {
-      // Out for delivery or picked up by carrier → second notification
+    } else if (IN_TRANSIT_EVENTS.has(latestEventId)) {
       eventType = 'in_transit';
-    } else if (latestEventId === 1) {
-      // Packed → first "shipped" notification
+    } else if (SHIPPED_EVENTS.has(latestEventId)) {
       eventType = 'shipped';
     }
-    // eventId 2 (data transmitted), 4 (sorting), 51/53 (hub events) — skip, too noisy
 
     if (!orderNumber) {
       console.log(`⚠️ [PAQATO DIRECT] No order number in payload — cannot process`);
@@ -18795,6 +18804,7 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     setTimeout(() => global._webhookDedup.delete(dedupKey), 60000);
 
     // Persistent Firestore dedup — ensures each of the 3 notification types is sent only once per order
+    // Also enforces ordering: don't send earlier events if a later stage was already sent
     if (firebaseEnabled && wishlistService) {
       try {
         const db = wishlistService.db;
@@ -18804,6 +18814,16 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
         if (sentNotifications.includes(eventType)) {
           console.log(`⏭️ [PAQATO DIRECT] Already sent ${eventType} for order ${orderNumber} — skipping`);
           return res.json({ received: true, skipped: 'already notified', eventType, orderNumber });
+        }
+        // Don't send earlier-stage notifications if a later stage was already sent
+        // Order: shipped → in_transit → delivered
+        if (eventType === 'shipped' && (sentNotifications.includes('in_transit') || sentNotifications.includes('delivered'))) {
+          console.log(`⏭️ [PAQATO DIRECT] Skipping stale ${eventType} for order ${orderNumber} — already sent ${sentNotifications.join(', ')}`);
+          return res.json({ received: true, skipped: 'stale event', eventType, orderNumber });
+        }
+        if (eventType === 'in_transit' && sentNotifications.includes('delivered')) {
+          console.log(`⏭️ [PAQATO DIRECT] Skipping stale ${eventType} for order ${orderNumber} — already sent delivered`);
+          return res.json({ received: true, skipped: 'stale event', eventType, orderNumber });
         }
       } catch (dedupErr) {
         console.warn(`⚠️ [PAQATO DIRECT] Firestore dedup check failed:`, dedupErr.message);
@@ -18921,13 +18941,14 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       title = 'Deine Bestellung ist unterwegs! 📦';
       text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
     } else if (eventType === 'in_transit') {
-      // Second notification: carrier picked up or out for delivery
-      if (latestEventId === 5) {
+      // Second notification: out for delivery or in transit
+      if ([5, 39, 40, 41].includes(latestEventId)) {
+        // Loaded into delivery vehicle / out for delivery (standard + Spedition)
         title = 'Deine Bestellung wird heute zugestellt! 🚚';
         text = `Deine Bestellung${orderLabel} ist beim Zusteller und wird heute geliefert.`;
       } else {
-        title = 'Dein Paket wurde abgeholt! 🚛';
-        text = `Deine Bestellung${orderLabel} wurde vom Versanddienstleister abgeholt und ist auf dem Weg.`;
+        title = 'Dein Paket ist unterwegs! 🚛';
+        text = `Deine Bestellung${orderLabel} ist auf dem Weg zu dir.`;
       }
     } else {
       title = 'Deine Bestellung wurde zugestellt! ✅';
@@ -18980,7 +19001,7 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       if (recipientCount && recipientCount > 5) {
         console.error(`🛑 [PAQATO DIRECT] BROADCAST DETECTED! Sent to ${recipientCount} recipients!`);
       } else {
-        console.log(`✅ [PAQATO DIRECT] Push sent: ${eventType} for ${email} (${successCount}/${subscriptionIds.length} devices)`);
+        console.log(`✅ [PAQATO DIRECT] Push sent: ${eventType} for ${email} order #${orderNumber} (${successCount}/${subscriptionIds.length} devices)`);
       }
     }
 
