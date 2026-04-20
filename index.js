@@ -18628,7 +18628,7 @@ app.post('/admin/resend-shipment-notification', async (req, res) => {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
-    const { orderNumber, eventType, latestEventId } = req.body || {};
+    const { orderNumber, eventType, latestEventId, textSuffix } = req.body || {};
     if (!orderNumber || !eventType) {
       return res.status(400).json({ error: 'orderNumber and eventType are required' });
     }
@@ -18688,6 +18688,11 @@ app.post('/admin/resend-shipment-notification', async (req, res) => {
     } else {
       title = 'Deine Bestellung wurde zugestellt! ✅';
       text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
+    }
+
+    // Optional debug suffix to defeat APNs content-based collapse during testing
+    if (textSuffix && typeof textSuffix === 'string') {
+      text = `${text} ${textSuffix}`;
     }
 
     const payloadBase = {
