@@ -18723,6 +18723,63 @@ app.post('/admin/resend-shipment-notification', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN DIAGNOSTIC - Inspect CleverPush subscription state
+// GET /admin/inspect-subscription?email=...  OR  ?subscriptionId=...
+// Returns: backend-stored devices + live CleverPush subscription state
+// ═══════════════════════════════════════════════════════════════════════════════
+app.get('/admin/inspect-subscription', async (req, res) => {
+  try {
+    if (!ADMIN_SECRET) return res.status(503).json({ error: 'ADMIN_SECRET not configured on server' });
+    if (req.headers.adminsecret !== ADMIN_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { email, subscriptionId } = req.query;
+    if (!email && !subscriptionId) return res.status(400).json({ error: 'email or subscriptionId required' });
+
+    const result = { backend: null, cleverpush: [] };
+
+    // 1. Backend-stored devices
+    if (email && firebaseEnabled && wishlistService) {
+      const emailKey = email.toLowerCase().trim();
+      const docRef = wishlistService.db.collection('push_subscriptions').doc(emailKey);
+      const doc = await docRef.get();
+      result.backend = doc.exists ? doc.data() : null;
+    }
+
+    // 2. Collect sub IDs to query CleverPush for
+    const subIdsToQuery = [];
+    if (subscriptionId) subIdsToQuery.push(subscriptionId);
+    if (result.backend?.devices) {
+      for (const d of result.backend.devices) {
+        if (d.subscriptionId && !subIdsToQuery.includes(d.subscriptionId)) subIdsToQuery.push(d.subscriptionId);
+      }
+    }
+
+    // 3. Live CleverPush state per sub
+    const channelId = config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3';
+    for (const subId of subIdsToQuery) {
+      try {
+        const r = await axios.get(
+          `https://api.cleverpush.com/channel/${channelId}/subscription/${subId}`,
+          { headers: { 'Authorization': config.cleverpushApiKey }, timeout: 8000 }
+        );
+        result.cleverpush.push({ subscriptionId: subId, status: r.status, data: r.data });
+      } catch (e) {
+        result.cleverpush.push({
+          subscriptionId: subId,
+          status: e.response?.status || null,
+          error: e.response?.data || e.message,
+        });
+      }
+    }
+
+    return res.json(result);
+  } catch (err) {
+    console.error('❌ [ADMIN INSPECT] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ZENDESK WEBHOOK - Chat Reply Push Notifications
 // Sends a push notification via CleverPush when an agent replies to a ticket
 // Configure in Zendesk Admin > Apps and integrations > Webhooks
