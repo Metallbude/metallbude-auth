@@ -18734,12 +18734,12 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     // 22=Nachnahme, 23-25=Zustellversuche 1-3, 29=Rücksendung, 31=vernichtet, 32=weitergeleitet,
     // 37=Avisierung nicht möglich, 43=Paketmarke storniert, 46=Lieferort fehlgeschlagen,
     // 49=4. Zustellversuch, 58=Adresse falsch am Zentrum, 59=weitergeleitet + Brief
-    const IN_TRANSIT_EVENTS = new Set([4, 5, 19, 33, 35, 39, 40, 41, 45, 51, 52, 53, 54, 55]);
-    //  4=Sortierung, 5=Zustellfahrzeug, 19=Zoll, 33=abgeholt, 35=an Spedition,
-    // 39=Spedition Zustellfahrzeug, 40=Spedition in Zustellung, 41=angekommen,
-    // 45=zum gewählten Lieferort, 51=Paketzentrum verlassen, 52-55=Hub/Depot/Zielland
-    const SHIPPED_EVENTS = new Set([1, 2, 3]);
-    //  1=gepackt, 2=Daten an Carrier, 3=Daten an PAQATO
+    const IN_TRANSIT_EVENTS = new Set([5, 19, 39, 40, 41, 45]);
+    //  5=Zustellfahrzeug, 19=Zoll, 39=Spedition Zustellfahrzeug,
+    // 40=Spedition in Zustellung, 41=angekommen, 45=zum gewählten Lieferort
+    const SHIPPED_EVENTS = new Set([1, 2, 3, 4, 33, 35, 51, 52, 53, 54, 55]);
+    //  1=gepackt, 2=Daten an Carrier, 3=Daten an PAQATO, 4=Sortierung,
+    // 33=abgeholt, 35=an Spedition, 51=Paketzentrum verlassen, 52-55=Hub/Depot/Zielland
     // Skipped (informational, no notification): 12, 18, 26, 27, 28, 34, 36, 38, 44, 47, 48, 50, 56, 57
     let eventType = '';
 
