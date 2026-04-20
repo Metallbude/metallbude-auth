@@ -18757,18 +18757,34 @@ app.get('/admin/inspect-subscription', async (req, res) => {
     // 3. Live CleverPush state per sub
     const channelId = config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3';
     for (const subId of subIdsToQuery) {
-      try {
-        const r = await axios.get(
-          `https://api.cleverpush.com/channel/${channelId}/subscription/${subId}`,
-          { headers: { 'Authorization': config.cleverpushApiKey }, timeout: 8000 }
-        );
-        result.cleverpush.push({ subscriptionId: subId, status: r.status, data: r.data });
-      } catch (e) {
-        result.cleverpush.push({
-          subscriptionId: subId,
-          status: e.response?.status || null,
-          error: e.response?.data || e.message,
-        });
+      // Try a few known CleverPush endpoint shapes — their docs vary by version
+      const urls = [
+        `https://api.cleverpush.com/subscription/${subId}?channelId=${channelId}`,
+        `https://api.cleverpush.com/channel/${channelId}/subscriptions/${subId}`,
+        `https://api.cleverpush.com/channel-subscription/${subId}?channelId=${channelId}`,
+      ];
+      const attempts = [];
+      let success = null;
+      for (const url of urls) {
+        try {
+          const r = await axios.get(url, {
+            headers: { 'Authorization': config.cleverpushApiKey },
+            timeout: 8000,
+          });
+          attempts.push({ url, status: r.status, ok: true });
+          success = { url, status: r.status, data: r.data };
+          break;
+        } catch (e) {
+          const status = e.response?.status || null;
+          attempts.push({ url, status, ok: false });
+          // 401/403 means the URL is right but auth wrong — stop probing
+          if (status === 401 || status === 403) break;
+        }
+      }
+      if (success) {
+        result.cleverpush.push({ subscriptionId: subId, ...success });
+      } else {
+        result.cleverpush.push({ subscriptionId: subId, error: 'all endpoints failed', attempts });
       }
     }
 
