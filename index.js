@@ -18294,6 +18294,7 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const ZENDESK_WEBHOOK_SECRET = process.env.ZENDESK_WEBHOOK_SECRET;
+const ADMIN_SECRET = process.env.ADMIN_SECRET; // Used to guard /admin/* maintenance endpoints
 
 app.post('/zendesk/webhook/ticket-status', async (req, res) => {
   // Verify webhook authenticity via shared secret header
@@ -18397,9 +18398,119 @@ app.get('/cleverpush/check-subscription', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CleverPush send helper with automatic dead-subscription pruning.
+//
+// Sends a notification payload to a list of subscriptionIds for `emailKey`.
+// For each subscription that CleverPush rejects as invalid/unsubscribed,
+// removes it from Firestore so the next push doesn't waste a slot on a dead
+// device (prevents the "delivered notification never arrived" bug after
+// reinstall, when CleverPush returns 200 OK but APNs/FCM has no token).
+//
+// Returns: { successCount, attemptedCount, prunedCount, lastResponse }
+// ═══════════════════════════════════════════════════════════════════════════════
+async function sendCleverPushAndPrune(emailKey, subscriptionIds, payloadBase, logPrefix) {
+  let successCount = 0;
+  let lastResponse = null;
+  const deadSubs = [];
+
+  for (const subId of subscriptionIds) {
+    if (!subId || typeof subId !== 'string' || subId.trim().length < 10) {
+      console.error(`🛑 ${logPrefix} Invalid subscriptionId "${subId}" — skipping`);
+      continue;
+    }
+
+    const cpPayload = { ...payloadBase, subscriptionId: subId };
+
+    try {
+      const cpResponse = await axios.post(
+        'https://api.cleverpush.com/notification/send',
+        cpPayload,
+        {
+          headers: {
+            'Authorization': config.cleverpushApiKey,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+      lastResponse = cpResponse.data || {};
+
+      // CleverPush returns 200 even for unsubscribed devices. Watch for an
+      // explicit `recipientCount: 0` — that means the sub exists but has no
+      // active push token (uninstalled / token revoked / Focus blocking is
+      // device-side and would still count as 1).
+      const recipientCount =
+        lastResponse.recipientCount ?? lastResponse.subscribers ?? lastResponse.count;
+      if (recipientCount === 0) {
+        console.warn(`💀 ${logPrefix} Dead subscription ${subId.substring(0,8)}… (recipientCount=0) — pruning`);
+        deadSubs.push(subId);
+      } else {
+        successCount++;
+      }
+    } catch (cpErr) {
+      const status = cpErr.response?.status;
+      const body = cpErr.response?.data;
+      const msg = (typeof body === 'string' ? body : (body?.message || body?.error || cpErr.message || '')).toLowerCase();
+
+      // Recognised "this subscription is gone" signals from CleverPush
+      const isDeadSub =
+        status === 404 ||
+        msg.includes('subscription not found') ||
+        msg.includes('subscription is unsubscribed') ||
+        msg.includes('invalid subscription') ||
+        msg.includes('subscription does not exist');
+
+      if (isDeadSub) {
+        console.warn(`💀 ${logPrefix} Dead subscription ${subId.substring(0,8)}… (${status}: ${msg.substring(0,80)}) — pruning`);
+        deadSubs.push(subId);
+      } else {
+        console.error(`❌ ${logPrefix} CleverPush send failed for ${subId.substring(0,8)}…:`, body || cpErr.message);
+      }
+    }
+  }
+
+  // ── Prune dead subscriptions from Firestore ──
+  if (deadSubs.length > 0 && firebaseEnabled && wishlistService) {
+    try {
+      const db = wishlistService.db;
+      const docRef = db.collection('push_subscriptions').doc(emailKey);
+      const doc = await docRef.get();
+      if (doc.exists) {
+        const data = doc.data();
+        const remaining = (data.devices || []).filter(d => !deadSubs.includes(d.subscriptionId));
+        const update = { devices: remaining, updatedAt: new Date().toISOString() };
+        // Clear top-level legacy field if it pointed at a dead sub
+        if (deadSubs.includes(data.subscriptionId)) {
+          update.subscriptionId = remaining.length > 0 ? remaining[remaining.length - 1].subscriptionId : null;
+        }
+        await docRef.set(update, { merge: true });
+        console.log(`🧹 ${logPrefix} Pruned ${deadSubs.length} dead subscription(s) for ${emailKey} (${remaining.length} remaining)`);
+      }
+    } catch (pruneErr) {
+      console.warn(`⚠️ ${logPrefix} Failed to prune dead subs:`, pruneErr.message);
+    }
+  }
+
+  // Same cleanup for memory fallback
+  if (deadSubs.length > 0 && global._pushSubscriptions && global._pushSubscriptions[emailKey]) {
+    const memData = global._pushSubscriptions[emailKey];
+    if (Array.isArray(memData.devices)) {
+      memData.devices = memData.devices.filter(d => !deadSubs.includes(d.subscriptionId));
+    }
+  }
+
+  return {
+    successCount,
+    attemptedCount: subscriptionIds.length,
+    prunedCount: deadSubs.length,
+    lastResponse,
+  };
+}
+
 app.post('/cleverpush/store-subscription', async (req, res) => {
   try {
-    const { email, subscriptionId, platform, appVersion, country, language } = req.body;
+    const { email, subscriptionId, previousSubscriptionId, platform, appVersion, country, language } = req.body;
 
     if (!email || !subscriptionId) {
       return res.status(400).json({ success: false, error: 'email and subscriptionId are required' });
@@ -18411,26 +18522,32 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid email format' });
     }
 
+    const nowIso = new Date().toISOString();
+
     if (!firebaseEnabled || !wishlistService) {
       // Fallback: store in memory if Firebase isn't available
       if (!global._pushSubscriptions) global._pushSubscriptions = {};
       const existing = global._pushSubscriptions[email.toLowerCase()];
       const devices = existing?.devices || [];
-      // Replace existing entry for same subscriptionId, or add new
-      const filtered = devices.filter(d => d.subscriptionId !== subscriptionId);
+      // Remove any prior entry the client tells us is stale, plus any duplicate of the new ID
+      const filtered = devices.filter(d =>
+        d.subscriptionId !== subscriptionId &&
+        (!previousSubscriptionId || d.subscriptionId !== previousSubscriptionId)
+      );
       filtered.push({
         subscriptionId,
         platform: platform || 'unknown',
         appVersion: appVersion || 'unknown',
-        updatedAt: new Date().toISOString()
+        updatedAt: nowIso,
+        lastSeenAt: nowIso,
       });
       // Keep max 5 devices per email
       global._pushSubscriptions[email.toLowerCase()] = {
         subscriptionId, // Keep for backward compat
         devices: filtered.slice(-5),
-        updatedAt: new Date().toISOString()
+        updatedAt: nowIso
       };
-      console.log(`📱 Stored push subscription (memory) for ${email} — ${filtered.length} device(s)`);
+      console.log(`📱 Stored push subscription (memory) for ${email} — ${filtered.length} device(s)${previousSubscriptionId ? ` (pruned previous: ${previousSubscriptionId.substring(0,8)}…)` : ''}`);
       return res.json({ success: true, storage: 'memory' });
     }
 
@@ -18440,13 +18557,26 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
     const doc = await docRef.get();
     const existingDevices = doc.exists ? (doc.data().devices || []) : [];
 
-    // Replace existing entry for same subscriptionId, or add new
-    const filteredDevices = existingDevices.filter(d => d.subscriptionId !== subscriptionId);
+    // Prune:
+    //   1. Any duplicate of the new subscriptionId (we'll re-add it below with fresh timestamps)
+    //   2. The previousSubscriptionId the client reported (e.g. after reinstall)
+    //   3. Devices not seen in 60 days (likely uninstalled/dead)
+    const sixtyDaysAgo = Date.now() - (60 * 24 * 60 * 60 * 1000);
+    const filteredDevices = existingDevices.filter(d => {
+      if (d.subscriptionId === subscriptionId) return false;
+      if (previousSubscriptionId && d.subscriptionId === previousSubscriptionId) return false;
+      // Auto-prune devices not seen in 60 days
+      const seenTs = d.lastSeenAt ? Date.parse(d.lastSeenAt) : (d.updatedAt ? Date.parse(d.updatedAt) : 0);
+      if (seenTs && seenTs < sixtyDaysAgo) return false;
+      return true;
+    });
+
     filteredDevices.push({
       subscriptionId,
       platform: platform || 'unknown',
       appVersion: appVersion || 'unknown',
-      updatedAt: new Date().toISOString()
+      updatedAt: nowIso,
+      lastSeenAt: nowIso,
     });
 
     // Keep max 5 devices per email
@@ -18457,15 +18587,136 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
       subscriptionId, // Keep latest for backward compat
       devices: finalDevices,
       language: language || 'de',
-      updatedAt: new Date().toISOString()
+      updatedAt: nowIso
     }, { merge: true });
 
-    console.log(`📱 Stored push subscription for ${email} (${platform || 'unknown'}) — ${finalDevices.length} device(s)`);
-    return res.json({ success: true, storage: 'firestore', deviceCount: finalDevices.length });
+    const prunedCount = existingDevices.length - filteredDevices.length + 1; // +1 for the dedup of the new ID
+    console.log(`📱 Stored push subscription for ${email} (${platform || 'unknown'}) — ${finalDevices.length} device(s)${prunedCount > 0 ? `, pruned ${prunedCount}` : ''}`);
+    return res.json({ success: true, storage: 'firestore', deviceCount: finalDevices.length, prunedCount });
 
   } catch (error) {
     console.error('❌ Failed to store push subscription:', error.message);
     return res.status(500).json({ success: false, error: 'Failed to store subscription' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN: Re-send a missed shipment notification
+//
+// Use when a notification was logged as "sent" but never reached the device
+// (e.g. customer reinstalled the app between webhook firing and opening the
+// app, so the recorded subscription was already dead).
+//
+// URL: POST /admin/resend-shipment-notification
+// Header: adminsecret = <ADMIN_SECRET env var>
+// Body:  { "orderNumber": "172174", "eventType": "delivered" }
+//        eventType must be one of: shipped | in_transit | delivered
+//
+// Behaviour:
+//   1. Looks up the email + tracking metadata from `paqato_tracking/{orderNumber}`
+//   2. Looks up current subscription IDs from `push_subscriptions/{email}`
+//   3. Sends the appropriate push using `sendCleverPushAndPrune` (so dead subs
+//      get cleaned up automatically)
+//   4. Does NOT modify `sentNotifications` (already there from original send)
+// ═══════════════════════════════════════════════════════════════════════════════
+app.post('/admin/resend-shipment-notification', async (req, res) => {
+  try {
+    if (!ADMIN_SECRET) {
+      return res.status(503).json({ error: 'ADMIN_SECRET not configured on server' });
+    }
+    if (req.headers['adminsecret'] !== ADMIN_SECRET) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const { orderNumber, eventType, latestEventId } = req.body || {};
+    if (!orderNumber || !eventType) {
+      return res.status(400).json({ error: 'orderNumber and eventType are required' });
+    }
+    if (!['shipped', 'in_transit', 'delivered'].includes(eventType)) {
+      return res.status(400).json({ error: 'eventType must be shipped | in_transit | delivered' });
+    }
+    if (!firebaseEnabled || !wishlistService) {
+      return res.status(503).json({ error: 'Firebase not enabled' });
+    }
+
+    const db = wishlistService.db;
+
+    // ── Look up tracking metadata ──
+    const trackingDoc = await db.collection('paqato_tracking').doc(orderNumber.toString()).get();
+    if (!trackingDoc.exists) {
+      return res.status(404).json({ error: `No paqato_tracking doc for order ${orderNumber}` });
+    }
+    const tracking = trackingDoc.data();
+    const email = tracking.email;
+    const carrier = tracking.carrier || '';
+    const trackingCode = tracking.trackingCode || '';
+    if (!email) {
+      return res.status(400).json({ error: 'No email recorded for this order' });
+    }
+
+    // ── Look up subscriptions ──
+    const emailKey = email.toLowerCase();
+    const subDoc = await db.collection('push_subscriptions').doc(emailKey).get();
+    if (!subDoc.exists) {
+      return res.status(404).json({ error: `No push_subscriptions doc for ${email}` });
+    }
+    const subData = subDoc.data();
+    let subscriptionIds = (subData.devices || [])
+      .map(d => d.subscriptionId)
+      .filter(id => typeof id === 'string' && id.trim().length >= 10);
+    if (subscriptionIds.length === 0 && subData.subscriptionId) {
+      subscriptionIds = [subData.subscriptionId];
+    }
+    if (subscriptionIds.length === 0) {
+      return res.status(404).json({ error: `No subscriptions for ${email}` });
+    }
+
+    // ── Build notification (same logic as the webhook handler) ──
+    const orderLabel = ` #${orderNumber}`;
+    let title, text;
+    if (eventType === 'shipped') {
+      title = 'Deine Bestellung ist unterwegs! 📦';
+      text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
+    } else if (eventType === 'in_transit') {
+      if (latestEventId === 45) {
+        title = 'Dein Paket ist unterwegs! 🚛';
+        text = `Deine Bestellung${orderLabel} ist auf dem Weg zum gewählten Lieferort.`;
+      } else {
+        title = 'Deine Bestellung wird heute zugestellt! 🚚';
+        text = `Deine Bestellung${orderLabel} ist beim Zusteller und wird heute geliefert.`;
+      }
+    } else {
+      title = 'Deine Bestellung wurde zugestellt! ✅';
+      text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
+    }
+
+    const payloadBase = {
+      channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+      title,
+      text,
+      customData: {
+        type: 'shipment_update',
+        event: eventType,
+        orderNumber: orderNumber.toString(),
+        trackingCode: trackingCode || null,
+      }
+    };
+
+    const result = await sendCleverPushAndPrune(emailKey, subscriptionIds, payloadBase, '[ADMIN RESEND]');
+    console.log(`🔁 [ADMIN RESEND] ${eventType} for ${email} order #${orderNumber} → ${result.successCount}/${result.attemptedCount} delivered, ${result.prunedCount} pruned`);
+
+    return res.json({
+      success: result.successCount > 0,
+      orderNumber,
+      eventType,
+      email,
+      attempted: result.attemptedCount,
+      delivered: result.successCount,
+      pruned: result.prunedCount,
+    });
+  } catch (err) {
+    console.error('❌ [ADMIN RESEND] Error:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -19026,53 +19277,27 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
     }
 
-    let successCount = 0;
-    let lastResponse = null;
-    for (const subId of subscriptionIds) {
-      if (!subId || typeof subId !== 'string' || subId.trim().length < 10) {
-        console.error(`🛑 [PAQATO DIRECT] Invalid subscriptionId "${subId}" — skipping`);
-        continue;
+    const payloadBase = {
+      channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+      title,
+      text,
+      customData: {
+        type: 'shipment_update',
+        event: eventType,
+        orderNumber: orderNumber || null,
+        trackingCode: trackingCode || null,
       }
+    };
 
-      const cpPayload = {
-        channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
-        title,
-        text,
-        subscriptionId: subId,
-        customData: {
-          type: 'shipment_update',
-          event: eventType,
-          orderNumber: orderNumber || null,
-          trackingCode: trackingCode || null,
-        }
-      };
-
-
-      try {
-        const cpResponse = await axios.post(
-          'https://api.cleverpush.com/notification/send',
-          cpPayload,
-          {
-            headers: {
-              'Authorization': config.cleverpushApiKey,
-              'Content-Type': 'application/json'
-            },
-            timeout: 10000
-          }
-        );
-        lastResponse = cpResponse.data || {};
-        successCount++;
-      } catch (cpErr) {
-        console.error(`❌ [PAQATO DIRECT] CleverPush send failed for ${subId}:`, cpErr.response?.data || cpErr.message);
-      }
-    }
+    const sendResult = await sendCleverPushAndPrune(emailKey, subscriptionIds, payloadBase, '[PAQATO DIRECT]');
+    const { successCount, lastResponse } = sendResult;
 
     if (lastResponse) {
       const recipientCount = lastResponse.recipientCount || lastResponse.subscribers || lastResponse.count;
       if (recipientCount && recipientCount > 5) {
         console.error(`🛑 [PAQATO DIRECT] BROADCAST DETECTED! Sent to ${recipientCount} recipients!`);
       } else {
-        console.log(`✅ [PAQATO DIRECT] Push sent: ${eventType} for ${email} order #${orderNumber} (${successCount}/${subscriptionIds.length} devices)`);
+        console.log(`✅ [PAQATO DIRECT] Push sent: ${eventType} for ${email} order #${orderNumber} (${successCount}/${subscriptionIds.length} devices${sendResult.prunedCount ? `, pruned ${sendResult.prunedCount}` : ''})`);
       }
     }
 
