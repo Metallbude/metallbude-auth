@@ -18722,25 +18722,93 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     const latestEventId = latestEvent ? latestEvent.eventId : null;
     const latestEventDescription = latestEvent ? (latestEvent.shortDescription || '') : '';
 
-    // ── Map PAQATO shipmentState + eventId to our 3 notification types ──
-    // Full mapping of all 59 PAQATO eventIds (see docs.paqato.com/docs/liste-aller-benachrichtigungen-notifications-1)
-    // We send exactly 3 notifications per order: shipped → in_transit → delivered
+    // ── Map PAQATO eventId to our 3 notification types ──
+    // Full mapping of all 59 PAQATO eventIds:
+    //   docs.paqato.com/docs/liste-aller-benachrichtigungen-notifications-1
+    //
+    // PRINCIPLE: We send exactly 3 push notifications per order:
+    //   shipped → in_transit → delivered
     // Firestore dedup ensures each type fires at most once per order.
-    const DELIVERED_EVENTS = new Set([6, 7, 8, 9, 10, 11, 16, 17, 30, 42]);
-    //  6=zugestellt, 7=andere Person, 8=Ehegatte, 9=Familienmitglied, 10=Nachbar,
-    // 11=sicherer Ort, 16=aus Paketstation, 17=aus Postfiliale, 30=Hauspoststelle, 42=Spedition zugestellt
-    const PROBLEM_EVENTS = new Set([13, 14, 15, 20, 21, 22, 23, 24, 25, 29, 31, 32, 37, 43, 46, 49, 58, 59]);
-    // 13=Adressfehler, 14=beschädigt, 15=fehlgeleitet, 20=nicht zugestellt, 21=Annahme verweigert,
-    // 22=Nachnahme, 23-25=Zustellversuche 1-3, 29=Rücksendung, 31=vernichtet, 32=weitergeleitet,
-    // 37=Avisierung nicht möglich, 43=Paketmarke storniert, 46=Lieferort fehlgeschlagen,
-    // 49=4. Zustellversuch, 58=Adresse falsch am Zentrum, 59=weitergeleitet + Brief
-    const IN_TRANSIT_EVENTS = new Set([5, 19, 39, 40, 41, 45]);
-    //  5=Zustellfahrzeug, 19=Zoll, 39=Spedition Zustellfahrzeug,
-    // 40=Spedition in Zustellung, 41=angekommen, 45=zum gewählten Lieferort
-    const SHIPPED_EVENTS = new Set([1, 2, 3, 4, 33, 35, 51, 52, 53, 54, 55]);
-    //  1=gepackt, 2=Daten an Carrier, 3=Daten an PAQATO, 4=Sortierung,
-    // 33=abgeholt, 35=an Spedition, 51=Paketzentrum verlassen, 52-55=Hub/Depot/Zielland
-    // Skipped (informational, no notification): 12, 18, 26, 27, 28, 34, 36, 38, 44, 47, 48, 50, 56, 57
+    //
+    // CRITICAL: in_transit must ONLY contain LAST-MILE delivery events
+    // (package on delivery vehicle / arriving at delivery location).
+    // All earlier logistics events (sorting, customs, hub transfers, carrier
+    // pickup) go into shipped. This prevents a premature "ist unterwegs"
+    // notification from blocking the important "wird heute zugestellt"
+    // notification via dedup.
+
+    // ── DELIVERED (10 events): customer has the package ──
+    const DELIVERED_EVENTS = new Set([
+      6,   // Zugestellt (standard)
+      7,   // Zugestellt an andere Person
+      8,   // Zugestellt an Ehegatten
+      9,   // Zugestellt an Familienmitglied
+      10,  // Zugestellt an Nachbarn
+      11,  // Zugestellt an sicherem Ort
+      16,  // Aus Paketstation entnommen
+      17,  // Aus Postfiliale abgeholt
+      30,  // An Hauspoststelle übergeben
+      42,  // Spedition zugestellt
+    ]);
+
+    // ── PROBLEM (18 events): delivery issues, no push sent ──
+    const PROBLEM_EVENTS = new Set([
+      13,  // Adressfehler
+      14,  // Paket beschädigt
+      15,  // Paket fehlgeleitet
+      20,  // Nicht zugestellt
+      21,  // Annahme verweigert
+      22,  // Nachnahme nicht eingelöst
+      23,  // 1. Zustellversuch fehlgeschlagen
+      24,  // 2. Zustellversuch fehlgeschlagen
+      25,  // 3. Zustellversuch fehlgeschlagen
+      29,  // Rücksendung an Versender
+      31,  // Vernichtet
+      32,  // Weitergeleitet an Postfiliale (nicht zugestellt)
+      37,  // Avisierung nicht möglich (Spedition)
+      43,  // Paketmarke storniert
+      46,  // Lieferort-Zustellung fehlgeschlagen
+      49,  // 4. Zustellversuch fehlgeschlagen
+      58,  // Adresse falsch/unvollständig (am Zentrum)
+      59,  // Weitergeleitet an Postfiliale + Brief
+    ]);
+
+    // ── IN_TRANSIT (5 events): LAST-MILE ONLY — on delivery vehicle ──
+    // ⚠️ DO NOT add logistics/sorting/customs events here!
+    // They would block the "wird heute zugestellt" notification via dedup.
+    const IN_TRANSIT_EVENTS = new Set([
+      5,   // Im Zustellfahrzeug (Paketdienst)
+      39,  // Im Zustellfahrzeug (Spedition)
+      40,  // In Zustellung (Spedition)
+      41,  // Zustellfahrzeug angekommen
+      45,  // Auf dem Weg zum gewählten Lieferort
+    ]);
+
+    // ── SHIPPED (11 events): package in logistics network ──
+    const SHIPPED_EVENTS = new Set([
+      1,   // Paket gepackt
+      2,   // Versanddaten an Carrier übermittelt
+      3,   // Versanddaten an PAQATO übermittelt
+      4,   // Sortierung im Paketzentrum
+      33,  // Vom Paketdienstleister beim Versender abgeholt
+      35,  // An Spedition übergeben
+      51,  // Paketzentrum verlassen
+      52,  // Im Paketzentrum angekommen
+      53,  // Im ersten Paketzentrum angekommen
+      54,  // Im Ziel-Depot angekommen
+      55,  // Im Zielland angekommen
+    ]);
+
+    // ── SKIPPED (15 events): informational, no push — still stored in timeline ──
+    // 12=Paketstation (zur Abholung), 18=Postfiliale (hinterlegt),
+    // 19=Zollabfertigung (can take days — must NOT be in_transit!),
+    // 26=Paketzentrum (zur Abholung), 27=Neu verpackt, 28=Eingelagert,
+    // 34=Voraussichtliche Zustellung, 36=Avisierung geplant,
+    // 38=Avisierung erfolgreich, 44=Lieferort gewählt (Paketstation),
+    // 47=Zur Filiale gebracht, 48=Lieferort gewählt (Ablageort/Nachbar),
+    // 50=Zustellretoure wird bearbeitet, 56=Retoure abgeholt,
+    // 57=Neuer Liefertermin vereinbart
+
     let eventType = '';
 
     if (shipmentState === 'delivered' || DELIVERED_EVENTS.has(latestEventId)) {
@@ -18759,7 +18827,7 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     }
 
     if (!eventType || !['shipped', 'delivered', 'in_transit', 'problem'].includes(eventType)) {
-      console.log(`⏭️ [PAQATO DIRECT] No actionable event (shipmentState: "${shipmentState}", latestEventId: ${latestEventId}) — skipping`);
+      console.log(`⏭️ [PAQATO DIRECT] Unmapped event for order ${orderNumber} (shipmentState: "${shipmentState}", eventId: ${latestEventId}, desc: "${latestEventDescription}") — no push, storing timeline only`);
       // Still store events for tracking timeline even if no notification
       if (orderNumber && firebaseEnabled && wishlistService) {
         try {
@@ -18788,9 +18856,11 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
     }
 
     if (eventType === 'problem') {
-      console.log(`⚠️ [PAQATO DIRECT] Problem event (order: ${orderNumber}) — no push sent`);
+      console.log(`⚠️ [PAQATO DIRECT] Problem event for order ${orderNumber} (eventId: ${latestEventId}, "${latestEventDescription}") — no push sent`);
       return res.json({ received: true, skipped: 'problem event', event: eventType });
     }
+
+    console.log(`📦 [PAQATO DIRECT] Processing ${eventType} for order ${orderNumber} (eventId: ${latestEventId}, "${latestEventDescription}")`);
 
     // ── Deduplication: in-memory (60s burst) + Firestore (persistent) ──
     const dedupContent = `paqato:${orderNumber}:${eventType}:${trackingCode}`;
@@ -18941,14 +19011,15 @@ app.post('/paqato/webhook/shipment-status', async (req, res) => {
       title = 'Deine Bestellung ist unterwegs! 📦';
       text = `Deine Bestellung${orderLabel} wurde versandt${carrier ? ' mit ' + carrier : ''}.`;
     } else if (eventType === 'in_transit') {
-      // Second notification: out for delivery or in transit
-      if ([5, 39, 40, 41].includes(latestEventId)) {
-        // Loaded into delivery vehicle / out for delivery (standard + Spedition)
+      // IN_TRANSIT only fires for last-mile events (5, 39, 40, 41, 45)
+      if (latestEventId === 45) {
+        // Heading to customer-chosen delivery point (Paketstation, etc.)
+        title = 'Dein Paket ist unterwegs! 🚛';
+        text = `Deine Bestellung${orderLabel} ist auf dem Weg zum gewählten Lieferort.`;
+      } else {
+        // Events 5, 39, 40, 41 — on delivery vehicle / out for delivery
         title = 'Deine Bestellung wird heute zugestellt! 🚚';
         text = `Deine Bestellung${orderLabel} ist beim Zusteller und wird heute geliefert.`;
-      } else {
-        title = 'Dein Paket ist unterwegs! 🚛';
-        text = `Deine Bestellung${orderLabel} ist auf dem Weg zu dir.`;
       }
     } else {
       title = 'Deine Bestellung wurde zugestellt! ✅';
