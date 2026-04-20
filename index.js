@@ -18703,7 +18703,7 @@ app.post('/admin/resend-shipment-notification', async (req, res) => {
     };
 
     const result = await sendCleverPushAndPrune(emailKey, subscriptionIds, payloadBase, '[ADMIN RESEND]');
-    console.log(`🔁 [ADMIN RESEND] ${eventType} for ${email} order #${orderNumber} → ${result.successCount}/${result.attemptedCount} delivered, ${result.prunedCount} pruned`);
+    console.log(`🔁 [ADMIN RESEND] ${eventType} for ${email} order #${orderNumber} → ${result.successCount}/${result.attemptedCount} delivered, ${result.prunedCount} pruned, cpResponse=${JSON.stringify(result.lastResponse)}`);
 
     return res.json({
       success: result.successCount > 0,
@@ -18713,6 +18713,8 @@ app.post('/admin/resend-shipment-notification', async (req, res) => {
       attempted: result.attemptedCount,
       delivered: result.successCount,
       pruned: result.prunedCount,
+      subscriptionIds: subscriptionIds.map(s => `${s.substring(0,8)}…`),
+      cleverPushResponse: result.lastResponse,
     });
   } catch (err) {
     console.error('❌ [ADMIN RESEND] Error:', err.message);
