@@ -7,20 +7,80 @@ const SHOPIFY_STORE = process.env.SHOPIFY_STORE || process.env.SHOPIFY_SHOP_DOMA
 const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION || '2024-10';
 
-// Scrape cache (5 min) for storefront-injected bundle payloads.
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const scrapeCache = new Map();
+// 5-minute per-handle cache
+const SCRAPE_TTL_MS = 5 * 60 * 1000;
+const scrapeCache = new Map(); // handle -> { fetchedAt, offers }
+
+const STOREFRONT_BASE =
+  process.env.STOREFRONT_BASE_URL || 'https://metallbude.com';
+
+async function fetchProductHandleById(productId) {
+  const endpoint = `https://${SHOPIFY_STORE}/admin/api/${ADMIN_API_VERSION}/graphql.json`;
+  const r = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
+    },
+    body: JSON.stringify({
+      query: `query($id: ID!) { product(id: $id) { handle } }`,
+      variables: { id: productId },
+    }),
+  }).then((resp) => resp.json());
+  return r?.data?.product?.handle || null;
+}
+
+function parseBundleConfig(html) {
+  // Sectionheroes injects: <script type="application/json" data-bundle-config>{...}</script>
+  const re = /<script[^>]*data-bundle-config[^>]*>([\s\S]*?)<\/script>/gi;
+  const configs = [];
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    try {
+      configs.push(JSON.parse(String(m[1] || '').trim()));
+    } catch (e) {
+      console.warn('[bundle-offers] failed to parse a data-bundle-config block:', e.message);
+    }
+  }
+  return configs;
+}
+
+function mapSectionheroesToTiers(config) {
+  const offers = Array.isArray(config?.offers) ? config.offers : [];
+  const tiers = [];
+  for (const o of offers) {
+    const quantity = Number(o.quantity);
+    if (!quantity || quantity < 1) continue;
+    const d = o.discount || {};
+    let discountPercent = 0;
+    if (d.type === 'percentage') {
+      discountPercent = Number(d.value) || 0;
+    }
+    // 'fixed' / 'none' / unknown -> 0%; UI only displays discount %.
+    tiers.push({
+      quantity, // cart-quantity multiplier
+      label: o.content?.title || `${quantity}x SET`,
+      badge: o.content?.badge || null,
+      discountPercent: Math.round(discountPercent * 100) / 100,
+      discountCode: null, // Sectionheroes Function applies
+      popular: Boolean(o.preselect) || /BELIEBT/i.test(o.content?.badge || ''),
+      preselect: Boolean(o.preselect),
+    });
+  }
+  tiers.sort((a, b) => a.quantity - b.quantity);
+  return tiers;
+}
 
 async function scrapeBundleConfig(handle) {
   const normalizedHandle = String(handle || '').trim();
   if (!normalizedHandle) throw new Error('handle required');
 
   const cached = scrapeCache.get(normalizedHandle);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+  if (cached && Date.now() - cached.fetchedAt < SCRAPE_TTL_MS) {
     return cached.value;
   }
 
-  const url = `https://metallbude.com/products/${normalizedHandle}`;
+  const url = `${STOREFRONT_BASE}/products/${normalizedHandle}`;
   const response = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Metallbude-App-Backend) Bundle-Resolver/1.0',
@@ -56,11 +116,62 @@ async function scrapeBundleConfig(handle) {
 
 router.get('/api/public/bundle-offers', async (req, res) => {
   try {
-    const handle = String(req.query.handle || 'leather-s-hooks-3-piece-set');
-    return res.json(await scrapeBundleConfig(handle));
+    const productId = String(req.query.productId || '');
+    let handle = String(req.query.handle || '');
+    if (!productId && !handle) {
+      return res.status(400).json({ error: 'productId or handle required' });
+    }
+
+    if (!handle) {
+      handle = await fetchProductHandleById(productId);
+      if (!handle) return res.json({ offers: [] });
+    }
+
+    const cached = scrapeCache.get(handle);
+    if (cached && Date.now() - cached.fetchedAt < SCRAPE_TTL_MS) {
+      return res.json({ offers: cached.offers, cached: true });
+    }
+
+    const url = `${STOREFRONT_BASE}/products/${handle}`;
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 Metallbude-App-Backend/1.0',
+        Accept: 'text/html',
+      },
+    });
+    if (!response.ok) {
+      console.warn(`[bundle-offers] storefront ${response.status} for ${url}`);
+      return res.json({ offers: [] });
+    }
+
+    const html = await response.text();
+    const configs = parseBundleConfig(html);
+    if (configs.length === 0) {
+      console.log(`[bundle-offers] no bundle-config block for ${handle}`);
+      scrapeCache.set(handle, { fetchedAt: Date.now(), offers: [] });
+      return res.json({ offers: [] });
+    }
+
+    // A product page may render multiple bundle blocks; merge them.
+    const offers = configs.flatMap(mapSectionheroesToTiers);
+    // De-dupe by quantity (keep first / highest-discount).
+    const byQty = new Map();
+    for (const t of offers) {
+      const existing = byQty.get(t.quantity);
+      if (!existing || t.discountPercent > existing.discountPercent) {
+        byQty.set(t.quantity, t);
+      }
+    }
+    const merged = [...byQty.values()].sort((a, b) => a.quantity - b.quantity);
+
+    scrapeCache.set(handle, { fetchedAt: Date.now(), offers: merged });
+    console.log(
+      `[bundle-offers] handle=${handle} tiers=${merged.length} (${merged.map((t) => `${t.quantity}x@-${t.discountPercent}%`).join(',')})`
+    );
+    return res.json({ offers: merged });
   } catch (error) {
-    console.error('[bundle-offers] error:', error.response?.data || error.message || error);
-    return res.status(500).json({ error: error.message || 'Failed to resolve bundle offers' });
+    console.error('[bundle-offers] error:', error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
