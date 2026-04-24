@@ -339,4 +339,42 @@ router.get('/api/public/bundle-offers/debug-sh', async (req, res) => {
   }
 });
 
+router.get('/api/public/bundle-offers/scrape-grep', async (req, res) => {
+  try {
+    const handle = String(req.query.handle || 'leather-s-hooks-3-piece-set');
+    const url = `https://metallbude.com/products/${handle}`;
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 Bundle-Resolver/1.0',
+        Accept: 'text/html',
+      },
+    });
+    const html = await r.text();
+
+    const lines = html.split('\n');
+    const grep = (re) => {
+      const hits = [];
+      lines.forEach((line, i) => {
+        if (re.test(line)) {
+          hits.push({ lineNo: i + 1, text: line.trim().slice(0, 600) });
+        }
+      });
+      return hits.slice(0, 30);
+    };
+
+    return res.json({
+      url,
+      htmlLength: html.length,
+      sectionheroes: grep(/section.?hero/i),
+      shBundle: grep(/sh[-_]bundle|_sh.bundle/i),
+      scriptSrcs: grep(/<script[^>]*src=["'][^"']*(?:sectionheroes|sh-bundle|bundle)/i),
+      proxyUrls: grep(/\/apps\/sectionheroes|sectionheroes\.com|sh-bundle/i),
+      idHits: grep(/gal5q|ikloj/),
+      shopifyAnalytics: grep(/window\.Shopify\s*=/),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
