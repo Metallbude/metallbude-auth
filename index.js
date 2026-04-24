@@ -18690,10 +18690,13 @@ app.post('/admin/resend-shipment-notification', async (req, res) => {
       text = `Deine Bestellung${orderLabel} wurde erfolgreich zugestellt.`;
     }
 
-    // Optional debug suffix to defeat APNs content-based collapse during testing
-    if (textSuffix && typeof textSuffix === 'string') {
-      text = `${text} ${textSuffix}`;
-    }
+    // Optional debug suffix to defeat APNs content-based collapse during testing.
+    // Resends *always* get an auto-suffix (timestamp) so iOS treats them as new
+    // pushes even when the visible text would otherwise match a prior delivery.
+    const suffix = (typeof textSuffix === 'string' && textSuffix.trim().length > 0)
+      ? textSuffix
+      : `(resend ${new Date().toISOString().substring(11, 19)})`;
+    text = `${text} ${suffix}`;
 
     const payloadBase = {
       channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
