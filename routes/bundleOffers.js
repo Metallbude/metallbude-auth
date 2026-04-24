@@ -248,4 +248,95 @@ router.get('/api/public/bundle-offers/debug', async (req, res) => {
   }
 });
 
+router.get('/api/public/bundle-offers/debug-sh', async (req, res) => {
+  try {
+    const endpoint = `https://${SHOPIFY_STORE}/admin/api/${ADMIN_API_VERSION}/graphql.json`;
+    const gql = (query, variables) =>
+      fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
+        },
+        body: JSON.stringify({ query, variables }),
+      }).then((r) => r.json());
+
+    let installId = null;
+    let appId = null;
+    let cursor = null;
+    while (true) {
+      const r = await gql(`
+        query($c: String) {
+          appInstallations(first: 100, after: $c) {
+            pageInfo { hasNextPage endCursor }
+            edges { node { id app { id title handle } } }
+          }
+        }`, { c: cursor });
+      const data = r?.data?.appInstallations;
+      if (!data) break;
+      const hit = (data.edges || []).find((e) =>
+        /sectionheroes/i.test(e?.node?.app?.handle || e?.node?.app?.title || '')
+      );
+      if (hit) {
+        installId = hit.node.id;
+        appId = hit.node.app.id;
+        break;
+      }
+      if (!data.pageInfo.hasNextPage) break;
+      cursor = data.pageInfo.endCursor;
+    }
+
+    if (!installId) return res.json({ error: 'sectionheroes not found' });
+
+    const allMeta = [];
+    cursor = null;
+    while (true) {
+      const r = await gql(`
+        query($id: ID!, $c: String) {
+          appInstallation(id: $id) {
+            metafields(first: 250, after: $c) {
+              pageInfo { hasNextPage endCursor }
+              edges { node { namespace key type value } }
+            }
+          }
+        }`, { id: installId, c: cursor });
+      const data = r?.data?.appInstallation?.metafields;
+      if (!data) break;
+      for (const e of data.edges || []) allMeta.push(e.node);
+      if (!data.pageInfo.hasNextPage) break;
+      cursor = data.pageInfo.endCursor;
+    }
+
+    const productId = String(req.query.productId || 'gid://shopify/Product/6698295525540');
+    const productMeta = await gql(`
+      query($id: ID!) {
+        product(id: $id) {
+          handle
+          metafields(first: 250) {
+            edges { node { namespace key type value } }
+          }
+        }
+      }`, { id: productId });
+
+    const productAll = (productMeta?.data?.product?.metafields?.edges || []).map((e) => e.node);
+    const productAppOwned = productAll.filter((m) =>
+      /^\$app|sectionheroes|^sh[_-]|bundle/i.test(m.namespace) ||
+      String(m.value || '').includes('gal5q') ||
+      String(m.value || '').includes('ikloj')
+    );
+
+    return res.json({
+      productId,
+      sectionheroes: { installId, appId },
+      installationMetafieldCount: allMeta.length,
+      installationMetafields: allMeta,
+      productMetafieldCount: productAll.length,
+      productAppOwnedHits: productAppOwned,
+      productAllNamespaces: [...new Set(productAll.map((m) => m.namespace))],
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
