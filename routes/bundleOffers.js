@@ -47,26 +47,25 @@ function parseBundleConfig(html) {
 
 function mapSectionheroesToTiers(config) {
   const offers = Array.isArray(config?.offers) ? config.offers : [];
+  const bundleId = config?.shortId || config?.id || null;
   const tiers = [];
-  for (const o of offers) {
+  offers.forEach((o, index) => {
     const quantity = Number(o.quantity);
-    if (!quantity || quantity < 1) continue;
+    if (!quantity || quantity < 1) return;
     const d = o.discount || {};
-    let discountPercent = 0;
-    if (d.type === 'percentage') {
-      discountPercent = Number(d.value) || 0;
-    }
-    // 'fixed' / 'none' / unknown -> 0%; UI only displays discount %.
+    const discountPercent = d.type === 'percentage' ? (Number(d.value) || 0) : 0;
     tiers.push({
-      quantity, // cart-quantity multiplier
-      label: o.content?.title || `${quantity}x SET`,
+      quantity,
+      label: o.content?.title || `${quantity}× SET`,
       badge: o.content?.badge || null,
       discountPercent: Math.round(discountPercent * 100) / 100,
-      discountCode: null, // Sectionheroes Function applies
-      popular: Boolean(o.preselect) || /BELIEBT/i.test(o.content?.badge || ''),
+      discountCode: null,
+      popular: !!o.preselect,
       preselect: Boolean(o.preselect),
+      bundleId, // e.g. "gal5q"
+      offerIndex: index, // 0-based: matches Sectionheroes "o"
     });
-  }
+  });
   tiers.sort((a, b) => a.quantity - b.quantity);
   return tiers;
 }
