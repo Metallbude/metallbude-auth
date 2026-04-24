@@ -198,78 +198,135 @@ router.get('/api/public/bundle-offers/debug', async (req, res) => {
     const productId = String(req.query.productId || 'gid://shopify/Product/6698295525540');
     const endpoint = `https://${SHOPIFY_STORE}/admin/api/${ADMIN_API_VERSION}/graphql.json`;
 
-    const discountsQuery = `
+    const gql = async (query, variables) => {
+      const response = await axios.post(
+        endpoint,
+        { query, variables },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
+          },
+          timeout: 30000,
+        }
+      );
+      return response.data;
+    };
+
+    const shopMeta = await gql(`
       {
-        automaticDiscountNodes(first: 50) {
+        shop {
+          metafields(first: 250) {
+            edges { node { namespace key type value } }
+          }
+        }
+      }
+    `);
+
+    const appsMeta = await gql(`
+      {
+        currentAppInstallation { id }
+        appInstallations(first: 50) {
           edges {
             node {
               id
-              metafields(first: 30) {
+              app { id title appStoreAppUrl handle }
+              metafields(first: 50) {
                 edges { node { namespace key type value } }
-              }
-              automaticDiscount {
-                __typename
-                ... on DiscountAutomaticApp {
-                  title
-                  status
-                  startsAt
-                  endsAt
-                  appDiscountType { appKey functionId title description }
-                }
-                ... on DiscountAutomaticBasic { title status }
-                ... on DiscountAutomaticBxgy { title status summary }
               }
             }
           }
         }
       }
-    `;
+    `);
 
-    const productQuery = `
-      query ProductMeta($id: ID!) {
-        product(id: $id) {
-          id
-          handle
-          title
-          metafields(first: 100) {
-            edges { node { namespace key type value } }
-          }
+    const defs = await gql(`
+      {
+        metafieldDefinitions(first: 250, ownerType: PRODUCT) {
+          edges { node { namespace key name type { name } } }
         }
       }
-    `;
+    `);
 
-    const [d, p] = await Promise.all([
-      axios.post(
-        endpoint,
-        { query: discountsQuery },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
-          },
-          timeout: 20000,
+    const allDiscounts = [];
+    let cursor = null;
+
+    while (true) {
+      const page = await gql(`
+        query Page($cursor: String) {
+          automaticDiscountNodes(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
+                id
+                automaticDiscount {
+                  __typename
+                  ... on DiscountAutomaticApp {
+                    title
+                    status
+                    appDiscountType { appKey functionId title description }
+                  }
+                  ... on DiscountAutomaticBxgy { title status summary }
+                  ... on DiscountAutomaticBasic { title status }
+                  ... on DiscountAutomaticFreeShipping { title status }
+                }
+              }
+            }
+          }
         }
-      ),
-      axios.post(
-        endpoint,
-        { query: productQuery, variables: { id: productId } },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
-          },
-          timeout: 20000,
-        }
-      ),
-    ]);
+      `, { cursor });
+
+      const data = page?.data?.automaticDiscountNodes;
+      if (!data) break;
+      for (const edge of data.edges || []) allDiscounts.push(edge.node);
+      if (!data.pageInfo?.hasNextPage) break;
+      cursor = data.pageInfo.endCursor;
+    }
+
+    const matchSH = (s) =>
+      typeof s === 'string' && /section.?heroes|sh.?bundle|^sh[_-]/i.test(s);
+
+    const shopHits = (shopMeta?.data?.shop?.metafields?.edges || []).filter((e) => {
+      const node = e?.node || {};
+      return (
+        matchSH(node.namespace) ||
+        matchSH(node.key) ||
+        String(node.value || '').includes('gal5q') ||
+        String(node.value || '').includes('ikloj')
+      );
+    });
+
+    const appHits = (appsMeta?.data?.appInstallations?.edges || []).map((e) => ({
+      app: e.node.app,
+      metafields: (e.node.metafields?.edges || []).map((m) => m.node),
+    }));
+
+    const defHits = (defs?.data?.metafieldDefinitions?.edges || []).filter((e) => {
+      const node = e?.node || {};
+      return matchSH(node.namespace) || matchSH(node.key);
+    });
+
+    const discountHits = allDiscounts.filter(
+      (n) => n?.automaticDiscount?.__typename === 'DiscountAutomaticApp'
+    );
 
     return res.json({
       productId,
-      discounts: d.data,
-      productMetafields: p.data,
+      counts: {
+        shopMetafields: shopMeta?.data?.shop?.metafields?.edges?.length || 0,
+        installedApps: appsMeta?.data?.appInstallations?.edges?.length || 0,
+        productMetafieldDefinitions: defs?.data?.metafieldDefinitions?.edges?.length || 0,
+        automaticDiscountsTotal: allDiscounts.length,
+        appBasedDiscounts: discountHits.length,
+      },
+      sectionheroesShopMetafieldHits: shopHits.map((e) => e.node),
+      sectionheroesProductMetafieldDefinitionHits: defHits.map((e) => e.node),
+      appBasedDiscounts: discountHits,
+      installedAppsWithMetafields: appHits,
+      _raw: { shopMeta, defs },
     });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message, stack: e.stack });
   }
 });
 
