@@ -193,4 +193,84 @@ router.get('/api/public/bundle-offers', async (req, res) => {
   }
 });
 
+router.get('/api/public/bundle-offers/debug', async (req, res) => {
+  try {
+    const productId = String(req.query.productId || 'gid://shopify/Product/6698295525540');
+    const endpoint = `https://${SHOPIFY_STORE}/admin/api/${ADMIN_API_VERSION}/graphql.json`;
+
+    const discountsQuery = `
+      {
+        automaticDiscountNodes(first: 50) {
+          edges {
+            node {
+              id
+              metafields(first: 30) {
+                edges { node { namespace key type value } }
+              }
+              automaticDiscount {
+                __typename
+                ... on DiscountAutomaticApp {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                  appDiscountType { appKey functionId title description }
+                }
+                ... on DiscountAutomaticBasic { title status }
+                ... on DiscountAutomaticBxgy { title status summary }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const productQuery = `
+      query ProductMeta($id: ID!) {
+        product(id: $id) {
+          id
+          handle
+          title
+          metafields(first: 100) {
+            edges { node { namespace key type value } }
+          }
+        }
+      }
+    `;
+
+    const [d, p] = await Promise.all([
+      axios.post(
+        endpoint,
+        { query: discountsQuery },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
+          },
+          timeout: 20000,
+        }
+      ),
+      axios.post(
+        endpoint,
+        { query: productQuery, variables: { id: productId } },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
+          },
+          timeout: 20000,
+        }
+      ),
+    ]);
+
+    return res.json({
+      productId,
+      discounts: d.data,
+      productMetafields: p.data,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
