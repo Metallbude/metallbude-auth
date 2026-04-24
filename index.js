@@ -136,6 +136,9 @@ app.use(cors(corsOptions));
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
+// Public Shopify-driven bundle offer endpoint
+app.use(require('./routes/bundleOffers'));
+
 // === File uploads for return labels (PDF/JPG/PNG) ===
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const ensureUploadsDir = async () => {
