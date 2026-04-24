@@ -488,4 +488,28 @@ router.get('/api/public/bundle-offers/scrape-grep', async (req, res) => {
   }
 });
 
+router.get('/api/public/bundle-offers/scrape-full', async (req, res) => {
+  try {
+    const handle = String(req.query.handle || 'leather-s-hooks-3-piece-set');
+    const url = `${STOREFRONT_BASE}/products/${handle}`;
+    const html = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 Bundle-Resolver/1.0' },
+    }).then((r) => r.text());
+
+    const re = /<script[^>]*data-bundle-config[^>]*>([\s\S]*?)<\/script>/gi;
+    const blocks = [];
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      try {
+        blocks.push(JSON.parse(String(m[1] || '').trim()));
+      } catch (e) {
+        blocks.push({ _parseError: e.message, raw: String(m[1] || '').slice(0, 500) });
+      }
+    }
+    return res.json({ url, blockCount: blocks.length, blocks });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
