@@ -3176,9 +3176,12 @@ async function getAdminApiReturns(customerEmail) {
 // Helper function to set address as default
 async function setAsDefaultAddress(customerId, addressId) {
   try {
+    // NOTE: As of Shopify Admin API 2024-10 the `defaultAddress` field was
+    // removed from `CustomerInput`. Use the dedicated
+    // `customerUpdateDefaultAddress` mutation instead.
     const mutation = `
-      mutation customerUpdate($input: CustomerInput!) {
-        customerUpdate(input: $input) {
+      mutation customerUpdateDefaultAddress($customerId: ID!, $addressId: ID!) {
+        customerUpdateDefaultAddress(customerId: $customerId, addressId: $addressId) {
           customer {
             id
             defaultAddress {
@@ -3192,18 +3195,14 @@ async function setAsDefaultAddress(customerId, addressId) {
         }
       }
     `;
-    
+
     const response = await axios.post(
       config.adminApiUrl,
       {
         query: mutation,
         variables: {
-          input: {
-            id: customerId,
-            defaultAddress: {
-              customerAddressId: addressId
-            }
-          }
+          customerId,
+          addressId,
         }
       },
       {
@@ -3213,8 +3212,18 @@ async function setAsDefaultAddress(customerId, addressId) {
         }
       }
     );
-    
-    return response.data.data?.customerUpdate?.customer != null;
+
+    const payload = response.data?.data?.customerUpdateDefaultAddress;
+    const userErrors = payload?.userErrors || [];
+    if (userErrors.length > 0) {
+      console.error('❌ customerUpdateDefaultAddress userErrors:', userErrors);
+      return false;
+    }
+    if (response.data?.errors) {
+      console.error('❌ customerUpdateDefaultAddress GraphQL errors:', response.data.errors);
+      return false;
+    }
+    return payload?.customer != null;
   } catch (error) {
     console.error('Error setting default address:', error.response?.data || error.message);
     return false;
