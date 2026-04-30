@@ -5761,6 +5761,10 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       
       // Marketing preferences
       acceptsEmailMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
+      // Alias used by the Flutter app (mirrors the field returned by
+      // /customer/update). Keep both keys in sync so older clients keep
+      // working too.
+      acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
       acceptsSmsMarketing: customer.smsMarketingConsent?.marketingState === 'SUBSCRIBED',
       emailMarketingOptInLevel: customer.emailMarketingConsent?.marketingOptInLevel,
       smsMarketingOptInLevel: customer.smsMarketingConsent?.marketingOptInLevel,
