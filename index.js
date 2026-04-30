@@ -3176,56 +3176,31 @@ async function getAdminApiReturns(customerEmail) {
 // Helper function to set address as default
 async function setAsDefaultAddress(customerId, addressId) {
   try {
-    // NOTE: As of Shopify Admin API 2024-10 the `defaultAddress` field was
-    // removed from `CustomerInput`. Use the dedicated
-    // `customerUpdateDefaultAddress` mutation instead.
-    const mutation = `
-      mutation customerUpdateDefaultAddress($customerId: ID!, $addressId: ID!) {
-        customerUpdateDefaultAddress(customerId: $customerId, addressId: $addressId) {
-          customer {
-            id
-            defaultAddress {
-              id
-            }
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
+    // Use the REST Admin API which is consistent with how addresses are
+    // listed/created/deleted elsewhere in this file. The GraphQL mutation
+    // `customerUpdateDefaultAddress` rejects MailingAddress GIDs in newer
+    // API versions, but the REST endpoint accepts the numeric IDs directly.
+    const customerNumericId = String(customerId).split('/').pop();
+    const addressNumericId = String(addressId).split('/').pop();
 
-    const response = await axios.post(
-      config.adminApiUrl,
-      {
-        query: mutation,
-        variables: {
-          customerId,
-          addressId,
-        }
-      },
+    const response = await axios.put(
+      `https://${config.shopDomain}/admin/api/${config.apiVersion}/customers/${customerNumericId}/addresses/${addressNumericId}/default.json`,
+      {},
       {
         headers: {
-          'Content-Type': 'application/json',
           'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json',
         }
       }
     );
 
-    const payload = response.data?.data?.customerUpdateDefaultAddress;
-    const userErrors = payload?.userErrors || [];
-    if (userErrors.length > 0) {
-      console.error('❌ customerUpdateDefaultAddress userErrors:', userErrors);
-      return false;
-    }
-    if (response.data?.errors) {
-      console.error('❌ customerUpdateDefaultAddress GraphQL errors:', response.data.errors);
-      return false;
-    }
-    return payload?.customer != null;
+    return response.status === 200 && !!response.data?.customer_address;
   } catch (error) {
-    console.error('Error setting default address:', error.response?.data || error.message);
+    console.error(
+      '❌ setAsDefaultAddress failed:',
+      error.response?.status,
+      error.response?.data || error.message
+    );
     return false;
   }
 }
