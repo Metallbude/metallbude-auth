@@ -12511,15 +12511,16 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
         }
       `;
 
-      const desiredState = updates.acceptsMarketing ? 'SUBSCRIBED' : 'NOT_SUBSCRIBED';
+      // Use UNSUBSCRIBED (not NOT_SUBSCRIBED) when opting out: Shopify
+      // only allows transitioning a previously SUBSCRIBED customer to
+      // UNSUBSCRIBED, and silently rejects NOT_SUBSCRIBED in that case.
+      const desiredState = updates.acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED';
       const consentInput = {
         customerId,
         emailMarketingConsent: {
           marketingState: desiredState,
           marketingOptInLevel: 'CONFIRMED_OPT_IN',
-          ...(updates.acceptsMarketing
-            ? { consentUpdatedAt: new Date().toISOString() }
-            : {}),
+          consentUpdatedAt: new Date().toISOString(),
         },
       };
 
