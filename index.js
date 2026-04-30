@@ -12507,12 +12507,12 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
         }
       `;
 
-      const desiredState = updates.acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED';
+      const desiredState = updates.acceptsMarketing ? 'SUBSCRIBED' : 'NOT_SUBSCRIBED';
       const consentInput = {
         customerId,
         emailMarketingConsent: {
           marketingState: desiredState,
-          marketingOptInLevel: 'SINGLE_OPT_IN',
+          marketingOptInLevel: 'CONFIRMED_OPT_IN',
           ...(updates.acceptsMarketing
             ? { consentUpdatedAt: new Date().toISOString() }
             : {}),
