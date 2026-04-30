@@ -12485,11 +12485,74 @@ app.put('/customer/update', authenticateAppToken, async (req, res) => {
     }
     
     const customer = data.data.customerUpdate.customer;
-    
+
+    // Email marketing consent must be updated through a dedicated mutation;
+    // it cannot be set via `CustomerInput` in newer Admin API versions.
+    let marketingState = customer.emailMarketingConsent?.marketingState;
+    if (updates.acceptsMarketing !== undefined) {
+      const consentMutation = `
+        mutation customerEmailMarketingConsentUpdate($input: CustomerEmailMarketingConsentUpdateInput!) {
+          customerEmailMarketingConsentUpdate(input: $input) {
+            customer {
+              id
+              emailMarketingConsent {
+                marketingState
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const desiredState = updates.acceptsMarketing ? 'SUBSCRIBED' : 'UNSUBSCRIBED';
+      const consentInput = {
+        customerId,
+        emailMarketingConsent: {
+          marketingState: desiredState,
+          marketingOptInLevel: 'SINGLE_OPT_IN',
+          ...(updates.acceptsMarketing
+            ? { consentUpdatedAt: new Date().toISOString() }
+            : {}),
+        },
+      };
+
+      try {
+        const consentRes = await axios.post(
+          config.adminApiUrl,
+          { query: consentMutation, variables: { input: consentInput } },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': config.adminToken,
+            },
+          }
+        );
+
+        const consentPayload = consentRes.data?.data?.customerEmailMarketingConsentUpdate;
+        const consentErrors = consentPayload?.userErrors || [];
+        if (consentRes.data?.errors || consentErrors.length > 0) {
+          console.error(
+            '❌ customerEmailMarketingConsentUpdate failed:',
+            consentRes.data?.errors || consentErrors
+          );
+        } else if (consentPayload?.customer?.emailMarketingConsent?.marketingState) {
+          marketingState = consentPayload.customer.emailMarketingConsent.marketingState;
+        }
+      } catch (consentErr) {
+        console.error(
+          '❌ customerEmailMarketingConsentUpdate threw:',
+          consentErr.response?.data || consentErr.message
+        );
+      }
+    }
+
     // Transform the customer data for the response
     const transformedCustomer = {
       ...customer,
-      acceptsMarketing: customer.emailMarketingConsent?.marketingState === 'SUBSCRIBED'
+      acceptsMarketing: marketingState === 'SUBSCRIBED'
     };
     
     res.json({ 
