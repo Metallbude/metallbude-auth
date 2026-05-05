@@ -425,13 +425,13 @@ async function callGeminiForProduct(text, urlHref, ogData) {
     'Use null whenever you cannot confidently determine a value from the page text — do not guess and do not invent values. ' +
     '\n\nField-by-field rules:\n' +
     '• name: the product\'s display name (e.g. "Eames Lounge Chair"). Strip site/brand suffixes like " – BrandName" or " | Online Shop".\n' +
-    '• brand: the manufacturer or maker. Look for "by X", "Brand:", site headers, or product:brand metadata. Prefer the maker over the retailer.\n' +
+    '• brand: the manufacturer or maker. Look for "by X", "Brand:", "Marke:", "Hersteller:", site headers, or product:brand metadata. Prefer the maker over the retailer.\n' +
     '• price: the current sale price as a plain number with no currency symbol and no thousand separators. If multiple prices appear, prefer the current/sale price over the original/strikethrough price.\n' +
     '• currency: 3-letter ISO 4217 code (EUR, USD, GBP, CHF, etc.). Infer from the currency symbol if not explicit.\n' +
-    '• material: the primary material(s), e.g. "oak", "walnut veneer", "powder-coated steel", "linen". If several are listed, join with ", ".\n' +
-    '• dimensions: format as "WxDxH cm" (or whatever units the page uses). Look for explicit width/depth/height labels (also: Breite/Tiefe/Höhe, Largeur/Profondeur/Hauteur).\n' +
+    '• material: the primary surface material(s). Prefer the MOST SPECIFIC description, not a generic category. "Eiche massiv geölt" beats "Holz"; "powder-coated steel" beats "metal"; "100% Leinen" beats "Stoff". Look in: product description prose ("Aus massiver Eiche..."); spec/details tables; German labels like "Material:", "Werkstoff:", "Bezug:", "Holzart:", "Oberfläche:"; English labels like "Material:", "Finish:", "Upholstery:". If multiple distinct materials are listed (e.g. frame + upholstery), join them with ", ".\n' +
+    '• dimensions: prefer the format "WxDxH cm" (or "BxTxH cm" for German pages). Look in: spec tables with rows labelled "Breite"/"Tiefe"/"Höhe"/"Länge" or "Width"/"Depth"/"Height"/"Length"; inline phrases like "Maße: 120 x 80 x 75 cm" or "Abmessungen:"; combined strings like "B 120 cm × T 80 cm × H 75 cm". Convert any of those to the compact "120x80x75 cm" form (or whatever units the page actually uses — don\'t convert mm to cm or in to cm). If only one dimension is given (e.g. diameter for a round table), return it labelled, e.g. "Ø 90 cm".\n' +
     '• description: a short sentence summarising the product. Maximum 200 characters. No marketing fluff.\n' +
-    '\nReview every field carefully. Many product pages contain all of these in a spec/details table or a "Material & dimensions" section — read the whole page text before deciding a field is null.';
+    '\nReview every field carefully. Many product pages contain all of these in a spec/details table or a "Material & dimensions" section — read the WHOLE page text before deciding a field is null. Material and dimensions in particular are commonly buried in description prose or German spec tables and are easy to miss on a quick pass.';
 
   const userText =
     `URL: ${urlHref}\n\n` +
@@ -625,15 +625,19 @@ module.exports = function (authenticateAppToken) {
       const ldData = extractLdProduct(html, parsedUrl);
       const ogData = mergeStructured(ogOnly, ldData);
 
-      // Trigger AI when the structured-data pass left any of the four core
-      // fields empty. Brand and price specifically are common to be missing
-      // even on big-name e-commerce sites, so we don't treat "name + image"
-      // alone as good enough anymore.
+      // Trigger AI when the structured-data pass left ANY of the six core
+      // fields empty. Material and dimensions are very rarely present in
+      // OG meta and often missing from JSON-LD, but typically findable in
+      // the page's description text or spec table — exactly Gemini's
+      // strength. Cost is negligible (Flash Lite, sub-cent per call) and
+      // the user is already watching a spinner.
       const coreMissing =
         !ogData.name ||
         !ogData.brand ||
         ogData.price == null ||
-        !ogData.imageUrl;
+        !ogData.imageUrl ||
+        !ogData.material ||
+        !ogData.dimensions;
       const ogConfident = !coreMissing;
 
       // Track which structured pass actually contributed something so the
