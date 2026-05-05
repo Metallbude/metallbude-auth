@@ -106,6 +106,196 @@ function extractTitle(html) {
   return m[1].replace(/\s+/g, ' ').trim() || null;
 }
 
+// ---------------------------------------------------------------------------
+// JSON-LD structured data (`<script type="application/ld+json">`).
+// Most major e-commerce sites embed schema.org Product blocks here that are
+// far richer than OG tags — brand, price, material, and sometimes
+// dimensions (via additionalProperty / depth/height/width). We pull all
+// LD blocks, walk @graph arrays, and return the first Product-shaped
+// object we find.
+// ---------------------------------------------------------------------------
+function extractJsonLd(html) {
+  const out = [];
+  const re =
+    /<script[^>]+type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const body = m[1].trim();
+    if (!body) continue;
+    try {
+      const parsed = JSON.parse(body);
+      out.push(parsed);
+    } catch (_) {
+      // Some sites embed slightly broken JSON-LD (trailing commas, raw
+      // line breaks in strings). We swallow and move on — OG + Gemini
+      // will still fire.
+    }
+  }
+  return out;
+}
+
+function findProductNode(node) {
+  if (!node || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findProductNode(child);
+      if (found) return found;
+    }
+    return null;
+  }
+  const type = node['@type'];
+  const types = Array.isArray(type) ? type : [type];
+  if (types.some((t) => typeof t === 'string' && /product/i.test(t))) {
+    return node;
+  }
+  if (Array.isArray(node['@graph'])) {
+    return findProductNode(node['@graph']);
+  }
+  return null;
+}
+
+function firstNonEmpty(...values) {
+  for (const v of values) {
+    if (v == null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    return v;
+  }
+  return null;
+}
+
+function extractLdProduct(html, urlObj) {
+  const blocks = extractJsonLd(html);
+  let product = null;
+  for (const block of blocks) {
+    const found = findProductNode(block);
+    if (found) {
+      product = found;
+      break;
+    }
+  }
+  if (!product) return {};
+
+  const name = typeof product.name === 'string' ? product.name.trim() : null;
+
+  // brand can be a string OR an object {name: 'X'} OR an array of either.
+  let brand = null;
+  const b = product.brand;
+  if (typeof b === 'string') brand = b.trim();
+  else if (Array.isArray(b) && b.length) {
+    const first = b[0];
+    brand =
+      typeof first === 'string' ? first.trim() : first?.name?.toString().trim() || null;
+  } else if (b && typeof b === 'object') {
+    brand = b.name ? b.name.toString().trim() : null;
+  }
+
+  // image can be string | string[] | ImageObject | ImageObject[]
+  let imageUrl = null;
+  const img = product.image;
+  const pickImg = (v) => {
+    if (!v) return null;
+    if (typeof v === 'string') return v;
+    if (typeof v === 'object') return v.url || v.contentUrl || null;
+    return null;
+  };
+  if (Array.isArray(img)) imageUrl = pickImg(img[0]);
+  else imageUrl = pickImg(img);
+  if (imageUrl) {
+    if (imageUrl.startsWith('//')) imageUrl = `https:${imageUrl}`;
+    else if (imageUrl.startsWith('/'))
+      imageUrl = `${urlObj.origin}${imageUrl}`;
+  }
+
+  // offers can be Offer | AggregateOffer | array of either.
+  let price = null;
+  let currency = null;
+  const offers = product.offers;
+  const pickOffer = (o) => {
+    if (!o || typeof o !== 'object') return;
+    const p = firstNonEmpty(o.price, o.lowPrice, o.highPrice);
+    if (p != null && price == null) {
+      const n =
+        typeof p === 'number'
+          ? p
+          : parseFloat(String(p).replace(/[^\d,.\-]/g, '').replace(',', '.'));
+      if (!isNaN(n)) price = n;
+    }
+    if (!currency && o.priceCurrency) currency = String(o.priceCurrency).trim();
+  };
+  if (Array.isArray(offers)) offers.forEach(pickOffer);
+  else pickOffer(offers);
+
+  const description =
+    typeof product.description === 'string'
+      ? product.description.trim()
+      : null;
+
+  // Material: schema.org `material` is sometimes a string, sometimes a
+  // Product/URL reference. Take string form only.
+  let material = null;
+  if (typeof product.material === 'string') material = product.material.trim();
+
+  // Dimensions: schema.org models width/depth/height as QuantitativeValue
+  // ({value, unitCode}). If at least one is present, build a "WxDxH unit"
+  // string. Many furniture sites also stash dimensions in
+  // additionalProperty as PropertyValue objects — try those too.
+  const dimensions = extractLdDimensions(product);
+
+  return {
+    name: name || null,
+    brand: brand || null,
+    price,
+    currency,
+    imageUrl: imageUrl || null,
+    description: description || null,
+    material,
+    dimensions,
+  };
+}
+
+function extractLdDimensions(product) {
+  const qv = (v) => {
+    if (!v) return null;
+    if (typeof v === 'number' || typeof v === 'string') return String(v);
+    if (typeof v === 'object') {
+      const val = v.value ?? null;
+      if (val == null) return null;
+      const unit = v.unitCode || v.unitText || '';
+      // unitCode is UN/CEFACT (CMT = cm, MTR = m, INH = inch). Map a couple.
+      const unitMap = { CMT: 'cm', MTR: 'm', INH: 'in', MMT: 'mm' };
+      const u = unitMap[unit] || unit || '';
+      return u ? `${val}${u}` : String(val);
+    }
+    return null;
+  };
+  const w = qv(product.width);
+  const d = qv(product.depth);
+  const h = qv(product.height);
+  if (w || d || h) {
+    return [w, d, h].filter(Boolean).join('x');
+  }
+  // additionalProperty fallback: array of {name, value, unitText}.
+  if (Array.isArray(product.additionalProperty)) {
+    const map = {};
+    for (const p of product.additionalProperty) {
+      if (!p || typeof p !== 'object') continue;
+      const nm = String(p.name || '').toLowerCase();
+      if (!nm) continue;
+      const val = p.value != null ? String(p.value) : null;
+      if (!val) continue;
+      const unit = p.unitText || p.unitCode || '';
+      const v = unit ? `${val}${unit}` : val;
+      if (/^(width|breite|larg)/.test(nm)) map.w = v;
+      else if (/^(depth|tiefe|prof)/.test(nm)) map.d = v;
+      else if (/^(height|höhe|haut)/.test(nm)) map.h = v;
+    }
+    if (map.w || map.d || map.h) {
+      return [map.w, map.d, map.h].filter(Boolean).join('x');
+    }
+  }
+  return null;
+}
+
 function extractOgProduct(html, urlObj) {
   const name =
     extractMeta(html, 'property', 'og:title') ||
@@ -161,10 +351,19 @@ function extractOgProduct(html, urlObj) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// HTML → plain text for the AI fallback. Strips scripts/styles/tags and
-// caps length so we don't blow up the prompt.
-// ---------------------------------------------------------------------------
+// Merge a higher-priority structured source over a lower-priority one.
+// Used to layer JSON-LD (preferred) on top of OG meta. A field on the
+// override only wins when it's non-empty/non-null.
+function mergeStructured(base, override) {
+  const out = { ...base };
+  for (const k of Object.keys(override)) {
+    const v = override[k];
+    if (v == null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    out[k] = v;
+  }
+  return out;
+}
 function htmlToText(html) {
   return html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
@@ -200,6 +399,8 @@ async function callGeminiForProduct(text, urlHref, ogData) {
     currency: ogData.currency || null,
     imageUrl: ogData.imageUrl || null,
     description: ogData.description || null,
+    material: ogData.material || null,
+    dimensions: ogData.dimensions || null,
   };
 
   // Schema-constrained JSON output. Every field is nullable and none are
@@ -219,17 +420,22 @@ async function callGeminiForProduct(text, urlHref, ogData) {
   };
 
   const systemInstruction =
-    'You extract product details from a webpage so a furniture app can pre-fill a "save item" form. ' +
-    'Reply with JSON only that matches the provided schema. ' +
-    'Use null for any field you cannot confidently determine from the page text. Do not invent values. ' +
-    'For price, return a number with no currency symbol. ' +
-    'For currency, return a 3-letter ISO code. ' +
-    'For dimensions, prefer the format "WxDxH cm" (or whatever units the page uses). ' +
-    'Keep description under 200 characters.';
+    'You extract product details from a product webpage so a furniture app can pre-fill a "save item" form. ' +
+    'Reply with JSON only that matches the provided schema. Every field is optional and may be null. ' +
+    'Use null whenever you cannot confidently determine a value from the page text — do not guess and do not invent values. ' +
+    '\n\nField-by-field rules:\n' +
+    '• name: the product\'s display name (e.g. "Eames Lounge Chair"). Strip site/brand suffixes like " – BrandName" or " | Online Shop".\n' +
+    '• brand: the manufacturer or maker. Look for "by X", "Brand:", site headers, or product:brand metadata. Prefer the maker over the retailer.\n' +
+    '• price: the current sale price as a plain number with no currency symbol and no thousand separators. If multiple prices appear, prefer the current/sale price over the original/strikethrough price.\n' +
+    '• currency: 3-letter ISO 4217 code (EUR, USD, GBP, CHF, etc.). Infer from the currency symbol if not explicit.\n' +
+    '• material: the primary material(s), e.g. "oak", "walnut veneer", "powder-coated steel", "linen". If several are listed, join with ", ".\n' +
+    '• dimensions: format as "WxDxH cm" (or whatever units the page uses). Look for explicit width/depth/height labels (also: Breite/Tiefe/Höhe, Largeur/Profondeur/Hauteur).\n' +
+    '• description: a short sentence summarising the product. Maximum 200 characters. No marketing fluff.\n' +
+    '\nReview every field carefully. Many product pages contain all of these in a spec/details table or a "Material & dimensions" section — read the whole page text before deciding a field is null.';
 
   const userText =
     `URL: ${urlHref}\n\n` +
-    `Already extracted from OpenGraph (do NOT contradict, only fill gaps):\n` +
+    `Already extracted from the page's structured data (do NOT contradict; only fill the null/missing slots):\n` +
     `${JSON.stringify(known)}\n\n` +
     `Page text (truncated):\n${text}`;
 
@@ -411,28 +617,62 @@ module.exports = function (authenticateAppToken) {
           .json({ error: 'fetch_failed', detail: err.message });
       }
 
-      const ogData = extractOgProduct(html, parsedUrl);
+      // Layer JSON-LD (schema.org Product) over OG meta. JSON-LD is
+      // typically far more complete — brand, price, material, dimensions
+      // are usually only present here. We treat JSON-LD as authoritative
+      // when its fields are non-null; OG fills any gaps.
+      const ogOnly = extractOgProduct(html, parsedUrl);
+      const ldData = extractLdProduct(html, parsedUrl);
+      const ogData = mergeStructured(ogOnly, ldData);
 
-      // Treat OG as "good enough" only if we got at least a name AND either
-      // an image or a price. Otherwise fall through to AI to fill the gaps.
-      const ogConfident =
-        !!ogData.name && (!!ogData.imageUrl || ogData.price != null);
+      // Trigger AI when the structured-data pass left any of the four core
+      // fields empty. Brand and price specifically are common to be missing
+      // even on big-name e-commerce sites, so we don't treat "name + image"
+      // alone as good enough anymore.
+      const coreMissing =
+        !ogData.name ||
+        !ogData.brand ||
+        ogData.price == null ||
+        !ogData.imageUrl;
+      const ogConfident = !coreMissing;
+
+      // Track which structured pass actually contributed something so the
+      // `source` label in the response is honest.
+      const sourcesUsed = [];
+      if (
+        ogOnly.name ||
+        ogOnly.brand ||
+        ogOnly.price != null ||
+        ogOnly.imageUrl
+      ) {
+        sourcesUsed.push('og');
+      }
+      if (
+        ldData.name ||
+        ldData.brand ||
+        ldData.price != null ||
+        ldData.imageUrl ||
+        ldData.material ||
+        ldData.dimensions
+      ) {
+        sourcesUsed.push('ld');
+      }
 
       let aiData = {};
-      let source = 'og';
       if (!ogConfident && process.env.GEMINI_API_KEY) {
         try {
           const text = htmlToText(html);
           aiData = await callGeminiForProduct(text, parsedUrl.href, ogData);
-          source = ogData.name || ogData.imageUrl ? 'mixed' : 'ai';
+          if (Object.keys(aiData).length) sourcesUsed.push('ai');
         } catch (err) {
-          // Don't fail the whole call — return whatever OG gave us.
+          // Don't fail the whole call — return whatever structured data gave us.
           console.warn(
             `[scrape-product-link] AI fallback failed host=${parsedUrl.host}:`,
             err.message,
           );
         }
       }
+      const source = sourcesUsed.join('+') || 'none';
 
       const payload = {
         name: ogData.name || aiData.name || null,
@@ -442,8 +682,8 @@ module.exports = function (authenticateAppToken) {
         currency: ogData.currency || aiData.currency || null,
         imageUrl: ogData.imageUrl || aiData.imageUrl || null,
         where: parsedUrl.host,
-        material: aiData.material || null,
-        dimensions: aiData.dimensions || null,
+        material: ogData.material || aiData.material || null,
+        dimensions: ogData.dimensions || aiData.dimensions || null,
         description: ogData.description || aiData.description || null,
         source,
       };
@@ -451,8 +691,12 @@ module.exports = function (authenticateAppToken) {
       cacheSet(cacheKey, payload);
       console.log(
         `[scrape-product-link] host=${parsedUrl.host} source=${source} ` +
-          `name=${payload.name ? '✓' : '✗'} price=${payload.price != null ? '✓' : '✗'} ` +
-          `image=${payload.imageUrl ? '✓' : '✗'}`,
+          `name=${payload.name ? '✓' : '✗'} ` +
+          `brand=${payload.brand ? '✓' : '✗'} ` +
+          `price=${payload.price != null ? '✓' : '✗'} ` +
+          `image=${payload.imageUrl ? '✓' : '✗'} ` +
+          `material=${payload.material ? '✓' : '✗'} ` +
+          `dimensions=${payload.dimensions ? '✓' : '✗'}`,
       );
       return res.json(payload);
     },
