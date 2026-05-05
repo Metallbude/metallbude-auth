@@ -486,6 +486,10 @@ async function callGeminiForProduct(text, urlHref, ogData) {
     );
   }
   const raw = candidate.content?.parts?.[0]?.text || '';
+  // TEMP DEBUG: dump payload + raw response for one test cycle. Remove after diagnosis.
+  console.log(
+    `[scrape-product-link][debug] text length=${text.length}\n--- TEXT TO GEMINI (first 3000) ---\n${text.slice(0, 3000)}\n--- GEMINI RAW RESPONSE ---\n${raw}\n--- END DEBUG ---`,
+  );
   return parseAiJson(raw);
 }
 
