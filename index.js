@@ -5271,6 +5271,10 @@ const authenticateAppToken = async (req, res, next) => {
   next();
 };
 
+// My Home "Other brand" link auto-fill — needs auth, so mounted here
+// once `authenticateAppToken` is defined.
+app.use(require('./routes/scrapeProductLink')(authenticateAppToken));
+
 // GET /auth/validate - Validate app token
 app.get('/auth/validate', authenticateAppToken, (req, res) => {
   const session = req.session;
