@@ -486,9 +486,17 @@ async function callGeminiForProduct(text, urlHref, ogData) {
     );
   }
   const raw = candidate.content?.parts?.[0]?.text || '';
-  // TEMP DEBUG: dump raw Gemini response. Remove after diagnosis.
+  // TEMP DEBUG: dump raw Gemini response + keyword presence in the text we sent.
+  const kwHit = (re) => (text.match(re) || []).length;
   console.log(
-    `[scrape-product-link][debug] finishReason=${candidate.finishReason} raw=${raw.slice(0, 1500)}`,
+    `[scrape-product-link][debug] finishReason=${candidate.finishReason} ` +
+      `textLen=${text.length} ` +
+      `kw[Material]=${kwHit(/material/gi)} ` +
+      `kw[Maße]=${kwHit(/Maße/gi)} ` +
+      `kw[Abmessungen]=${kwHit(/Abmessungen/gi)} ` +
+      `kw[Breite]=${kwHit(/Breite/gi)} ` +
+      `kw[BxHxT]=${kwHit(/\bB\s?\d+\s?cm/gi)}\n` +
+      `[scrape-product-link][debug] raw=${raw}`,
   );
   return parseAiJson(raw);
 }
