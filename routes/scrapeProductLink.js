@@ -426,7 +426,7 @@ async function callGeminiForProduct(text, urlHref, ogData) {
     '\n\nField-by-field rules:\n' +
     '• name: the product\'s display name (e.g. "Eames Lounge Chair"). Strip site/brand suffixes like " – BrandName" or " | Online Shop".\n' +
     '• brand: the manufacturer or maker. Look for "by X", "Brand:", "Marke:", "Hersteller:", site headers, or product:brand metadata. Prefer the maker over the retailer.\n' +
-    '• price: the current sale price as a plain number with no currency symbol and no thousand separators. If multiple prices appear, prefer the current/sale price over the original/strikethrough price.\n' +
+    '• price: the current sale price as a plain number with no currency symbol and no thousand separators. Output it with at most 2 decimal places (e.g. 1549 or 19.99) — never trailing zeros like 1549.0000. If multiple prices appear, prefer the current/sale price over the original/strikethrough price.\n' +
     '• currency: 3-letter ISO 4217 code (EUR, USD, GBP, CHF, etc.). Infer from the currency symbol if not explicit.\n' +
     '• material: the primary surface material(s). Prefer the MOST SPECIFIC description, not a generic category. "Eiche massiv geölt" beats "Holz"; "powder-coated steel" beats "metal"; "100% Leinen" beats "Stoff". Look in: product description prose ("Aus massiver Eiche..."); spec/details tables; German labels like "Material:", "Werkstoff:", "Bezug:", "Holzart:", "Oberfläche:"; English labels like "Material:", "Finish:", "Upholstery:". If multiple distinct materials are listed (e.g. frame + upholstery), join them with ", ".\n' +
     '• dimensions: prefer the format "WxDxH cm" (or "BxTxH cm" for German pages). Look in: spec tables with rows labelled "Breite"/"Tiefe"/"Höhe"/"Länge" or "Width"/"Depth"/"Height"/"Length"; inline phrases like "Maße: 120 x 80 x 75 cm" or "Abmessungen:"; combined strings like "B 120 cm × T 80 cm × H 75 cm". Convert any of those to the compact "120x80x75 cm" form (or whatever units the page actually uses — don\'t convert mm to cm or in to cm). If only one dimension is given (e.g. diameter for a round table), return it labelled, e.g. "Ø 90 cm".\n' +
@@ -454,7 +454,7 @@ async function callGeminiForProduct(text, urlHref, ogData) {
       responseMimeType: 'application/json',
       responseSchema,
       temperature: 0,
-      maxOutputTokens: 400,
+      maxOutputTokens: 800,
     },
   };
 
@@ -486,10 +486,6 @@ async function callGeminiForProduct(text, urlHref, ogData) {
     );
   }
   const raw = candidate.content?.parts?.[0]?.text || '';
-  // TEMP DEBUG: dump payload + raw response for one test cycle. Remove after diagnosis.
-  console.log(
-    `[scrape-product-link][debug] text length=${text.length}\n--- TEXT TO GEMINI (first 3000) ---\n${text.slice(0, 3000)}\n--- GEMINI RAW RESPONSE ---\n${raw}\n--- END DEBUG ---`,
-  );
   return parseAiJson(raw);
 }
 
