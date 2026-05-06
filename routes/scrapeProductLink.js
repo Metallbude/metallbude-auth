@@ -486,6 +486,10 @@ async function callGeminiForProduct(text, urlHref, ogData) {
     );
   }
   const raw = candidate.content?.parts?.[0]?.text || '';
+  // TEMP DEBUG: dump raw Gemini response. Remove after diagnosis.
+  console.log(
+    `[scrape-product-link][debug] finishReason=${candidate.finishReason} raw=${raw.slice(0, 1500)}`,
+  );
   return parseAiJson(raw);
 }
 
