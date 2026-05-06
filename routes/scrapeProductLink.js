@@ -421,22 +421,37 @@ async function callGeminiForProduct(text, urlHref, ogData) {
 
   const systemInstruction =
     'You extract product details from a product webpage so a furniture app can pre-fill a "save item" form. ' +
-    'Reply with JSON only that matches the provided schema. Every field is optional and may be null. ' +
-    'Use null whenever you cannot confidently determine a value from the page text — do not guess and do not invent values. ' +
+    'Reply with JSON only that matches the provided schema. ' +
+    'For each field requested, do your best to extract a value from the page text — only return null if there is genuinely no information about that field anywhere in the text. Do not invent values, but do not be overly conservative either: spec data on furniture pages is often present but labelled tersely (e.g. "B 100 cm" instead of "Breite: 100 cm"). ' +
     '\n\nField-by-field rules:\n' +
     '• name: the product\'s display name (e.g. "Eames Lounge Chair"). Strip site/brand suffixes like " – BrandName" or " | Online Shop".\n' +
     '• brand: the manufacturer or maker. Look for "by X", "Brand:", "Marke:", "Hersteller:", site headers, or product:brand metadata. Prefer the maker over the retailer.\n' +
     '• price: the current sale price as a plain number with no currency symbol and no thousand separators. Output it with at most 2 decimal places (e.g. 1549 or 19.99) — never trailing zeros like 1549.0000. If multiple prices appear, prefer the current/sale price over the original/strikethrough price.\n' +
     '• currency: 3-letter ISO 4217 code (EUR, USD, GBP, CHF, etc.). Infer from the currency symbol if not explicit.\n' +
     '• material: the primary surface material(s). Prefer the MOST SPECIFIC description, not a generic category. "Eiche massiv geölt" beats "Holz"; "powder-coated steel" beats "metal"; "100% Leinen" beats "Stoff". Look in: product description prose ("Aus massiver Eiche..."); spec/details tables; German labels like "Material:", "Werkstoff:", "Bezug:", "Holzart:", "Oberfläche:"; English labels like "Material:", "Finish:", "Upholstery:". If multiple distinct materials are listed (e.g. frame + upholstery), join them with ", ".\n' +
-    '• dimensions: prefer the format "WxDxH cm" (or "BxTxH cm" for German pages). Look in: spec tables with rows labelled "Breite"/"Tiefe"/"Höhe"/"Länge" or "Width"/"Depth"/"Height"/"Length"; inline phrases like "Maße: 120 x 80 x 75 cm" or "Abmessungen:"; combined strings like "B 120 cm × T 80 cm × H 75 cm". Convert any of those to the compact "120x80x75 cm" form (or whatever units the page actually uses — don\'t convert mm to cm or in to cm). If only one dimension is given (e.g. diameter for a round table), return it labelled, e.g. "Ø 90 cm".\n' +
+    '• dimensions: prefer the format "WxDxH cm" (or "BxTxH cm" for German pages). Look in: spec tables with rows labelled "Breite"/"Tiefe"/"Höhe"/"Länge" or "Width"/"Depth"/"Height"/"Length"; the abbreviated German letters "B"/"H"/"T"/"L" followed by a number (e.g. "B 100 cm, H 194 cm, T 60 cm" → "100x60x194 cm"); inline phrases like "Maße: 120 x 80 x 75 cm" or "Abmessungen:" or "Gesamtmaße:"; combined strings like "B 120 cm × T 80 cm × H 75 cm". Convert any of those to the compact "WxDxH cm" form (or whatever units the page actually uses — don\'t convert mm to cm or in to cm). If the page lists multiple dimension sets (e.g. "Gesamtmaße" plus "Sitzmaße" plus "Paketmaße"), use the OVERALL/Gesamt one. If only one dimension is given (e.g. diameter for a round table), return it labelled, e.g. "Ø 90 cm".\n' +
     '• description: a short sentence summarising the product. Maximum 200 characters. No marketing fluff.\n' +
     '\nReview every field carefully. Many product pages contain all of these in a spec/details table or a "Material & dimensions" section — read the WHOLE page text before deciding a field is null. Material and dimensions in particular are commonly buried in description prose or German spec tables and are easy to miss on a quick pass.';
 
+  // Identify which fields the caller already has and which it still needs.
+  // Listing the missing fields explicitly stops Gemini from defaulting to
+  // "echo what's known and skip the rest" — which it kept doing when the
+  // schema let every field be null.
+  const haveFields = Object.entries(known)
+    .filter(([, v]) => v != null && v !== '')
+    .map(([k]) => k);
+  const needFields = Object.keys(known).filter((k) => !haveFields.includes(k));
+
   const userText =
     `URL: ${urlHref}\n\n` +
-    `Already extracted from the page's structured data (do NOT contradict; only fill the null/missing slots):\n` +
-    `${JSON.stringify(known)}\n\n` +
+    `The page's structured data (OpenGraph + JSON-LD) already gave us these fields — keep them as-is:\n` +
+    `${JSON.stringify(
+      Object.fromEntries(haveFields.map((k) => [k, known[k]])),
+    )}\n\n` +
+    `Your job is to extract these MISSING fields from the page text below: ${needFields.join(
+      ', ',
+    )}.\n` +
+    `For each missing field, search the entire page text and return the best match. Only return null for a missing field if you genuinely cannot find any evidence for it in the text. Do not be conservative — material and dimensions are almost always somewhere in the spec section, even if labelled with abbreviations like "B / H / T".\n\n` +
     `Page text (truncated):\n${text}`;
 
   const body = {
