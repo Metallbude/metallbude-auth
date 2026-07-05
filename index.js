@@ -3840,10 +3840,170 @@ app.get('/config/storefront-token', (req, res) => {
 
   } catch (error) {
     console.error('❌ Config endpoint error:', error.message);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       error: 'Failed to get configuration'
     });
+  }
+});
+
+// App-only checkout: create a Shopify draft order priced at the AppCatalog
+// (app-only) prices so the customer actually PAYS the app price. The
+// Storefront cart can't read that price list (every context returns the
+// online price), so we build the order server-side with an exact per-line
+// discount (online - app price) and return the draft's invoiceUrl - a real
+// checkout URL. Lines without an app price stay at their online price; if no
+// line has app pricing, we tell the app to use its normal cart checkout.
+const APP_PRICE_LIST_ID =
+  process.env.APP_PRICE_LIST_ID || 'gid://shopify/PriceList/31236686092';
+
+app.post('/api/mobile/app-checkout', async (req, res) => {
+  try {
+    const rawLines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+    const lines = [];
+    for (const l of rawLines) {
+      let vid = typeof l?.variantId === 'string' ? l.variantId.trim() : '';
+      if (/^\d+$/.test(vid)) vid = `gid://shopify/ProductVariant/${vid}`;
+      if (!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(vid)) continue;
+      const qty = Math.floor(Number(l?.quantity));
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+      lines.push({ variantId: vid, quantity: qty });
+    }
+    if (lines.length === 0)
+      return res.status(400).json({ ok: false, error: 'No valid lines.' });
+    if (lines.length > 50)
+      return res.status(400).json({ ok: false, error: 'Too many lines (max 50).' });
+
+    const adminUrl = config.adminApiUrl;
+    const headers = {
+      'X-Shopify-Access-Token': config.adminToken,
+      'Content-Type': 'application/json',
+    };
+
+    // App (AppCatalog) fixed prices — the authoritative app price per variant.
+    const appPrices = new Map();
+    let cursor = null;
+    let hasNext = true;
+    while (hasNext) {
+      const r = await axios.post(
+        adminUrl,
+        {
+          query:
+            'query($id: ID!, $after: String){ priceList(id:$id){ prices(first:250, after:$after, originType: FIXED){ nodes{ variant{id} price{amount} } pageInfo{ hasNextPage endCursor } } } }',
+          variables: { id: APP_PRICE_LIST_ID, after: cursor },
+        },
+        { headers },
+      );
+      const pl = r.data?.data?.priceList?.prices;
+      if (!pl) break;
+      for (const n of pl.nodes || []) {
+        const id = n?.variant?.id;
+        const amt = Number(n?.price?.amount);
+        if (id && Number.isFinite(amt)) appPrices.set(id, amt);
+      }
+      hasNext = Boolean(pl.pageInfo?.hasNextPage);
+      cursor = pl.pageInfo?.endCursor || null;
+    }
+
+    // Current online-store prices (the draft's base price per line).
+    const onlinePrices = new Map();
+    const variantIds = [...new Set(lines.map((l) => l.variantId))];
+    const or = await axios.post(
+      adminUrl,
+      {
+        query:
+          'query($ids:[ID!]!){ nodes(ids:$ids){ ... on ProductVariant { id price } } }',
+        variables: { ids: variantIds },
+      },
+      { headers },
+    );
+    for (const n of or.data?.data?.nodes || []) {
+      const amt = Number(n?.price);
+      if (n?.id && Number.isFinite(amt)) onlinePrices.set(n.id, amt);
+    }
+
+    // Build draft line items: discount = (online - app) * qty when app < online.
+    const debug = [];
+    let anyAppDiscount = false;
+    const lineItems = lines.map((line) => {
+      const online = onlinePrices.has(line.variantId)
+        ? onlinePrices.get(line.variantId)
+        : null;
+      const app = appPrices.has(line.variantId)
+        ? appPrices.get(line.variantId)
+        : null;
+      let lineDiscount = 0;
+      const item = { variantId: line.variantId, quantity: line.quantity };
+      if (online != null && app != null && app < online) {
+        lineDiscount = Number(((online - app) * line.quantity).toFixed(2));
+        anyAppDiscount = true;
+        item.appliedDiscount = {
+          valueType: 'FIXED_AMOUNT',
+          value: lineDiscount,
+          title: 'App-Preis',
+          description: 'Metallbude App exclusive price',
+        };
+      }
+      debug.push({
+        variantId: line.variantId,
+        quantity: line.quantity,
+        onlinePrice: online,
+        appPrice: app,
+        lineDiscount,
+      });
+      return item;
+    });
+
+    if (!anyAppDiscount) {
+      return res.json({ ok: true, useNormalCart: true, lines: debug });
+    }
+
+    const input = { lineItems };
+    if (typeof req.body?.email === 'string' && req.body.email.includes('@'))
+      input.email = req.body.email;
+
+    const dr = await axios.post(
+      adminUrl,
+      {
+        query:
+          'mutation($input: DraftOrderInput!){ draftOrderCreate(input:$input){ draftOrder{ id invoiceUrl totalPrice } userErrors{ field message } } }',
+        variables: { input },
+      },
+      { headers },
+    );
+
+    const gqlErrors = (dr.data?.errors || []).map((e) => e.message);
+    const draft = dr.data?.data?.draftOrderCreate;
+    const userErrors = (draft?.userErrors || []).map((e) =>
+      [e.field?.join('.'), e.message].filter(Boolean).join(': '),
+    );
+    const errors = [...gqlErrors, ...userErrors].filter(Boolean);
+    const draftOrder = draft?.draftOrder;
+
+    if (errors.length > 0 || !draftOrder?.invoiceUrl) {
+      console.error('❌ [app-checkout] draftOrderCreate failed:', errors, debug);
+      return res.status(502).json({
+        ok: false,
+        error: errors.join('; ') || 'Could not create checkout.',
+        lines: debug,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      checkoutUrl: draftOrder.invoiceUrl,
+      draftOrderId: draftOrder.id,
+      totalPrice: draftOrder.totalPrice,
+      lines: debug,
+    });
+  } catch (error) {
+    const detail =
+      error?.response?.data?.errors?.[0]?.message ||
+      JSON.stringify(error?.response?.data?.errors) ||
+      error?.message ||
+      'server error';
+    console.error('❌ [app-checkout] error:', detail);
+    return res.status(500).json({ ok: false, error: detail });
   }
 });
 
