@@ -4061,10 +4061,14 @@ app.get('/api/mobile/analytics', async (req, res) => {
     // terms all match nothing), which is why the channel tagger maintains
     // tag:mobile_app_channel. Classification below stays per-order; this
     // only narrows the scan. debug_filter overrides for calibration.
+    // 'Metallbude APP' is the store's long-standing channel-order tag (an
+    // existing automation applies it) - it carries the history from before
+    // our own mobile_app_channel tagger existed (verified 2026-07-06:
+    // matches the unfiltered scan exactly on historical windows).
     const appFilter =
       typeof req.query.debug_filter === 'string'
         ? (req.query.debug_filter ? ` ${req.query.debug_filter}` : '')
-        : ' (tag:mobile_app OR tag:mobile_app_channel)';
+        : " (tag:mobile_app OR tag:mobile_app_channel OR tag:'Metallbude APP')";
     const orderQuery =
       (untilIso
         ? `created_at:>='${sinceIso}' created_at:<='${untilIso}'`
@@ -4123,9 +4127,11 @@ app.get('/api/mobile/analytics', async (req, res) => {
     // orders (app-price) have no app.name, so they're caught by the tag.
     const isMobileChannel = (o) => {
       const appName = (o.app?.name || '').toLowerCase();
+      const tags = Array.isArray(o.tags) ? o.tags : [];
       return (
         appName.includes('mobile') ||
-        (Array.isArray(o.tags) && o.tags.includes('mobile_app_channel'))
+        tags.includes('mobile_app_channel') ||
+        tags.includes('Metallbude APP')
       );
     };
 
