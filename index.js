@@ -4025,6 +4025,15 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
 // "mobile_app". This aggregates both, split out, over a rolling window.
 app.get('/api/mobile/analytics', async (req, res) => {
   try {
+    // Revenue data - require a shared key when configured so it isn't public.
+    const requiredKey = process.env.ANALYTICS_KEY;
+    if (requiredKey) {
+      const provided = req.get('x-analytics-key') || req.query.key;
+      if (provided !== requiredKey) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized.' });
+      }
+    }
+
     const days = Math.min(
       Math.max(parseInt(req.query.days, 10) || 30, 1),
       365,
