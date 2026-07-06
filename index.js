@@ -4038,13 +4038,29 @@ app.get('/api/mobile/analytics', async (req, res) => {
       Math.max(parseInt(req.query.days, 10) || 30, 1),
       365,
     );
-    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
-    const sinceIso = new Date(sinceMs).toISOString();
+    // Explicit from/to range (ISO strings) takes precedence over days.
+    const parseDate = (v) => {
+      if (!v) return null;
+      const d = new Date(v);
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+    const fromDate = parseDate(req.query.from);
+    const toDate = parseDate(req.query.to);
+    const sinceIso = fromDate
+      ? fromDate.toISOString()
+      : new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const untilIso = fromDate && toDate ? toDate.toISOString() : null;
+    const orderQuery = untilIso
+      ? `created_at:>=${sinceIso} created_at:<=${untilIso}`
+      : `created_at:>=${sinceIso}`;
 
     const headers = {
       'X-Shopify-Access-Token': config.adminToken,
       'Content-Type': 'application/json',
     };
+    // "metallbude-de.myshopify.com" -> "metallbude-de" for admin deep links.
+    const storeHandle = (config.adminApiUrl.match(/https:\/\/([^.]+)\./) ||
+      [])[1] || 'metallbude-de';
 
     // Pull orders created in the window (paginated, capped for safety).
     const orders = [];
@@ -4057,9 +4073,9 @@ app.get('/api/mobile/analytics', async (req, res) => {
         config.adminApiUrl,
         {
           query:
-            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ name createdAt sourceName tags displayFinancialStatus cancelledAt app{ name } currentTotalPriceSet{ shopMoney{ amount currencyCode } } } pageInfo{ hasNextPage endCursor } } }',
+            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ id legacyResourceId name createdAt sourceName tags displayFinancialStatus cancelledAt app{ name } customAttributes{ key value } currentTotalPriceSet{ shopMoney{ amount currencyCode } } } pageInfo{ hasNextPage endCursor } } }',
           variables: {
-            q: `created_at:>=${sinceIso}`,
+            q: orderQuery,
             after: cursor,
           },
         },
@@ -4075,8 +4091,14 @@ app.get('/api/mobile/analytics', async (req, res) => {
     // Classify each order.
     const sourceCounts = {};
     const appNameCounts = {};
+    // App-price draft orders are tagged mobile_app AND carry channel=mobile_app
+    // note attributes (either alone is sufficient - belt and suspenders).
     const isAppTagged = (o) =>
-      Array.isArray(o.tags) && o.tags.includes('mobile_app');
+      (Array.isArray(o.tags) && o.tags.includes('mobile_app')) ||
+      (Array.isArray(o.customAttributes) &&
+        o.customAttributes.some(
+          (a) => a.key === 'channel' && a.value === 'mobile_app',
+        ));
     // Normal-price app orders come through the mobile sales channel, whose
     // app name contains "mobile" (e.g. "Metallbude Mobile Auth"). Draft
     // orders (app-price) have no app.name, so they're caught by the tag.
@@ -4111,6 +4133,9 @@ app.get('/api/mobile/analytics', async (req, res) => {
           createdAt: o.createdAt,
           type: appPrice ? 'app_price' : 'app_normal',
           source: src,
+          adminUrl: o.legacyResourceId
+            ? `https://admin.shopify.com/store/${storeHandle}/orders/${o.legacyResourceId}`
+            : null,
         });
       }
     }
@@ -4120,7 +4145,7 @@ app.get('/api/mobile/analytics', async (req, res) => {
 
     return res.json({
       ok: true,
-      period: { days, since: sinceIso },
+      period: { days, since: sinceIso, until: untilIso },
       currency,
       total: {
         orders: totalOrders,
@@ -4148,6 +4173,95 @@ app.get('/api/mobile/analytics', async (req, res) => {
       error?.message ||
       'server error';
     console.error('❌ [analytics] error:', detail);
+    return res.status(500).json({ ok: false, error: detail });
+  }
+});
+
+// One-off maintenance: tag app-price orders created before the tagging fix.
+// Finds draft orders whose line items carry our 'App-Preis' discount (the
+// marker every app-checkout draft has) and adds the mobile_app tags to their
+// completed orders so analytics counts them. Idempotent - already-tagged
+// orders are skipped. Key-gated like analytics.
+app.post('/api/mobile/analytics/backfill-tags', async (req, res) => {
+  try {
+    const requiredKey = process.env.ANALYTICS_KEY;
+    if (requiredKey) {
+      const provided = req.get('x-analytics-key') || req.query.key;
+      if (provided !== requiredKey) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized.' });
+      }
+    }
+
+    const since = req.query.since || '2026-07-01';
+    const headers = {
+      'X-Shopify-Access-Token': config.adminToken,
+      'Content-Type': 'application/json',
+    };
+
+    // Collect app-price drafts (paginated, small cap - this is a backfill).
+    const drafts = [];
+    let cursor = null;
+    let hasNext = true;
+    let pages = 0;
+    while (hasNext && pages < 10) {
+      pages++;
+      const r = await axios.post(
+        config.adminApiUrl,
+        {
+          query:
+            'query($q: String!, $after: String){ draftOrders(first: 50, after: $after, query: $q){ nodes{ id name createdAt status order{ id name tags } lineItems(first: 50){ nodes{ appliedDiscount{ title } } } } pageInfo{ hasNextPage endCursor } } }',
+          variables: { q: `created_at:>=${since}`, after: cursor },
+        },
+        { headers },
+      );
+      const conn = r.data?.data?.draftOrders;
+      if (!conn) break;
+      drafts.push(...(conn.nodes || []));
+      hasNext = Boolean(conn.pageInfo?.hasNextPage);
+      cursor = conn.pageInfo?.endCursor || null;
+    }
+
+    const isAppDraft = (d) =>
+      (d.lineItems?.nodes || []).some(
+        (li) => li.appliedDiscount?.title === 'App-Preis',
+      );
+
+    const results = { scanned: drafts.length, appDrafts: 0, tagged: [], alreadyTagged: [], notCompleted: [], errors: [] };
+    for (const d of drafts) {
+      if (!isAppDraft(d)) continue;
+      results.appDrafts++;
+      if (!d.order?.id) {
+        results.notCompleted.push(d.name);
+        continue;
+      }
+      if ((d.order.tags || []).includes('mobile_app')) {
+        results.alreadyTagged.push(d.order.name);
+        continue;
+      }
+      const t = await axios.post(
+        config.adminApiUrl,
+        {
+          query:
+            'mutation($id: ID!, $tags: [String!]!){ tagsAdd(id: $id, tags: $tags){ userErrors{ message } } }',
+          variables: { id: d.order.id, tags: ['mobile_app', 'app_only_sale'] },
+        },
+        { headers },
+      );
+      const errs = t.data?.data?.tagsAdd?.userErrors || [];
+      if (errs.length) {
+        results.errors.push({ order: d.order.name, message: errs[0].message });
+      } else {
+        results.tagged.push(d.order.name);
+      }
+    }
+
+    return res.json({ ok: true, since, ...results });
+  } catch (error) {
+    const detail =
+      error?.response?.data?.errors?.[0]?.message ||
+      error?.message ||
+      'server error';
+    console.error('❌ [backfill-tags] error:', detail);
     return res.status(500).json({ ok: false, error: detail });
   }
 });
