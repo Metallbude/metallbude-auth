@@ -4062,8 +4062,8 @@ app.get('/api/mobile/analytics', async (req, res) => {
     const mobileSourceName =
       process.env.MOBILE_SOURCE_NAME || '254655692801';
     const appFilter =
-      req.query.debug_nofilter === '1'
-        ? ''
+      typeof req.query.debug_filter === 'string'
+        ? (req.query.debug_filter ? ` ${req.query.debug_filter}` : '')
         : ` (tag:mobile_app OR source_name:${mobileSourceName})`;
     const orderQuery =
       (untilIso
