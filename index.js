@@ -4073,7 +4073,7 @@ app.get('/api/mobile/analytics', async (req, res) => {
         config.adminApiUrl,
         {
           query:
-            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ id legacyResourceId name createdAt sourceName tags displayFinancialStatus cancelledAt app{ name } customAttributes{ key value } currentTotalPriceSet{ shopMoney{ amount currencyCode } } } pageInfo{ hasNextPage endCursor } } }',
+            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ id legacyResourceId name createdAt sourceName tags displayFinancialStatus cancelledAt taxesIncluded app{ name } customAttributes{ key value } currentTotalPriceSet{ shopMoney{ amount currencyCode } } currentSubtotalPriceSet{ shopMoney{ amount } } currentTotalDiscountsSet{ shopMoney{ amount } } subtotalPriceSet{ shopMoney{ amount } } totalDiscountsSet{ shopMoney{ amount } } totalShippingPriceSet{ shopMoney{ amount } } currentTotalTaxSet{ shopMoney{ amount } } totalRefundedSet{ shopMoney{ amount } } } pageInfo{ hasNextPage endCursor } } }',
           variables: {
             q: orderQuery,
             after: cursor,
@@ -4107,7 +4107,36 @@ app.get('/api/mobile/analytics', async (req, res) => {
       return appName.includes('mobile');
     };
 
-    const sum = { appPrice: { orders: 0, revenue: 0 }, appNormal: { orders: 0, revenue: 0 } };
+    const money = (set) => Number(set?.shopMoney?.amount) || 0;
+    const sum = {
+      appPrice: { orders: 0, revenue: 0, grossSales: 0 },
+      appNormal: { orders: 0, revenue: 0, grossSales: 0 },
+    };
+    // Shopify-Analytics-style breakdown (matches the ShopifyQL sales
+    // dataset): gross = merchandise at pre-discount prices, net = gross -
+    // discounts, totalCharged = what the customer actually paid incl.
+    // shipping + VAT. Returns tracked separately like the reports do.
+    const sales = {
+      grossSales: 0,
+      discounts: 0,
+      netSales: 0,
+      shipping: 0,
+      taxes: 0,
+      returns: 0,
+      totalCharged: 0,
+    };
+    const debugTotals = {
+      grossCurrent: 0,
+      grossOriginal: 0,
+      subtotalCurrent: 0,
+      subtotalOriginal: 0,
+      discountsCurrent: 0,
+      discountsOriginal: 0,
+      taxes: 0,
+      shipping: 0,
+      refunds: 0,
+      charged: 0,
+    };
     let currency = 'EUR';
     const recent = [];
     for (const o of orders) {
@@ -4116,16 +4145,40 @@ app.get('/api/mobile/analytics', async (req, res) => {
       sourceCounts[src] = (sourceCounts[src] || 0) + 1;
       const appName = o.app?.name || '(none)';
       appNameCounts[appName] = (appNameCounts[appName] || 0) + 1;
-      const amount = Number(o.currentTotalPriceSet?.shopMoney?.amount) || 0;
+      const amount = money(o.currentTotalPriceSet);
       currency = o.currentTotalPriceSet?.shopMoney?.currencyCode || currency;
 
       const appPrice = isAppTagged(o);
       const appNormal = !appPrice && isMobileChannel(o);
       if (!appPrice && !appNormal) continue;
 
+      const subtotal = money(o.currentSubtotalPriceSet);
+      const discounts = money(o.currentTotalDiscountsSet);
+      const gross = subtotal + discounts;
+      sales.grossSales += gross;
+      sales.discounts += discounts;
+      sales.netSales += subtotal;
+      sales.shipping += money(o.totalShippingPriceSet);
+      sales.taxes += money(o.currentTotalTaxSet);
+      sales.returns += money(o.totalRefundedSet);
+      sales.totalCharged += amount;
+
+      debugTotals.grossCurrent += gross;
+      debugTotals.grossOriginal +=
+        money(o.subtotalPriceSet) + money(o.totalDiscountsSet);
+      debugTotals.subtotalCurrent += subtotal;
+      debugTotals.subtotalOriginal += money(o.subtotalPriceSet);
+      debugTotals.discountsCurrent += discounts;
+      debugTotals.discountsOriginal += money(o.totalDiscountsSet);
+      debugTotals.taxes += money(o.currentTotalTaxSet);
+      debugTotals.shipping += money(o.totalShippingPriceSet);
+      debugTotals.refunds += money(o.totalRefundedSet);
+      debugTotals.charged += amount;
+
       const bucket = appPrice ? sum.appPrice : sum.appNormal;
       bucket.orders += 1;
       bucket.revenue += amount;
+      bucket.grossSales += gross;
       if (recent.length < 20) {
         recent.push({
           name: o.name,
@@ -4153,15 +4206,30 @@ app.get('/api/mobile/analytics', async (req, res) => {
         averageOrderValue:
           totalOrders > 0 ? Number((totalRevenue / totalOrders).toFixed(2)) : 0,
       },
+      sales: Object.fromEntries(
+        Object.entries(sales).map(([k, v]) => [k, Number(v.toFixed(2))]),
+      ),
       appOnlyPrice: {
         orders: sum.appPrice.orders,
         revenue: Number(sum.appPrice.revenue.toFixed(2)),
+        grossSales: Number(sum.appPrice.grossSales.toFixed(2)),
       },
       appNormalPrice: {
         orders: sum.appNormal.orders,
         revenue: Number(sum.appNormal.revenue.toFixed(2)),
+        grossSales: Number(sum.appNormal.grossSales.toFixed(2)),
       },
       recent,
+      ...(req.query.debug === '1'
+        ? {
+            debugTotals: Object.fromEntries(
+              Object.entries(debugTotals).map(([k, v]) => [
+                k,
+                Number(v.toFixed(2)),
+              ]),
+            ),
+          }
+        : {}),
       // Calibration: how orders in the window are attributed.
       sourceBreakdown: sourceCounts,
       appNameBreakdown: appNameCounts,
