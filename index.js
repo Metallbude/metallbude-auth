@@ -4055,9 +4055,20 @@ app.get('/api/mobile/analytics', async (req, res) => {
       fromDate || new Date(Date.now() - days * 24 * 60 * 60 * 1000),
     );
     const untilIso = fromDate && toDate ? searchIso(toDate) : null;
-    const orderQuery = untilIso
-      ? `created_at:>='${sinceIso}' created_at:<='${untilIso}'`
-      : `created_at:>='${sinceIso}'`;
+    // Prefilter the search to app orders (tagged drafts OR the Mobile Auth
+    // channel) so year-long windows don't burn the pagination cap scanning
+    // the whole store's orders. Classification below stays per-order; this
+    // only narrows the scan. debug_nofilter=1 disables it for calibration.
+    const mobileSourceName =
+      process.env.MOBILE_SOURCE_NAME || '254655692801';
+    const appFilter =
+      req.query.debug_nofilter === '1'
+        ? ''
+        : ` (tag:mobile_app OR source_name:${mobileSourceName})`;
+    const orderQuery =
+      (untilIso
+        ? `created_at:>='${sinceIso}' created_at:<='${untilIso}'`
+        : `created_at:>='${sinceIso}'`) + appFilter;
 
     const headers = {
       'X-Shopify-Access-Token': config.adminToken,
@@ -4072,7 +4083,7 @@ app.get('/api/mobile/analytics', async (req, res) => {
     let cursor = null;
     let hasNext = true;
     let pages = 0;
-    while (hasNext && pages < 40) {
+    while (hasNext && pages < 60) {
       pages++;
       const r = await axios.post(
         config.adminApiUrl,
@@ -4259,6 +4270,9 @@ app.get('/api/mobile/analytics', async (req, res) => {
       sourceBreakdown: sourceCounts,
       appNameBreakdown: appNameCounts,
       scannedOrders: orders.length,
+      // True when the window held more orders than the scan cap - numbers
+      // then only cover the newest portion of the period.
+      truncated: hasNext,
     });
   } catch (error) {
     const detail =
