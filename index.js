@@ -4019,6 +4019,129 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
   }
 });
 
+// App analytics: orders + revenue attributable to the mobile app. App orders
+// come in two shapes - normal-price orders via the Mobile Auth sales channel
+// (identified by sourceName) and app-only-price orders as draft orders tagged
+// "mobile_app". This aggregates both, split out, over a rolling window.
+app.get('/api/mobile/analytics', async (req, res) => {
+  try {
+    const days = Math.min(
+      Math.max(parseInt(req.query.days, 10) || 30, 1),
+      365,
+    );
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const sinceIso = new Date(sinceMs).toISOString();
+
+    const headers = {
+      'X-Shopify-Access-Token': config.adminToken,
+      'Content-Type': 'application/json',
+    };
+
+    // Pull orders created in the window (paginated, capped for safety).
+    const orders = [];
+    let cursor = null;
+    let hasNext = true;
+    let pages = 0;
+    while (hasNext && pages < 40) {
+      pages++;
+      const r = await axios.post(
+        config.adminApiUrl,
+        {
+          query:
+            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ name createdAt sourceName tags displayFinancialStatus cancelledAt currentTotalPriceSet{ shopMoney{ amount currencyCode } } } pageInfo{ hasNextPage endCursor } } }',
+          variables: {
+            q: `created_at:>=${sinceIso}`,
+            after: cursor,
+          },
+        },
+        { headers },
+      );
+      const conn = r.data?.data?.orders;
+      if (!conn) break;
+      orders.push(...(conn.nodes || []));
+      hasNext = Boolean(conn.pageInfo?.hasNextPage);
+      cursor = conn.pageInfo?.endCursor || null;
+    }
+
+    // Classify each order.
+    const sourceCounts = {};
+    const isAppTagged = (o) =>
+      Array.isArray(o.tags) && o.tags.includes('mobile_app');
+    const isMobileChannel = (o) => {
+      const s = (o.sourceName || '').toLowerCase();
+      // Draft orders report numeric/app sourceName; the Mobile Auth channel
+      // and the app's own source strings both contain these markers.
+      return (
+        s.includes('mobile') ||
+        s.includes('app') ||
+        s.includes('metallbude')
+      );
+    };
+
+    const sum = { appPrice: { orders: 0, revenue: 0 }, appNormal: { orders: 0, revenue: 0 } };
+    let currency = 'EUR';
+    const recent = [];
+    for (const o of orders) {
+      if (o.cancelledAt) continue;
+      const src = o.sourceName || '(none)';
+      sourceCounts[src] = (sourceCounts[src] || 0) + 1;
+      const amount = Number(o.currentTotalPriceSet?.shopMoney?.amount) || 0;
+      currency = o.currentTotalPriceSet?.shopMoney?.currencyCode || currency;
+
+      const appPrice = isAppTagged(o);
+      const appNormal = !appPrice && isMobileChannel(o);
+      if (!appPrice && !appNormal) continue;
+
+      const bucket = appPrice ? sum.appPrice : sum.appNormal;
+      bucket.orders += 1;
+      bucket.revenue += amount;
+      if (recent.length < 20) {
+        recent.push({
+          name: o.name,
+          total: amount,
+          createdAt: o.createdAt,
+          type: appPrice ? 'app_price' : 'app_normal',
+          source: src,
+        });
+      }
+    }
+
+    const totalOrders = sum.appPrice.orders + sum.appNormal.orders;
+    const totalRevenue = sum.appPrice.revenue + sum.appNormal.revenue;
+
+    return res.json({
+      ok: true,
+      period: { days, since: sinceIso },
+      currency,
+      total: {
+        orders: totalOrders,
+        revenue: Number(totalRevenue.toFixed(2)),
+        averageOrderValue:
+          totalOrders > 0 ? Number((totalRevenue / totalOrders).toFixed(2)) : 0,
+      },
+      appOnlyPrice: {
+        orders: sum.appPrice.orders,
+        revenue: Number(sum.appPrice.revenue.toFixed(2)),
+      },
+      appNormalPrice: {
+        orders: sum.appNormal.orders,
+        revenue: Number(sum.appNormal.revenue.toFixed(2)),
+      },
+      recent,
+      // Calibration: how orders in the window are attributed by sourceName.
+      sourceBreakdown: sourceCounts,
+      scannedOrders: orders.length,
+    });
+  } catch (error) {
+    const detail =
+      error?.response?.data?.errors?.[0]?.message ||
+      error?.message ||
+      'server error';
+    console.error('❌ [analytics] error:', detail);
+    return res.status(500).json({ ok: false, error: detail });
+  }
+});
+
 // Reviews endpoints (Judge.me proxy)
 app.get('/reviews', async (req, res) => {
   try {
