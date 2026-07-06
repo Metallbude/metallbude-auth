@@ -4154,24 +4154,35 @@ app.get('/api/mobile/analytics', async (req, res) => {
 
       const subtotal = money(o.currentSubtotalPriceSet);
       const discounts = money(o.currentTotalDiscountsSet);
-      const gross = subtotal + discounts;
+      const taxes = money(o.currentTotalTaxSet);
+      const shipping = money(o.totalShippingPriceSet);
+      const grossInclVat = subtotal + discounts;
+      // Shopify Analytics reports sales amounts EXCLUDING VAT. German
+      // prices are tax-inclusive, so strip each order's actual blended
+      // VAT rate (19% DE, 20% AT, ... - shipping and merchandise share
+      // the order's rate in the EU): factor = (charged - tax) / charged.
+      const vatFactor =
+        o.taxesIncluded && amount > taxes && taxes > 0
+          ? (amount - taxes) / amount
+          : 1;
+      const gross = grossInclVat * vatFactor;
       sales.grossSales += gross;
-      sales.discounts += discounts;
-      sales.netSales += subtotal;
-      sales.shipping += money(o.totalShippingPriceSet);
-      sales.taxes += money(o.currentTotalTaxSet);
+      sales.discounts += discounts * vatFactor;
+      sales.netSales += subtotal * vatFactor;
+      sales.shipping += shipping * vatFactor;
+      sales.taxes += taxes;
       sales.returns += money(o.totalRefundedSet);
       sales.totalCharged += amount;
 
-      debugTotals.grossCurrent += gross;
+      debugTotals.grossCurrent += grossInclVat;
       debugTotals.grossOriginal +=
         money(o.subtotalPriceSet) + money(o.totalDiscountsSet);
       debugTotals.subtotalCurrent += subtotal;
       debugTotals.subtotalOriginal += money(o.subtotalPriceSet);
       debugTotals.discountsCurrent += discounts;
       debugTotals.discountsOriginal += money(o.totalDiscountsSet);
-      debugTotals.taxes += money(o.currentTotalTaxSet);
-      debugTotals.shipping += money(o.totalShippingPriceSet);
+      debugTotals.taxes += taxes;
+      debugTotals.shipping += shipping;
       debugTotals.refunds += money(o.totalRefundedSet);
       debugTotals.charged += amount;
 
