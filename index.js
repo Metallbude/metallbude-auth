@@ -4055,16 +4055,16 @@ app.get('/api/mobile/analytics', async (req, res) => {
       fromDate || new Date(Date.now() - days * 24 * 60 * 60 * 1000),
     );
     const untilIso = fromDate && toDate ? searchIso(toDate) : null;
-    // Prefilter the search to app orders (tagged drafts OR the Mobile Auth
-    // channel) so year-long windows don't burn the pagination cap scanning
-    // the whole store's orders. Classification below stays per-order; this
-    // only narrows the scan. debug_nofilter=1 disables it for calibration.
-    const mobileSourceName =
-      process.env.MOBILE_SOURCE_NAME || '254655692801';
+    // Prefilter the search to app orders so year-long windows don't burn
+    // the pagination cap scanning the whole store's orders. Channel can't
+    // be searched directly (verified: source_name/sales_channel/channel_id
+    // terms all match nothing), which is why the channel tagger maintains
+    // tag:mobile_app_channel. Classification below stays per-order; this
+    // only narrows the scan. debug_filter overrides for calibration.
     const appFilter =
       typeof req.query.debug_filter === 'string'
         ? (req.query.debug_filter ? ` ${req.query.debug_filter}` : '')
-        : ` (tag:mobile_app OR source_name:${mobileSourceName})`;
+        : ' (tag:mobile_app OR tag:mobile_app_channel)';
     const orderQuery =
       (untilIso
         ? `created_at:>='${sinceIso}' created_at:<='${untilIso}'`
@@ -4120,7 +4120,10 @@ app.get('/api/mobile/analytics', async (req, res) => {
     // orders (app-price) have no app.name, so they're caught by the tag.
     const isMobileChannel = (o) => {
       const appName = (o.app?.name || '').toLowerCase();
-      return appName.includes('mobile');
+      return (
+        appName.includes('mobile') ||
+        (Array.isArray(o.tags) && o.tags.includes('mobile_app_channel'))
+      );
     };
 
     const money = (set) => Number(set?.shopMoney?.amount) || 0;
@@ -4280,6 +4283,106 @@ app.get('/api/mobile/analytics', async (req, res) => {
       error?.message ||
       'server error';
     console.error('❌ [analytics] error:', detail);
+    return res.status(500).json({ ok: false, error: detail });
+  }
+});
+
+// Mobile-channel order tagger. Orders placed through the app's normal
+// checkout arrive via the "Metallbude Mobile Auth" sales channel but carry
+// no tag, and Shopify's order search cannot filter by channel - so analytics
+// scans over long windows would have to walk every store order. Tagging them
+// 'mobile_app_channel' (distinct from 'mobile_app', which marks app-PRICE
+// draft orders) makes them searchable. Runs every 10 minutes over the last
+// 24h (idempotent), plus a backfill endpoint for history.
+async function tagMobileChannelOrders(hoursBack, maxPages) {
+  const headers = {
+    'X-Shopify-Access-Token': config.adminToken,
+    'Content-Type': 'application/json',
+  };
+  const sinceIso = new Date(Date.now() - hoursBack * 60 * 60 * 1000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, 'Z');
+  let cursor = null;
+  let hasNext = true;
+  let pages = 0;
+  let scanned = 0;
+  let tagged = 0;
+  const errors = [];
+  while (hasNext && pages < maxPages) {
+    pages++;
+    const r = await axios.post(
+      config.adminApiUrl,
+      {
+        query:
+          'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q){ nodes{ id name tags app{ name } } pageInfo{ hasNextPage endCursor } } }',
+        variables: { q: `created_at:>='${sinceIso}'`, after: cursor },
+      },
+      { headers },
+    );
+    const conn = r.data?.data?.orders;
+    if (!conn) break;
+    for (const o of conn.nodes || []) {
+      scanned++;
+      const isMobile = (o.app?.name || '').toLowerCase().includes('mobile');
+      const tags = o.tags || [];
+      if (
+        !isMobile ||
+        tags.includes('mobile_app_channel') ||
+        tags.includes('mobile_app')
+      ) {
+        continue;
+      }
+      const t = await axios.post(
+        config.adminApiUrl,
+        {
+          query:
+            'mutation($id: ID!, $tags: [String!]!){ tagsAdd(id: $id, tags: $tags){ userErrors{ message } } }',
+          variables: { id: o.id, tags: ['mobile_app_channel'] },
+        },
+        { headers },
+      );
+      const errs = t.data?.data?.tagsAdd?.userErrors || [];
+      if (errs.length) errors.push({ order: o.name, message: errs[0].message });
+      else tagged++;
+    }
+    hasNext = Boolean(conn.pageInfo?.hasNextPage);
+    cursor = conn.pageInfo?.endCursor || null;
+  }
+  return { scanned, tagged, pages, exhausted: hasNext, errors };
+}
+
+setInterval(() => {
+  tagMobileChannelOrders(24, 12)
+    .then((r) => {
+      if (r.tagged) console.log(`🏷️ [channel-tagger] tagged ${r.tagged} orders`);
+    })
+    .catch((e) => console.error('❌ [channel-tagger]', e?.message));
+}, 10 * 60 * 1000);
+setTimeout(() => {
+  tagMobileChannelOrders(24, 12).catch((e) =>
+    console.error('❌ [channel-tagger:boot]', e?.message),
+  );
+}, 15 * 1000);
+
+// Backfill channel tags for history (key-gated like analytics). days up to
+// 730; long scans walk every store order in the window, so this can take
+// minutes - call once, response reports what happened.
+app.post('/api/mobile/analytics/backfill-channel-tags', async (req, res) => {
+  try {
+    const requiredKey = process.env.ANALYTICS_KEY;
+    if (requiredKey) {
+      const provided = req.get('x-analytics-key') || req.query.key;
+      if (provided !== requiredKey) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized.' });
+      }
+    }
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 365, 1), 730);
+    const result = await tagMobileChannelOrders(days * 24, 600);
+    return res.json({ ok: true, days, ...result });
+  } catch (error) {
+    const detail =
+      error?.response?.data?.errors?.[0]?.message || error?.message || 'server error';
+    console.error('❌ [backfill-channel-tags] error:', detail);
     return res.status(500).json({ ok: false, error: detail });
   }
 });
