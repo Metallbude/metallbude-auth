@@ -4048,7 +4048,7 @@ app.get('/api/mobile/analytics', async (req, res) => {
         config.adminApiUrl,
         {
           query:
-            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ name createdAt sourceName tags displayFinancialStatus cancelledAt currentTotalPriceSet{ shopMoney{ amount currencyCode } } } pageInfo{ hasNextPage endCursor } } }',
+            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ name createdAt sourceName tags displayFinancialStatus cancelledAt app{ name } currentTotalPriceSet{ shopMoney{ amount currencyCode } } } pageInfo{ hasNextPage endCursor } } }',
           variables: {
             q: `created_at:>=${sinceIso}`,
             after: cursor,
@@ -4065,17 +4065,15 @@ app.get('/api/mobile/analytics', async (req, res) => {
 
     // Classify each order.
     const sourceCounts = {};
+    const appNameCounts = {};
     const isAppTagged = (o) =>
       Array.isArray(o.tags) && o.tags.includes('mobile_app');
+    // Normal-price app orders come through the mobile sales channel, whose
+    // app name contains "mobile" (e.g. "Metallbude Mobile Auth"). Draft
+    // orders (app-price) have no app.name, so they're caught by the tag.
     const isMobileChannel = (o) => {
-      const s = (o.sourceName || '').toLowerCase();
-      // Draft orders report numeric/app sourceName; the Mobile Auth channel
-      // and the app's own source strings both contain these markers.
-      return (
-        s.includes('mobile') ||
-        s.includes('app') ||
-        s.includes('metallbude')
-      );
+      const appName = (o.app?.name || '').toLowerCase();
+      return appName.includes('mobile');
     };
 
     const sum = { appPrice: { orders: 0, revenue: 0 }, appNormal: { orders: 0, revenue: 0 } };
@@ -4085,6 +4083,8 @@ app.get('/api/mobile/analytics', async (req, res) => {
       if (o.cancelledAt) continue;
       const src = o.sourceName || '(none)';
       sourceCounts[src] = (sourceCounts[src] || 0) + 1;
+      const appName = o.app?.name || '(none)';
+      appNameCounts[appName] = (appNameCounts[appName] || 0) + 1;
       const amount = Number(o.currentTotalPriceSet?.shopMoney?.amount) || 0;
       currency = o.currentTotalPriceSet?.shopMoney?.currencyCode || currency;
 
@@ -4128,8 +4128,9 @@ app.get('/api/mobile/analytics', async (req, res) => {
         revenue: Number(sum.appNormal.revenue.toFixed(2)),
       },
       recent,
-      // Calibration: how orders in the window are attributed by sourceName.
+      // Calibration: how orders in the window are attributed.
       sourceBreakdown: sourceCounts,
+      appNameBreakdown: appNameCounts,
       scannedOrders: orders.length,
     });
   } catch (error) {
