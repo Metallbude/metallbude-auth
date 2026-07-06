@@ -4046,10 +4046,14 @@ app.get('/api/mobile/analytics', async (req, res) => {
     };
     const fromDate = parseDate(req.query.from);
     const toDate = parseDate(req.query.to);
-    const sinceIso = fromDate
-      ? fromDate.toISOString()
-      : new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    const untilIso = fromDate && toDate ? toDate.toISOString() : null;
+    // Shopify's search syntax only parses whole-second timestamps -
+    // milliseconds make it fall back to date-only matching, silently
+    // widening the window to full calendar days.
+    const searchIso = (d) => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const sinceIso = searchIso(
+      fromDate || new Date(Date.now() - days * 24 * 60 * 60 * 1000),
+    );
+    const untilIso = fromDate && toDate ? searchIso(toDate) : null;
     const orderQuery = untilIso
       ? `created_at:>=${sinceIso} created_at:<=${untilIso}`
       : `created_at:>=${sinceIso}`;
