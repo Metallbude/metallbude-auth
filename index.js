@@ -3958,7 +3958,19 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       return res.json({ ok: true, useNormalCart: true, lines: debug });
     }
 
-    const input = { lineItems };
+    const input = {
+      lineItems,
+      // Attribution: a draft order is stamped with the app that created it
+      // (the Backend App), not the Mobile Auth sales channel, so these tags
+      // + attributes are how the app orders are identified and reported.
+      tags: ['mobile_app', 'app_only_sale'],
+      note: 'Metallbude Mobile App - app-exclusive price checkout',
+      customAttributes: [
+        { key: 'source', value: 'Metallbude Mobile App' },
+        { key: 'channel', value: 'mobile_app' },
+        { key: 'app_only_price', value: 'true' },
+      ],
+    };
     if (typeof req.body?.email === 'string' && req.body.email.includes('@'))
       input.email = req.body.email;
 
