@@ -4202,7 +4202,9 @@ app.get('/api/mobile/analytics', async (req, res) => {
       bucket.orders += 1;
       bucket.revenue += amount;
       bucket.grossSales += gross;
-      if (recent.length < 20) {
+      // All app orders in the window (newest first via sortKey) - the
+      // panel paginates client-side. Hard cap only as a payload backstop.
+      if (recent.length < 1000) {
         recent.push({
           name: o.name,
           total: amount,
