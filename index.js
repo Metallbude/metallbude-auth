@@ -4079,11 +4079,14 @@ app.get('/api/mobile/analytics', async (req, res) => {
       [])[1] || 'metallbude-de';
 
     // Pull orders created in the window (paginated, capped for safety).
+    // A soft deadline keeps the response under the embedded app's proxy
+    // timeout - partial results are flagged via `truncated`.
+    const startedAt = Date.now();
     const orders = [];
     let cursor = null;
     let hasNext = true;
     let pages = 0;
-    while (hasNext && pages < 60) {
+    while (hasNext && pages < 60 && Date.now() - startedAt < 35000) {
       pages++;
       const r = await axios.post(
         config.adminApiUrl,
@@ -4095,7 +4098,7 @@ app.get('/api/mobile/analytics', async (req, res) => {
             after: cursor,
           },
         },
-        { headers },
+        { headers, timeout: 15000 },
       );
       const conn = r.data?.data?.orders;
       if (!conn) break;
