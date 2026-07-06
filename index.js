@@ -4077,7 +4077,7 @@ app.get('/api/mobile/analytics', async (req, res) => {
         config.adminApiUrl,
         {
           query:
-            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ id legacyResourceId name createdAt sourceName tags displayFinancialStatus cancelledAt taxesIncluded app{ name } customAttributes{ key value } currentTotalPriceSet{ shopMoney{ amount currencyCode } } currentSubtotalPriceSet{ shopMoney{ amount } } currentTotalDiscountsSet{ shopMoney{ amount } } subtotalPriceSet{ shopMoney{ amount } } totalDiscountsSet{ shopMoney{ amount } } totalShippingPriceSet{ shopMoney{ amount } } currentTotalTaxSet{ shopMoney{ amount } } totalRefundedSet{ shopMoney{ amount } } } pageInfo{ hasNextPage endCursor } } }',
+            'query($q: String!, $after: String){ orders(first: 100, after: $after, query: $q, sortKey: CREATED_AT, reverse: true){ nodes{ id legacyResourceId name createdAt sourceName tags displayFinancialStatus cancelledAt taxesIncluded app{ name } customAttributes{ key value } currentTotalPriceSet{ shopMoney{ amount currencyCode } } currentSubtotalPriceSet{ shopMoney{ amount } } currentTotalDiscountsSet{ shopMoney{ amount } } subtotalPriceSet{ shopMoney{ amount } } totalDiscountsSet{ shopMoney{ amount } } totalShippingPriceSet{ shopMoney{ amount } } totalPriceSet{ shopMoney{ amount } } totalTaxSet{ shopMoney{ amount } } currentTotalTaxSet{ shopMoney{ amount } } totalRefundedSet{ shopMoney{ amount } } } pageInfo{ hasNextPage endCursor } } }',
           variables: {
             q: orderQuery,
             after: cursor,
@@ -4156,18 +4156,22 @@ app.get('/api/mobile/analytics', async (req, res) => {
       const appNormal = !appPrice && isMobileChannel(o);
       if (!appPrice && !appNormal) continue;
 
-      const subtotal = money(o.currentSubtotalPriceSet);
-      const discounts = money(o.currentTotalDiscountsSet);
-      const taxes = money(o.currentTotalTaxSet);
+      // Original (order-time) money fields, NOT current*: Shopify Analytics
+      // records sales as placed and books refunds as separate return rows,
+      // so gross must stay pre-refund/pre-edit to match the reports.
+      const subtotal = money(o.subtotalPriceSet);
+      const discounts = money(o.totalDiscountsSet);
+      const taxes = money(o.totalTaxSet);
       const shipping = money(o.totalShippingPriceSet);
+      const originalTotal = money(o.totalPriceSet);
       const grossInclVat = subtotal + discounts;
       // Shopify Analytics reports sales amounts EXCLUDING VAT. German
       // prices are tax-inclusive, so strip each order's actual blended
       // VAT rate (19% DE, 20% AT, ... - shipping and merchandise share
-      // the order's rate in the EU): factor = (charged - tax) / charged.
+      // the order's rate in the EU): factor = (total - tax) / total.
       const vatFactor =
-        o.taxesIncluded && amount > taxes && taxes > 0
-          ? (amount - taxes) / amount
+        o.taxesIncluded && originalTotal > taxes && taxes > 0
+          ? (originalTotal - taxes) / originalTotal
           : 1;
       const gross = grossInclVat * vatFactor;
       sales.grossSales += gross;
@@ -4175,16 +4179,19 @@ app.get('/api/mobile/analytics', async (req, res) => {
       sales.netSales += subtotal * vatFactor;
       sales.shipping += shipping * vatFactor;
       sales.taxes += taxes;
+      // Informational: VAT-inclusive amount refunded to customers (incl.
+      // shipping refunds). NOT on the same ex-VAT basis as gross/net -
+      // don't subtract it from them.
       sales.returns += money(o.totalRefundedSet);
       sales.totalCharged += amount;
 
-      debugTotals.grossCurrent += grossInclVat;
-      debugTotals.grossOriginal +=
-        money(o.subtotalPriceSet) + money(o.totalDiscountsSet);
-      debugTotals.subtotalCurrent += subtotal;
-      debugTotals.subtotalOriginal += money(o.subtotalPriceSet);
-      debugTotals.discountsCurrent += discounts;
-      debugTotals.discountsOriginal += money(o.totalDiscountsSet);
+      debugTotals.grossCurrent +=
+        money(o.currentSubtotalPriceSet) + money(o.currentTotalDiscountsSet);
+      debugTotals.grossOriginal += grossInclVat;
+      debugTotals.subtotalCurrent += money(o.currentSubtotalPriceSet);
+      debugTotals.subtotalOriginal += subtotal;
+      debugTotals.discountsCurrent += money(o.currentTotalDiscountsSet);
+      debugTotals.discountsOriginal += discounts;
       debugTotals.taxes += taxes;
       debugTotals.shipping += shipping;
       debugTotals.refunds += money(o.totalRefundedSet);
