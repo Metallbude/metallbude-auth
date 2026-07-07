@@ -4296,6 +4296,78 @@ app.get('/api/mobile/analytics', async (req, res) => {
   }
 });
 
+// Push subscriber lookup for Campaign Studio: CleverPush's dashboard can't
+// show email/name columns in its subscription list, but our own
+// push_subscriptions store (written by /cleverpush/store-subscription on
+// every app sync) maps email -> devices. Key-gated like analytics.
+app.get('/api/mobile/push-subscribers', async (req, res) => {
+  try {
+    const requiredKey = process.env.ANALYTICS_KEY;
+    if (requiredKey) {
+      const provided = req.get('x-analytics-key') || req.query.key;
+      if (provided !== requiredKey) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized.' });
+      }
+    }
+
+    const q = (req.query.q || '').toString().trim().toLowerCase();
+    const subscribers = [];
+
+    if (firebaseEnabled && wishlistService) {
+      const db = wishlistService.db;
+      const col = db.collection('push_subscriptions');
+      let snapshot;
+      if (q) {
+        // Doc IDs are lowercased emails - prefix search on the ID.
+        const FieldPath = require('firebase-admin').firestore.FieldPath;
+        snapshot = await col
+          .orderBy(FieldPath.documentId())
+          .startAt(q)
+          .endAt(q + '')
+          .limit(50)
+          .get();
+      } else {
+        snapshot = await col.orderBy('updatedAt', 'desc').limit(50).get();
+      }
+      snapshot.forEach((doc) => {
+        const data = doc.data() || {};
+        subscribers.push({
+          email: doc.id,
+          updatedAt: data.updatedAt || null,
+          devices: (data.devices || []).map((d) => ({
+            subscriptionId: d.subscriptionId,
+            platform: d.platform || 'unknown',
+            appVersion: d.appVersion || 'unknown',
+            lastSeenAt: d.lastSeenAt || d.updatedAt || null,
+          })),
+        });
+      });
+    } else if (global._pushSubscriptions) {
+      // Memory fallback mirrors the store endpoint's fallback.
+      for (const [email, data] of Object.entries(global._pushSubscriptions)) {
+        if (q && !email.startsWith(q)) continue;
+        subscribers.push({
+          email,
+          updatedAt: data.updatedAt || null,
+          devices: (data.devices || []).map((d) => ({
+            subscriptionId: d.subscriptionId,
+            platform: d.platform || 'unknown',
+            appVersion: d.appVersion || 'unknown',
+            lastSeenAt: d.lastSeenAt || d.updatedAt || null,
+          })),
+        });
+        if (subscribers.length >= 50) break;
+      }
+    }
+
+    return res.json({ ok: true, query: q, subscribers });
+  } catch (error) {
+    const detail = error?.message || 'server error';
+    console.error('❌ [push-subscribers] error:', detail);
+    return res.status(500).json({ ok: false, error: detail });
+  }
+});
+
 // Mobile-channel order tagger. Orders placed through the app's normal
 // checkout arrive via the "Metallbude Mobile Auth" sales channel but carry
 // no tag, and Shopify's order search cannot filter by channel - so analytics
