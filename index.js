@@ -4189,6 +4189,19 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       if (n?.id && n?.product?.handle) handleByVariant.set(n.id, n.product.handle);
     }
 
+    // A line whose online price can't be resolved makes display-consistent
+    // draft pricing impossible (its line discount and the code subtotal
+    // would silently be wrong, charging more than the cart showed). Let
+    // the normal cart handle such carts.
+    if (lines.some((l) => !onlinePrices.has(l.variantId))) {
+      return res.json({
+        ok: true,
+        useNormalCart: true,
+        reason: 'price_unavailable',
+        lines: [],
+      });
+    }
+
     // Sectionheroes set discounts: group claimed lines by bundle+offer,
     // verify each claim against the storefront's bundle config, then
     // allocate the tier percent cent-exactly. IMPORTANT: draft line
@@ -4210,26 +4223,45 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       g.quantity += line.quantity;
     });
     for (const g of claimedGroups.values()) {
-      const handle = handleByVariant.get(lines[g.lineIdxs[0]].variantId);
+      // Verify the claim against EVERY line's own product page — a bundle
+      // can span two products (e.g. Damio/Nelio) whose pages both render
+      // the shared config, but a product whose page doesn't know this
+      // bundle must not ride along in the group (otherwise any line could
+      // grab the discount). getBundleTiersForHandle caches per handle.
       let tier = null;
-      try {
-        const tiers = handle
-          ? await bundleOffersRoutes.getBundleTiersForHandle(handle)
-          : [];
-        tier =
-          tiers.find(
-            (t) => t.bundleId === g.claim.id && t.offerIndex === g.claim.o,
-          ) || null;
-      } catch (_) {
-        tier = null;
+      let allLinesValid = true;
+      for (const idx of g.lineIdxs) {
+        const handle = handleByVariant.get(lines[idx].variantId);
+        let lineTier = null;
+        try {
+          const tiers = handle
+            ? await bundleOffersRoutes.getBundleTiersForHandle(handle)
+            : [];
+          lineTier =
+            tiers.find(
+              (t) => t.bundleId === g.claim.id && t.offerIndex === g.claim.o,
+            ) || null;
+        } catch (_) {
+          lineTier = null;
+        }
+        if (
+          !lineTier ||
+          (tier &&
+            (lineTier.quantity !== tier.quantity ||
+              lineTier.discountPercent !== tier.discountPercent))
+        ) {
+          allLinesValid = false;
+          break;
+        }
+        tier = lineTier;
       }
-      if (!tier || g.quantity < tier.quantity) {
+      if (!allLinesValid || !tier || g.quantity < tier.quantity) {
         // Unknown bundle/offer or not enough units for the tier: the cart
         // displayed a set price we can't verify. Never charge silently
         // more — fall back to the normal cart, where line attributes
         // travel along and the Sectionheroes Function decides.
         console.warn(
-          `⚠️ [app-checkout] unverified bundle claim ${g.claim.raw} (handle=${handle}, qty=${g.quantity})`,
+          `⚠️ [app-checkout] unverified bundle claim ${g.claim.raw} (qty=${g.quantity})`,
         );
         return res.json({
           ok: true,
