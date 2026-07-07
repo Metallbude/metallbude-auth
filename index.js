@@ -3934,6 +3934,175 @@ app.get('/config/storefront-token', (req, res) => {
 const APP_PRICE_LIST_ID =
   process.env.APP_PRICE_LIST_ID || 'gid://shopify/PriceList/31236686092';
 
+// ---- Discount-code stacking on app-price checkouts ----
+// Shopify draft orders cannot carry discount CODES, so the server validates
+// the code itself (Admin API) and applies its value as an order-level
+// discount on top of the app prices. v1 supports DiscountCodeBasic codes
+// for all customers / all items (percentage or fixed, min subtotal/qty,
+// once-per-customer via order search). Everything else reports
+// supported:false and the app falls back to the normal cart.
+async function validateDiscountCodeForStacking(code, headers) {
+  const r = await axios.post(
+    config.adminApiUrl,
+    {
+      query: `query($code: String!) {
+        codeDiscountNodeByCode(code: $code) {
+          codeDiscount {
+            __typename
+            ... on DiscountCodeBasic {
+              title
+              status
+              startsAt
+              endsAt
+              usageLimit
+              asyncUsageCount
+              appliesOncePerCustomer
+              minimumRequirement {
+                __typename
+                ... on DiscountMinimumSubtotal { greaterThanOrEqualToSubtotal { amount } }
+                ... on DiscountMinimumQuantity { greaterThanOrEqualToQuantity }
+              }
+              customerGets {
+                value {
+                  __typename
+                  ... on DiscountPercentage { percentage }
+                  ... on DiscountAmount { amount { amount } appliesOnEachItem }
+                }
+                items { __typename ... on AllDiscountItems { allItems } }
+              }
+              customerSelection { __typename ... on DiscountCustomerAll { allCustomers } }
+            }
+          }
+        }
+      }`,
+      variables: { code },
+    },
+    { headers, timeout: 15000 },
+  );
+
+  const node = r.data?.data?.codeDiscountNodeByCode?.codeDiscount;
+  if (!node) return { supported: false, reason: 'not_found' };
+  if (node.__typename !== 'DiscountCodeBasic') {
+    return { supported: false, reason: 'unsupported_type' };
+  }
+  if (node.status !== 'ACTIVE') return { supported: false, reason: 'inactive' };
+  const now = Date.now();
+  if (node.startsAt && Date.parse(node.startsAt) > now) {
+    return { supported: false, reason: 'not_started' };
+  }
+  if (node.endsAt && Date.parse(node.endsAt) < now) {
+    return { supported: false, reason: 'expired' };
+  }
+  if (node.usageLimit != null && node.asyncUsageCount >= node.usageLimit) {
+    return { supported: false, reason: 'usage_limit_reached' };
+  }
+  const sel = node.customerSelection;
+  if (!sel || sel.__typename !== 'DiscountCustomerAll' || sel.allCustomers !== true) {
+    return { supported: false, reason: 'customer_restricted' };
+  }
+  const items = node.customerGets?.items;
+  if (!items || items.__typename !== 'AllDiscountItems' || items.allItems !== true) {
+    return { supported: false, reason: 'item_scoped' };
+  }
+
+  const value = node.customerGets?.value;
+  let type = null;
+  let amount = null;
+  if (value?.__typename === 'DiscountPercentage') {
+    type = 'percentage';
+    // Shopify returns a decimal fraction (0.2 = 20%). Normalize to 0-100.
+    amount = Number(value.percentage) * 100;
+  } else if (value?.__typename === 'DiscountAmount') {
+    if (value.appliesOnEachItem) {
+      return { supported: false, reason: 'per_item_amount' };
+    }
+    type = 'fixed';
+    amount = Number(value.amount?.amount);
+  } else {
+    return { supported: false, reason: 'unknown_value' };
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { supported: false, reason: 'invalid_value' };
+  }
+
+  let minSubtotal = 0;
+  let minQuantity = 0;
+  const minReq = node.minimumRequirement;
+  if (minReq?.__typename === 'DiscountMinimumSubtotal') {
+    minSubtotal = Number(minReq.greaterThanOrEqualToSubtotal?.amount) || 0;
+  } else if (minReq?.__typename === 'DiscountMinimumQuantity') {
+    minQuantity = Number(minReq.greaterThanOrEqualToQuantity) || 0;
+  }
+
+  return {
+    supported: true,
+    type,
+    amount: Number(amount.toFixed(2)),
+    minSubtotal,
+    minQuantity,
+    appliesOncePerCustomer: Boolean(node.appliesOncePerCustomer),
+    title: node.title || code,
+  };
+}
+
+// Has this customer already redeemed the code? Covers WEB redemptions
+// (Shopify's discount_code search) and APP redemptions (our code- tag on
+// draft-created orders, which Shopify does not count as code usage).
+async function customerAlreadyUsedCode(email, code, headers) {
+  try {
+    const q = `email:'${email.replace(/'/g, '')}' (discount_code:'${code}' OR tag:'code-${code}')`;
+    const r = await axios.post(
+      config.adminApiUrl,
+      {
+        query:
+          'query($q: String!){ orders(first: 1, query: $q){ nodes{ id } } }',
+        variables: { q },
+      },
+      { headers, timeout: 15000 },
+    );
+    return (r.data?.data?.orders?.nodes || []).length > 0;
+  } catch (_) {
+    return false; // fail open - Shopify still enforces web usage itself
+  }
+}
+
+// Pre-check for the app: is this code stackable onto app prices?
+app.get('/api/mobile/validate-code', async (req, res) => {
+  try {
+    const code = (req.query.code || '').toString().trim();
+    if (!code || code.length > 64) {
+      return res.status(400).json({ ok: false, error: 'Invalid code.' });
+    }
+    const headers = {
+      'X-Shopify-Access-Token': config.adminToken,
+      'Content-Type': 'application/json',
+    };
+    const result = await validateDiscountCodeForStacking(code, headers);
+
+    if (result.supported) {
+      const subtotal = Number(req.query.subtotal);
+      const quantity = Number(req.query.quantity);
+      if (result.minSubtotal > 0 && Number.isFinite(subtotal) && subtotal < result.minSubtotal) {
+        return res.json({ ok: true, supported: false, reason: 'minimum_not_met', minSubtotal: result.minSubtotal });
+      }
+      if (result.minQuantity > 0 && Number.isFinite(quantity) && quantity < result.minQuantity) {
+        return res.json({ ok: true, supported: false, reason: 'minimum_quantity_not_met', minQuantity: result.minQuantity });
+      }
+      const email = (req.query.email || '').toString().trim();
+      if (result.appliesOncePerCustomer && email.includes('@')) {
+        if (await customerAlreadyUsedCode(email, code, headers)) {
+          return res.json({ ok: true, supported: false, reason: 'already_used' });
+        }
+      }
+    }
+
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('❌ [validate-code] error:', error?.message);
+    return res.status(500).json({ ok: false, error: 'validation failed' });
+  }
+});
+
 app.post('/api/mobile/app-checkout', async (req, res) => {
   try {
     const rawLines = Array.isArray(req.body?.lines) ? req.body.lines : [];
@@ -4035,21 +4204,105 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       return res.json({ ok: true, useNormalCart: true, lines: debug });
     }
 
+    // Discount-code stacking: validate each requested code and convert the
+    // combined value into ONE order-level fixed discount on the draft
+    // (drafts allow a single order-level discount). Percentage codes apply
+    // to the app-price subtotal - the price the customer actually sees.
+    const email =
+      typeof req.body?.email === 'string' && req.body.email.includes('@')
+        ? req.body.email.trim()
+        : null;
+    const requestedCodes = (Array.isArray(req.body?.discountCodes)
+      ? req.body.discountCodes
+      : []
+    )
+      .map((c) => (typeof c === 'string' ? c.trim() : ''))
+      .filter((c) => c.length > 0 && c.length <= 64)
+      .slice(0, 3);
+
+    const appSubtotal = debug.reduce((sum, l) => {
+      const unit =
+        l.appPrice != null && l.onlinePrice != null && l.appPrice < l.onlinePrice
+          ? l.appPrice
+          : l.onlinePrice != null
+            ? l.onlinePrice
+            : 0;
+      return sum + unit * l.quantity;
+    }, 0);
+    const totalQuantity = lines.reduce((sum, l) => sum + l.quantity, 0);
+
+    const appliedCodes = [];
+    let codeDiscountTotal = 0;
+    for (const code of requestedCodes) {
+      const v = await validateDiscountCodeForStacking(code, headers);
+      if (!v.supported) {
+        // The app pre-validates, so this is a race (code deactivated,
+        // usage limit hit). Fall back to the normal cart - never charge
+        // a price the customer didn't see.
+        return res.json({
+          ok: true,
+          useNormalCart: true,
+          unsupportedCode: code,
+          reason: v.reason,
+          lines: debug,
+        });
+      }
+      const remaining = Math.max(0, appSubtotal - codeDiscountTotal);
+      if (v.minSubtotal > 0 && appSubtotal < v.minSubtotal) {
+        return res.json({ ok: true, useNormalCart: true, unsupportedCode: code, reason: 'minimum_not_met', lines: debug });
+      }
+      if (v.minQuantity > 0 && totalQuantity < v.minQuantity) {
+        return res.json({ ok: true, useNormalCart: true, unsupportedCode: code, reason: 'minimum_quantity_not_met', lines: debug });
+      }
+      if (v.appliesOncePerCustomer && email) {
+        if (await customerAlreadyUsedCode(email, code, headers)) {
+          return res.json({ ok: true, useNormalCart: true, unsupportedCode: code, reason: 'already_used', lines: debug });
+        }
+      }
+      const amount =
+        v.type === 'percentage'
+          ? Number(((remaining * v.amount) / 100).toFixed(2))
+          : Number(Math.min(v.amount, remaining).toFixed(2));
+      if (amount > 0) {
+        appliedCodes.push({ code, type: v.type, value: v.amount, amount });
+        codeDiscountTotal = Number((codeDiscountTotal + amount).toFixed(2));
+      }
+    }
+
     const input = {
       lineItems,
       // Attribution: a draft order is stamped with the app that created it
       // (the Backend App), not the Mobile Auth sales channel, so these tags
       // + attributes are how the app orders are identified and reported.
-      tags: ['mobile_app', 'app_only_sale'],
+      tags: [
+        'mobile_app',
+        'app_only_sale',
+        ...appliedCodes.map((c) => `code-${c.code}`),
+      ],
       note: 'Metallbude Mobile App - app-exclusive price checkout',
       customAttributes: [
         { key: 'source', value: 'Metallbude Mobile App' },
         { key: 'channel', value: 'mobile_app' },
         { key: 'app_only_price', value: 'true' },
+        ...(appliedCodes.length > 0
+          ? [
+              {
+                key: 'discount_codes',
+                value: appliedCodes.map((c) => c.code).join(','),
+              },
+            ]
+          : []),
       ],
     };
-    if (typeof req.body?.email === 'string' && req.body.email.includes('@'))
-      input.email = req.body.email;
+    if (codeDiscountTotal > 0) {
+      input.appliedDiscount = {
+        valueType: 'FIXED_AMOUNT',
+        value: codeDiscountTotal,
+        title: appliedCodes.map((c) => c.code).join(', '),
+        description: 'Gutscheincode (Metallbude App)',
+      };
+    }
+    if (email) input.email = email;
 
     const dr = await axios.post(
       adminUrl,
@@ -4083,6 +4336,8 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       checkoutUrl: draftOrder.invoiceUrl,
       draftOrderId: draftOrder.id,
       totalPrice: draftOrder.totalPrice,
+      appliedCodes,
+      codeDiscountTotal,
       lines: debug,
     });
   } catch (error) {
