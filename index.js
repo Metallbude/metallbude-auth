@@ -19406,6 +19406,17 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
     if (!firebaseEnabled || !wishlistService) {
       // Fallback: store in memory if Firebase isn't available
       if (!global._pushSubscriptions) global._pushSubscriptions = {};
+      // Device ownership handover (see Firestore path below).
+      for (const [otherEmail, data] of Object.entries(global._pushSubscriptions)) {
+        if (otherEmail === email.toLowerCase()) continue;
+        const before = (data.devices || []).length;
+        data.devices = (data.devices || []).filter(
+          (d) => d.subscriptionId !== subscriptionId
+        );
+        if (before !== data.devices.length) {
+          console.log(`📱 Device handover (memory): removed from ${otherEmail}`);
+        }
+      }
       const existing = global._pushSubscriptions[email.toLowerCase()];
       const devices = existing?.devices || [];
       // Remove any prior entry the client tells us is stale, plus any duplicate of the new ID
@@ -19460,6 +19471,33 @@ app.post('/cleverpush/store-subscription', async (req, res) => {
 
     // Keep max 5 devices per email
     const finalDevices = filteredDevices.slice(-5);
+
+    // Device ownership handover: one phone = one subscriptionId. If another
+    // email still claims this subscriptionId (account switch on the same
+    // phone), remove it there - otherwise a push targeted at the OLD
+    // account would reach the phone's NEW owner.
+    try {
+      const ownerRef = db.collection('push_device_owner').doc(subscriptionId);
+      const ownerDoc = await ownerRef.get();
+      const previousOwner = ownerDoc.exists ? ownerDoc.data().email : null;
+      if (previousOwner && previousOwner !== email.toLowerCase()) {
+        const prevRef = db.collection('push_subscriptions').doc(previousOwner);
+        const prevDoc = await prevRef.get();
+        if (prevDoc.exists) {
+          const prevDevices = (prevDoc.data().devices || []).filter(
+            (d) => d.subscriptionId !== subscriptionId
+          );
+          await prevRef.set(
+            { devices: prevDevices, updatedAt: nowIso },
+            { merge: true }
+          );
+          console.log(`📱 Device handover: ${subscriptionId.substring(0, 8)}… moved ${previousOwner} -> ${email.toLowerCase()}`);
+        }
+      }
+      await ownerRef.set({ email: email.toLowerCase(), updatedAt: nowIso });
+    } catch (handoverError) {
+      console.error('❌ Device-owner handover failed:', handoverError.message);
+    }
 
     await docRef.set({
       email: email.toLowerCase(),
