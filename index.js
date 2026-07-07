@@ -4104,6 +4104,12 @@ app.get('/api/mobile/validate-code', async (req, res) => {
   }
 });
 
+// App price list cache: the PriceList pagination is by far the slowest part
+// of draft creation and the prices change rarely (campaign edits). 60s of
+// staleness is invisible to customers but cuts checkout latency sharply.
+let _appPricesCache = { at: 0, map: null };
+const APP_PRICES_TTL_MS = 60 * 1000;
+
 app.post('/api/mobile/app-checkout', async (req, res) => {
   try {
     const rawLines = Array.isArray(req.body?.lines) ? req.body.lines : [];
@@ -4145,28 +4151,37 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
     };
 
     // App (AppCatalog) fixed prices — the authoritative app price per variant.
-    const appPrices = new Map();
-    let cursor = null;
-    let hasNext = true;
-    while (hasNext) {
-      const r = await axios.post(
-        adminUrl,
-        {
-          query:
-            'query($id: ID!, $after: String){ priceList(id:$id){ prices(first:250, after:$after, originType: FIXED){ nodes{ variant{id} price{amount} } pageInfo{ hasNextPage endCursor } } } }',
-          variables: { id: APP_PRICE_LIST_ID, after: cursor },
-        },
-        { headers },
-      );
-      const pl = r.data?.data?.priceList?.prices;
-      if (!pl) break;
-      for (const n of pl.nodes || []) {
-        const id = n?.variant?.id;
-        const amt = Number(n?.price?.amount);
-        if (id && Number.isFinite(amt)) appPrices.set(id, amt);
+    let appPrices;
+    if (
+      _appPricesCache.map &&
+      Date.now() - _appPricesCache.at < APP_PRICES_TTL_MS
+    ) {
+      appPrices = _appPricesCache.map;
+    } else {
+      appPrices = new Map();
+      let cursor = null;
+      let hasNext = true;
+      while (hasNext) {
+        const r = await axios.post(
+          adminUrl,
+          {
+            query:
+              'query($id: ID!, $after: String){ priceList(id:$id){ prices(first:250, after:$after, originType: FIXED){ nodes{ variant{id} price{amount} } pageInfo{ hasNextPage endCursor } } } }',
+            variables: { id: APP_PRICE_LIST_ID, after: cursor },
+          },
+          { headers },
+        );
+        const pl = r.data?.data?.priceList?.prices;
+        if (!pl) break;
+        for (const n of pl.nodes || []) {
+          const id = n?.variant?.id;
+          const amt = Number(n?.price?.amount);
+          if (id && Number.isFinite(amt)) appPrices.set(id, amt);
+        }
+        hasNext = Boolean(pl.pageInfo?.hasNextPage);
+        cursor = pl.pageInfo?.endCursor || null;
       }
-      hasNext = Boolean(pl.pageInfo?.hasNextPage);
-      cursor = pl.pageInfo?.endCursor || null;
+      _appPricesCache = { at: Date.now(), map: appPrices };
     }
 
     // Current online-store prices (the draft's base price per line) plus
