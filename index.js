@@ -4220,6 +4220,20 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       .filter((c) => c.length > 0 && c.length <= 64)
       .slice(0, 3);
 
+    // Kill switch: set DISABLE_CODE_STACKING=1 on Render to instantly turn
+    // code stacking off - requests with codes then fall back to the normal
+    // cart (the pre-stacking behavior). The no-code sale path is untouched
+    // either way.
+    if (requestedCodes.length > 0 && process.env.DISABLE_CODE_STACKING === '1') {
+      return res.json({
+        ok: true,
+        useNormalCart: true,
+        unsupportedCode: requestedCodes[0],
+        reason: 'stacking_disabled',
+        lines: debug,
+      });
+    }
+
     const appSubtotal = debug.reduce((sum, l) => {
       const unit =
         l.appPrice != null && l.onlinePrice != null && l.appPrice < l.onlinePrice
