@@ -698,6 +698,83 @@ async function persistSessions() {
   }
 }
 
+// ---- Durable session persistence (Firestore) ----
+// Render's disk is EPHEMERAL: every deploy wipes the local session/refresh
+// files, which used to silently log out EVERY app user (reads kept working
+// from caches; all writes started failing with "Session expired"). The
+// in-memory Maps stay the hot path; Firestore is the durable copy and
+// tokens hydrate lazily on their first use after a boot.
+const sessionDocId = (token) =>
+  crypto.createHash('sha256').update(token).digest('hex');
+
+function _durableCollection(name) {
+  if (!firebaseEnabled || !wishlistService) return null;
+  try {
+    return wishlistService.db.collection(name);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Firestore rejects `undefined` values - JSON round-trip strips them.
+const _sanitizeForFirestore = (obj) => JSON.parse(JSON.stringify(obj));
+
+async function saveSessionDoc(token, session) {
+  try {
+    const col = _durableCollection('app_sessions');
+    if (!col) return;
+    await col.doc(sessionDocId(token)).set(_sanitizeForFirestore(session));
+  } catch (e) {
+    console.error('❌ [SESSIONS] Firestore save failed:', e.message);
+  }
+}
+
+async function loadSessionDoc(token) {
+  try {
+    const col = _durableCollection('app_sessions');
+    if (!col) return null;
+    const doc = await col.doc(sessionDocId(token)).get();
+    return doc.exists ? doc.data() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function deleteSessionDoc(token) {
+  try {
+    const col = _durableCollection('app_sessions');
+    if (col) await col.doc(sessionDocId(token)).delete();
+  } catch (_) {}
+}
+
+async function saveRefreshTokenDoc(token, data) {
+  try {
+    const col = _durableCollection('app_refresh_tokens');
+    if (!col) return;
+    await col.doc(sessionDocId(token)).set(_sanitizeForFirestore(data));
+  } catch (e) {
+    console.error('❌ [SESSIONS] Firestore refresh save failed:', e.message);
+  }
+}
+
+async function loadRefreshTokenDoc(token) {
+  try {
+    const col = _durableCollection('app_refresh_tokens');
+    if (!col) return null;
+    const doc = await col.doc(sessionDocId(token)).get();
+    return doc.exists ? doc.data() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function deleteRefreshTokenDoc(token) {
+  try {
+    const col = _durableCollection('app_refresh_tokens');
+    if (col) await col.doc(sessionDocId(token)).delete();
+  } catch (_) {}
+}
+
 // Initialize persistence
 loadPersistedSessionsWithLogging();
 
@@ -5849,14 +5926,20 @@ app.post('/auth/verify-code', async (req, res) => {
   };
 
   sessions.set(accessToken, sessionData);
-  appRefreshTokens.set(refreshToken, {
+  const refreshTokenData = {
     accessToken,
     email,
     customerId,
     createdAt: Date.now(),
     expiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
-  });
+  };
+  appRefreshTokens.set(refreshToken, refreshTokenData);
   await persistSessions();
+  // Durable copies - logins must survive deploys (ephemeral disk).
+  await Promise.all([
+    saveSessionDoc(accessToken, sessionData),
+    saveRefreshTokenDoc(refreshToken, refreshTokenData),
+  ]);
 
   app.post('/auth/refresh', async (req, res) => {
     const { refreshToken } = req.body;
@@ -5865,19 +5948,28 @@ app.post('/auth/verify-code', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Refresh token required' });
     }
   
-    const refreshData = appRefreshTokens.get(refreshToken);
+    let refreshData = appRefreshTokens.get(refreshToken);
+    if (!refreshData) {
+      // Hydrate the durable copy (instance restarted/redeployed).
+      refreshData = await loadRefreshTokenDoc(refreshToken);
+      if (refreshData) appRefreshTokens.set(refreshToken, refreshData);
+    }
     if (!refreshData) {
       return res.status(401).json({ success: false, error: 'Invalid refresh token' });
     }
-  
+
     // Check if refresh token is expired
     if (refreshData.expiresAt < Date.now()) {
       appRefreshTokens.delete(refreshToken);
+      deleteRefreshTokenDoc(refreshToken);
       return res.status(401).json({ success: false, error: 'Refresh token expired' });
     }
-  
+
     // Get current session data
-    const currentSession = sessions.get(refreshData.accessToken);
+    let currentSession = sessions.get(refreshData.accessToken);
+    if (!currentSession) {
+      currentSession = await loadSessionDoc(refreshData.accessToken);
+    }
     if (!currentSession) {
       return res.status(401).json({ success: false, error: 'Session not found' });
     }
@@ -5897,15 +5989,23 @@ app.post('/auth/verify-code', async (req, res) => {
     // Update storage
     sessions.set(newAccessToken, newSessionData);
     sessions.delete(refreshData.accessToken);
-    appRefreshTokens.set(newRefreshToken, {
+    const newRefreshTokenData = {
       accessToken: newAccessToken,
       email: refreshData.email,
       customerId: refreshData.customerId,
       createdAt: Date.now(),
       expiresAt: Date.now() + config.tokenLifetimes.refreshToken * 1000,
-    });
+    };
+    appRefreshTokens.set(newRefreshToken, newRefreshTokenData);
     appRefreshTokens.delete(refreshToken);
     await persistSessions();
+    // Durable copies: rotate in Firestore too.
+    await Promise.all([
+      saveSessionDoc(newAccessToken, newSessionData),
+      saveRefreshTokenDoc(newRefreshToken, newRefreshTokenData),
+    ]);
+    deleteSessionDoc(refreshData.accessToken);
+    deleteRefreshTokenDoc(refreshToken);
   
   
     res.json({
@@ -5946,21 +6046,29 @@ const authenticateAppToken = async (req, res, next) => {
   let session = sessions.get(token);
 
   if (!session) {
-
-    // 🔥 FIX: Do NOT create temporary sessions - reject invalid tokens
-    return res.status(401).json({ 
-      error: 'Session expired or invalid',
-      hint: 'Please login again'
-    });
+    // Not in memory (e.g. the instance restarted/redeployed) - hydrate the
+    // durable copy from Firestore before rejecting. This is what keeps
+    // users logged in across deploys.
+    session = await loadSessionDoc(token);
+    if (session) {
+      sessions.set(token, session);
+    } else {
+      // 🔥 FIX: Do NOT create temporary sessions - reject invalid tokens
+      return res.status(401).json({
+        error: 'Session expired or invalid',
+        hint: 'Please login again'
+      });
+    }
   }
-  
+
   // 🔥 FIX: Check if session has expired
   if (session.expiresAt && session.expiresAt < Date.now()) {
     sessions.delete(token);
     await persistSessions();
+    deleteSessionDoc(token);
 
-    
-    return res.status(401).json({ 
+
+    return res.status(401).json({
       error: 'Session expired',
       hint: 'Please login again'
     });
@@ -5970,8 +6078,9 @@ const authenticateAppToken = async (req, res, next) => {
   if (!session.email || session.email === 'unknown@example.com' || !session.customerId) {
     sessions.delete(token);
     await persistSessions();
-    
-    return res.status(401).json({ 
+    deleteSessionDoc(token);
+
+    return res.status(401).json({
       error: 'Corrupted session',
       hint: 'Please login again'
     });
@@ -13740,10 +13849,11 @@ app.put('/customer/update-name', authenticateAppToken, async (req, res) => {
 app.post('/auth/logout', authenticateAppToken, async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader.substring(7);
-  
+
   sessions.delete(token);
   await persistSessions();
-  
+  deleteSessionDoc(token);
+
   res.json({ success: true });
 });
 
