@@ -6443,6 +6443,20 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
           note
           verifiedEmail
           taxExempt
+          numberOfOrders
+          amountSpent {
+            amount
+            currencyCode
+          }
+          orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+            edges {
+              node {
+                id
+                name
+                processedAt
+              }
+            }
+          }
           emailMarketingConsent {
             marketingState
             marketingOptInLevel
@@ -6592,11 +6606,16 @@ app.get('/customer/profile', authenticateAppToken, async (req, res) => {
       emailMarketingOptInLevel: customer.emailMarketingConsent?.marketingOptInLevel,
       smsMarketingOptInLevel: customer.smsMarketingConsent?.marketingOptInLevel,
       
-      // Financial data - Calculate from orders separately
+      // Financial data - real values from the Admin API (amountSpent is
+      // the modern replacement for the deprecated totalSpent field).
       totalSpent: {
-        amount: '0', // Will need separate query
-        currencyCode: 'EUR'
+        amount: customer.amountSpent?.amount || '0',
+        currencyCode: customer.amountSpent?.currencyCode || 'EUR'
       },
+      // Lifetime order count (all orders, incl. cancelled - Shopify's own
+      // number) plus the 50 most recent orders, newest first.
+      numberOfOrders: customer.numberOfOrders,
+      orders: customer.orders || { edges: [] },
       storeCredit: {
         amount: totalStoreCredit.toFixed(2),
         currencyCode: 'EUR'
