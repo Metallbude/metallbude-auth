@@ -4191,10 +4191,12 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
 
     // Sectionheroes set discounts: group claimed lines by bundle+offer,
     // verify each claim against the storefront's bundle config, then
-    // allocate the tier percent across the group's lines cent-exactly
-    // (round the group target once, adjust the last line by the residual)
-    // so the draft total matches the cart display to the cent.
-    const bundleChargedByLine = new Map(); // line index -> charged line total
+    // allocate the tier percent cent-exactly. IMPORTANT: draft line
+    // discounts are PER UNIT (Shopify multiplies by quantity), so each
+    // unit gets a floor-rounded charged price and the leftover cents vs
+    // the group's rounded target are distributed one per unit — a line
+    // may split into two draft lines to keep per-unit discounts uniform.
+    const bundleUnitsByLine = new Map(); // line index -> [{count, unitCharged}]
     const bundlePctByLine = new Map(); // line index -> verified percent
     const claimedGroups = new Map(); // "id|o" -> { claim, lineIdxs, quantity }
     lines.forEach((line, idx) => {
@@ -4238,81 +4240,115 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       }
       if (tier.discountPercent > 0) {
         const pct = tier.discountPercent;
-        const baseTotals = g.lineIdxs.map((idx) => {
+        const unitPlans = g.lineIdxs.map((idx) => {
           const line = lines[idx];
           const online = onlinePrices.get(line.variantId) ?? null;
           const app = appPrices.get(line.variantId) ?? null;
-          const unit = online != null && app != null && app < online ? app : online;
-          return { idx, total: (unit ?? 0) * line.quantity };
+          const base =
+            online != null && app != null && app < online ? app : online;
+          const ideal = (base ?? 0) * (1 - pct / 100);
+          return {
+            idx,
+            qty: line.quantity,
+            base: base ?? 0,
+            floorUnit:
+              Math.floor(Number((ideal * 100).toFixed(4))) / 100,
+          };
         });
-        const target = Number(
+        const targetTotal = Number(
           (
-            baseTotals.reduce((s, t) => s + t.total, 0) *
+            unitPlans.reduce((s, p) => s + p.base * p.qty, 0) *
             (1 - pct / 100)
           ).toFixed(2),
         );
-        let assigned = 0;
-        baseTotals.forEach((t, i) => {
-          const charged =
-            i === baseTotals.length - 1
-              ? Number((target - assigned).toFixed(2))
-              : Number((t.total * (1 - pct / 100)).toFixed(2));
-          assigned = Number((assigned + charged).toFixed(2));
-          bundleChargedByLine.set(t.idx, charged);
-          bundlePctByLine.set(t.idx, pct);
-        });
+        const floorTotal = unitPlans.reduce(
+          (s, p) => s + p.floorUnit * p.qty,
+          0,
+        );
+        let centsLeft = Math.max(
+          0,
+          Math.round((targetTotal - floorTotal) * 100),
+        );
+        for (const p of unitPlans) {
+          const bumped = Math.min(p.qty, centsLeft);
+          centsLeft -= bumped;
+          const parts = [];
+          if (bumped > 0) {
+            parts.push({
+              count: bumped,
+              unitCharged: Number((p.floorUnit + 0.01).toFixed(2)),
+            });
+          }
+          if (p.qty - bumped > 0) {
+            parts.push({ count: p.qty - bumped, unitCharged: p.floorUnit });
+          }
+          bundleUnitsByLine.set(p.idx, parts);
+          bundlePctByLine.set(p.idx, pct);
+        }
       }
     }
 
-    // Build draft line items. Charged line total = app price (when it beats
+    // Build draft line items. Charged unit price = app price (when it beats
     // online) with any verified set discount on top; the draft carries the
-    // difference to the online price as a line-level fixed discount.
+    // difference to the online price as a line-level fixed discount whose
+    // value is PER UNIT (Shopify multiplies it by the line quantity).
     const debug = [];
     let anyAppDiscount = false;
-    const lineItems = lines.map((line, idx) => {
+    const lineItems = lines.flatMap((line, idx) => {
       const online = onlinePrices.has(line.variantId)
         ? onlinePrices.get(line.variantId)
         : null;
       const app = appPrices.has(line.variantId)
         ? appPrices.get(line.variantId)
         : null;
+      const isApp = online != null && app != null && app < online;
+      if (isApp) anyAppDiscount = true;
+      // Stamp order lines like the web widget does, for reporting.
+      const attrs = line.shBundle
+        ? [{ key: '_sh-bundle', value: line.shBundle.raw }]
+        : null;
+      const bundleParts = online != null ? bundleUnitsByLine.get(idx) : null;
       let lineDiscount = 0;
       let chargedTotal = 0;
-      const item = { variantId: line.variantId, quantity: line.quantity };
-      if (line.shBundle) {
-        // Stamp the order line like the web widget does, for reporting.
-        item.customAttributes = [
-          { key: '_sh-bundle', value: line.shBundle.raw },
-        ];
-      }
-      if (online != null) {
-        const isApp = app != null && app < online;
-        if (isApp) anyAppDiscount = true;
-        const onlineTotal = Number((online * line.quantity).toFixed(2));
-        const bundleCharged = bundleChargedByLine.get(idx);
-        chargedTotal =
-          bundleCharged != null
-            ? bundleCharged
-            : isApp
-              ? Number((app * line.quantity).toFixed(2))
-              : onlineTotal;
-        lineDiscount = Number((onlineTotal - chargedTotal).toFixed(2));
-        if (lineDiscount > 0) {
-          item.appliedDiscount = {
+      let items;
+      if (bundleParts) {
+        items = bundleParts.map((part) => {
+          const unitDiscount = Number((online - part.unitCharged).toFixed(2));
+          chargedTotal = Number(
+            (chargedTotal + part.unitCharged * part.count).toFixed(2),
+          );
+          lineDiscount = Number(
+            (lineDiscount + unitDiscount * part.count).toFixed(2),
+          );
+          const it = { variantId: line.variantId, quantity: part.count };
+          if (attrs) it.customAttributes = attrs;
+          if (unitDiscount > 0) {
+            it.appliedDiscount = {
+              valueType: 'FIXED_AMOUNT',
+              value: unitDiscount,
+              title: isApp ? 'App-Preis + Set-Rabatt' : 'Set-Rabatt',
+              description: 'Set-Angebot (Metallbude App)',
+            };
+          }
+          return it;
+        });
+      } else {
+        const it = { variantId: line.variantId, quantity: line.quantity };
+        if (attrs) it.customAttributes = attrs;
+        if (isApp) {
+          const unitDiscount = Number((online - app).toFixed(2));
+          lineDiscount = Number((unitDiscount * line.quantity).toFixed(2));
+          chargedTotal = Number((app * line.quantity).toFixed(2));
+          it.appliedDiscount = {
             valueType: 'FIXED_AMOUNT',
-            value: lineDiscount,
-            title:
-              bundleCharged != null
-                ? isApp
-                  ? 'App-Preis + Set-Rabatt'
-                  : 'Set-Rabatt'
-                : 'App-Preis',
-            description:
-              bundleCharged != null
-                ? 'Set-Angebot (Metallbude App)'
-                : 'Metallbude App exclusive price',
+            value: unitDiscount,
+            title: 'App-Preis',
+            description: 'Metallbude App exclusive price',
           };
+        } else if (online != null) {
+          chargedTotal = Number((online * line.quantity).toFixed(2));
         }
+        items = [it];
       }
       debug.push({
         variantId: line.variantId,
@@ -4323,7 +4359,7 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
         chargedTotal,
         lineDiscount,
       });
-      return item;
+      return items;
     });
 
     if (!anyAppDiscount) {
