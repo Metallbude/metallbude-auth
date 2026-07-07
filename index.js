@@ -137,7 +137,8 @@ app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
 // Public Shopify-driven bundle offer endpoint
-app.use(require('./routes/bundleOffers'));
+const bundleOffersRoutes = require('./routes/bundleOffers');
+app.use(bundleOffersRoutes);
 
 // === File uploads for return labels (PDF/JPG/PNG) ===
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -4113,7 +4114,24 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       if (!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(vid)) continue;
       const qty = Math.floor(Number(l?.quantity));
       if (!Number.isFinite(qty) || qty <= 0) continue;
-      lines.push({ variantId: vid, quantity: qty });
+      // Sectionheroes set claim: the app forwards the line's `_sh-bundle`
+      // attribute ({"id":"gal5q","o":1}). Drafts bypass the Sectionheroes
+      // Shopify Function, so the set discount the cart displayed has to be
+      // validated and applied here — the claim is checked against the
+      // storefront's own bundle config below, never trusted as-is.
+      let shBundle = null;
+      if (l?.shBundle != null) {
+        try {
+          const parsed =
+            typeof l.shBundle === 'string' ? JSON.parse(l.shBundle) : l.shBundle;
+          const id = typeof parsed?.id === 'string' ? parsed.id.trim() : '';
+          const o = Number(parsed?.o);
+          if (/^[a-z0-9_-]{1,16}$/i.test(id) && Number.isInteger(o) && o >= 0) {
+            shBundle = { id, o, raw: JSON.stringify({ id, o }) };
+          }
+        } catch (_) {}
+      }
+      lines.push({ variantId: vid, quantity: qty, shBundle });
     }
     if (lines.length === 0)
       return res.status(400).json({ ok: false, error: 'No valid lines.' });
@@ -4151,14 +4169,16 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       cursor = pl.pageInfo?.endCursor || null;
     }
 
-    // Current online-store prices (the draft's base price per line).
+    // Current online-store prices (the draft's base price per line) plus
+    // the product handle (needed to verify Sectionheroes bundle claims).
     const onlinePrices = new Map();
+    const handleByVariant = new Map();
     const variantIds = [...new Set(lines.map((l) => l.variantId))];
     const or = await axios.post(
       adminUrl,
       {
         query:
-          'query($ids:[ID!]!){ nodes(ids:$ids){ ... on ProductVariant { id price } } }',
+          'query($ids:[ID!]!){ nodes(ids:$ids){ ... on ProductVariant { id price product { handle } } } }',
         variables: { ids: variantIds },
       },
       { headers },
@@ -4166,12 +4186,90 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
     for (const n of or.data?.data?.nodes || []) {
       const amt = Number(n?.price);
       if (n?.id && Number.isFinite(amt)) onlinePrices.set(n.id, amt);
+      if (n?.id && n?.product?.handle) handleByVariant.set(n.id, n.product.handle);
     }
 
-    // Build draft line items: discount = (online - app) * qty when app < online.
+    // Sectionheroes set discounts: group claimed lines by bundle+offer,
+    // verify each claim against the storefront's bundle config, then
+    // allocate the tier percent across the group's lines cent-exactly
+    // (round the group target once, adjust the last line by the residual)
+    // so the draft total matches the cart display to the cent.
+    const bundleChargedByLine = new Map(); // line index -> charged line total
+    const bundlePctByLine = new Map(); // line index -> verified percent
+    const claimedGroups = new Map(); // "id|o" -> { claim, lineIdxs, quantity }
+    lines.forEach((line, idx) => {
+      if (!line.shBundle) return;
+      const key = `${line.shBundle.id}|${line.shBundle.o}`;
+      if (!claimedGroups.has(key)) {
+        claimedGroups.set(key, { claim: line.shBundle, lineIdxs: [], quantity: 0 });
+      }
+      const g = claimedGroups.get(key);
+      g.lineIdxs.push(idx);
+      g.quantity += line.quantity;
+    });
+    for (const g of claimedGroups.values()) {
+      const handle = handleByVariant.get(lines[g.lineIdxs[0]].variantId);
+      let tier = null;
+      try {
+        const tiers = handle
+          ? await bundleOffersRoutes.getBundleTiersForHandle(handle)
+          : [];
+        tier =
+          tiers.find(
+            (t) => t.bundleId === g.claim.id && t.offerIndex === g.claim.o,
+          ) || null;
+      } catch (_) {
+        tier = null;
+      }
+      if (!tier || g.quantity < tier.quantity) {
+        // Unknown bundle/offer or not enough units for the tier: the cart
+        // displayed a set price we can't verify. Never charge silently
+        // more — fall back to the normal cart, where line attributes
+        // travel along and the Sectionheroes Function decides.
+        console.warn(
+          `⚠️ [app-checkout] unverified bundle claim ${g.claim.raw} (handle=${handle}, qty=${g.quantity})`,
+        );
+        return res.json({
+          ok: true,
+          useNormalCart: true,
+          reason: 'bundle_unverified',
+          lines: [],
+        });
+      }
+      if (tier.discountPercent > 0) {
+        const pct = tier.discountPercent;
+        const baseTotals = g.lineIdxs.map((idx) => {
+          const line = lines[idx];
+          const online = onlinePrices.get(line.variantId) ?? null;
+          const app = appPrices.get(line.variantId) ?? null;
+          const unit = online != null && app != null && app < online ? app : online;
+          return { idx, total: (unit ?? 0) * line.quantity };
+        });
+        const target = Number(
+          (
+            baseTotals.reduce((s, t) => s + t.total, 0) *
+            (1 - pct / 100)
+          ).toFixed(2),
+        );
+        let assigned = 0;
+        baseTotals.forEach((t, i) => {
+          const charged =
+            i === baseTotals.length - 1
+              ? Number((target - assigned).toFixed(2))
+              : Number((t.total * (1 - pct / 100)).toFixed(2));
+          assigned = Number((assigned + charged).toFixed(2));
+          bundleChargedByLine.set(t.idx, charged);
+          bundlePctByLine.set(t.idx, pct);
+        });
+      }
+    }
+
+    // Build draft line items. Charged line total = app price (when it beats
+    // online) with any verified set discount on top; the draft carries the
+    // difference to the online price as a line-level fixed discount.
     const debug = [];
     let anyAppDiscount = false;
-    const lineItems = lines.map((line) => {
+    const lineItems = lines.map((line, idx) => {
       const online = onlinePrices.has(line.variantId)
         ? onlinePrices.get(line.variantId)
         : null;
@@ -4179,22 +4277,50 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
         ? appPrices.get(line.variantId)
         : null;
       let lineDiscount = 0;
+      let chargedTotal = 0;
       const item = { variantId: line.variantId, quantity: line.quantity };
-      if (online != null && app != null && app < online) {
-        lineDiscount = Number(((online - app) * line.quantity).toFixed(2));
-        anyAppDiscount = true;
-        item.appliedDiscount = {
-          valueType: 'FIXED_AMOUNT',
-          value: lineDiscount,
-          title: 'App-Preis',
-          description: 'Metallbude App exclusive price',
-        };
+      if (line.shBundle) {
+        // Stamp the order line like the web widget does, for reporting.
+        item.customAttributes = [
+          { key: '_sh-bundle', value: line.shBundle.raw },
+        ];
+      }
+      if (online != null) {
+        const isApp = app != null && app < online;
+        if (isApp) anyAppDiscount = true;
+        const onlineTotal = Number((online * line.quantity).toFixed(2));
+        const bundleCharged = bundleChargedByLine.get(idx);
+        chargedTotal =
+          bundleCharged != null
+            ? bundleCharged
+            : isApp
+              ? Number((app * line.quantity).toFixed(2))
+              : onlineTotal;
+        lineDiscount = Number((onlineTotal - chargedTotal).toFixed(2));
+        if (lineDiscount > 0) {
+          item.appliedDiscount = {
+            valueType: 'FIXED_AMOUNT',
+            value: lineDiscount,
+            title:
+              bundleCharged != null
+                ? isApp
+                  ? 'App-Preis + Set-Rabatt'
+                  : 'Set-Rabatt'
+                : 'App-Preis',
+            description:
+              bundleCharged != null
+                ? 'Set-Angebot (Metallbude App)'
+                : 'Metallbude App exclusive price',
+          };
+        }
       }
       debug.push({
         variantId: line.variantId,
         quantity: line.quantity,
         onlinePrice: online,
         appPrice: app,
+        bundlePercent: bundlePctByLine.get(idx) || 0,
+        chargedTotal,
         lineDiscount,
       });
       return item;
@@ -4234,15 +4360,9 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       });
     }
 
-    const appSubtotal = debug.reduce((sum, l) => {
-      const unit =
-        l.appPrice != null && l.onlinePrice != null && l.appPrice < l.onlinePrice
-          ? l.appPrice
-          : l.onlinePrice != null
-            ? l.onlinePrice
-            : 0;
-      return sum + unit * l.quantity;
-    }, 0);
+    // What the customer actually sees as subtotal: app prices where they
+    // beat online, including any verified set discount.
+    const appSubtotal = debug.reduce((sum, l) => sum + l.chargedTotal, 0);
     const totalQuantity = lines.reduce((sum, l) => sum + l.quantity, 0);
 
     const appliedCodes = [];

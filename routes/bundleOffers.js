@@ -70,6 +70,41 @@ function mapSectionheroesToTiers(config) {
   return tiers;
 }
 
+// All tiers for a product handle, straight from the storefront's own
+// data-bundle-config block. Used by the public offers endpoint AND by
+// app-checkout to validate a client's `_sh-bundle` claim before applying
+// any discount to a draft order. On scrape failure an expired cache entry
+// is served (stale-while-error): bundle config changes rarely, storefront
+// hiccups must not break checkouts.
+const tiersCache = new Map(); // handle -> { fetchedAt, tiers }
+const TIERS_TTL_MS = 5 * 60 * 1000;
+
+async function getBundleTiersForHandle(handle) {
+  const normalized = String(handle || '').trim();
+  if (!normalized) return [];
+  const cached = tiersCache.get(normalized);
+  if (cached && Date.now() - cached.fetchedAt < TIERS_TTL_MS) {
+    return cached.tiers;
+  }
+  try {
+    const url = `${STOREFRONT_BASE}/products/${normalized}`;
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 Metallbude-App-Backend/1.0',
+        Accept: 'text/html',
+      },
+    });
+    if (!response.ok) throw new Error(`storefront ${response.status}`);
+    const html = await response.text();
+    const tiers = parseBundleConfig(html).flatMap(mapSectionheroesToTiers);
+    tiersCache.set(normalized, { fetchedAt: Date.now(), tiers });
+    return tiers;
+  } catch (e) {
+    if (cached) return cached.tiers;
+    throw e;
+  }
+}
+
 async function scrapeBundleConfig(handle) {
   const normalizedHandle = String(handle || '').trim();
   if (!normalizedHandle) throw new Error('handle required');
@@ -126,34 +161,20 @@ router.get('/api/public/bundle-offers', async (req, res) => {
       if (!handle) return res.json({ offers: [] });
     }
 
-    const cached = scrapeCache.get(handle);
-    if (cached && Date.now() - cached.fetchedAt < SCRAPE_TTL_MS) {
-      return res.json({ offers: cached.offers, cached: true });
-    }
-
-    const url = `${STOREFRONT_BASE}/products/${handle}`;
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 Metallbude-App-Backend/1.0',
-        Accept: 'text/html',
-      },
-    });
-    if (!response.ok) {
-      console.warn(`[bundle-offers] storefront ${response.status} for ${url}`);
+    let offers;
+    try {
+      offers = await getBundleTiersForHandle(handle);
+    } catch (e) {
+      console.warn(`[bundle-offers] scrape failed for ${handle}: ${e.message}`);
       return res.json({ offers: [] });
     }
-
-    const html = await response.text();
-    const configs = parseBundleConfig(html);
-    if (configs.length === 0) {
+    if (offers.length === 0) {
       console.log(`[bundle-offers] no bundle-config block for ${handle}`);
-      scrapeCache.set(handle, { fetchedAt: Date.now(), offers: [] });
       return res.json({ offers: [] });
     }
 
-    // A product page may render multiple bundle blocks; merge them.
-    const offers = configs.flatMap(mapSectionheroesToTiers);
-    // De-dupe by quantity (keep first / highest-discount).
+    // De-dupe by quantity (keep first / highest-discount) for display; the
+    // full tier list stays available to checkout validation via the helper.
     const byQty = new Map();
     for (const t of offers) {
       const existing = byQty.get(t.quantity);
@@ -162,8 +183,6 @@ router.get('/api/public/bundle-offers', async (req, res) => {
       }
     }
     const merged = [...byQty.values()].sort((a, b) => a.quantity - b.quantity);
-
-    scrapeCache.set(handle, { fetchedAt: Date.now(), offers: merged });
     console.log(
       `[bundle-offers] handle=${handle} tiers=${merged.length} (${merged.map((t) => `${t.quantity}x@-${t.discountPercent}%`).join(',')})`
     );
@@ -512,3 +531,4 @@ router.get('/api/public/bundle-offers/scrape-full', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.getBundleTiersForHandle = getBundleTiersForHandle;
