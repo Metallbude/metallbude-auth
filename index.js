@@ -140,6 +140,104 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 const bundleOffersRoutes = require('./routes/bundleOffers');
 app.use(bundleOffersRoutes);
 
+// === TEMPORARY (2026-07-10): Universal/App Links one-shot setup =========
+// Registers the mobile app for iOS Universal Links + Android App Links via
+// Shopify's MobilePlatformApplication API, which populates the (currently
+// EMPTY) association files Shopify serves on metallbude.com. Payload is
+// HARDCODED (no request input reaches Shopify). GET = read-only state,
+// POST ?confirm=register = execute once. REMOVE this block after use.
+const APP_LINKS_SETUP_KEY = '22f68932849751027cfacb96729660fd';
+const APP_LINKS_IOS_APP_ID = 'JR36S674A8.com.metallbude.mobile.app';
+const APP_LINKS_ANDROID_PACKAGE = 'com.metallbude.mobile.app';
+// Play App-Signing certificate fingerprint (public by design).
+const APP_LINKS_ANDROID_SHA256 =
+  '89:06:9F:85:27:CA:69:F4:2F:EF:0B:6E:2F:92:01:6E:11:76:71:98:F0:C4:B3:BE:23:A6:4F:31:F6:0D:5C:2F';
+
+async function appLinksAdminQuery(query, variables) {
+  const axios = require('axios');
+  const r = await axios.post(
+    config.adminApiUrl,
+    { query, variables },
+    {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json',
+      },
+      timeout: 20000,
+    },
+  );
+  return r.data;
+}
+
+async function appLinksCurrentState() {
+  return appLinksAdminQuery(
+    `{ mobilePlatformApplications(first: 10) { edges { node { __typename
+        ... on AppleApplication { id appId universalLinksEnabled sharedWebCredentialsEnabled appClipsEnabled }
+        ... on AndroidApplication { id applicationId appLinksEnabled sha256CertFingerprints }
+    } } } }`,
+  );
+}
+
+app.get('/internal/app-links', async (req, res) => {
+  if (req.query.key !== APP_LINKS_SETUP_KEY) return res.status(404).end();
+  try {
+    const state = await appLinksCurrentState();
+    return res.json({ ok: true, registrations: state });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/internal/app-links', async (req, res) => {
+  if (req.query.key !== APP_LINKS_SETUP_KEY) return res.status(404).end();
+  if (req.query.confirm !== 'register') {
+    return res.status(400).json({ ok: false, error: 'confirm=register required' });
+  }
+  try {
+    const results = {};
+    results.ios = await appLinksAdminQuery(
+      `mutation($input: MobilePlatformApplicationCreateInput!) {
+        mobilePlatformApplicationCreate(input: $input) {
+          mobilePlatformApplication { __typename }
+          userErrors { field message }
+        }
+      }`,
+      {
+        input: {
+          apple: {
+            appId: APP_LINKS_IOS_APP_ID,
+            universalLinksEnabled: true,
+            sharedWebCredentialsEnabled: false,
+            appClipsEnabled: false,
+          },
+        },
+      },
+    );
+    results.android = await appLinksAdminQuery(
+      `mutation($input: MobilePlatformApplicationCreateInput!) {
+        mobilePlatformApplicationCreate(input: $input) {
+          mobilePlatformApplication { __typename }
+          userErrors { field message }
+        }
+      }`,
+      {
+        input: {
+          android: {
+            applicationId: APP_LINKS_ANDROID_PACKAGE,
+            sha256CertFingerprints: [APP_LINKS_ANDROID_SHA256],
+            appLinksEnabled: true,
+          },
+        },
+      },
+    );
+    results.stateAfter = await appLinksCurrentState();
+    return res.json({ ok: true, results });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+// === END TEMPORARY app-links setup ======================================
+
 // === File uploads for return labels (PDF/JPG/PNG) ===
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const ensureUploadsDir = async () => {
