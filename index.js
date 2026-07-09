@@ -140,6 +140,66 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 const bundleOffersRoutes = require('./routes/bundleOffers');
 app.use(bundleOffersRoutes);
 
+// Shipping rates for the app's checkout preview. The app used to query
+// deliveryProfiles directly with an EMBEDDED Admin token; that token was
+// (rightly) removed for security, which silently broke the preview —
+// empty rates, checkout showed "0 €" shipping. The backend owns the
+// Admin token, so it serves the same query. The raw GraphQL response
+// shape is preserved so the app-side parser stays byte-identical.
+let _shippingRatesCache = { at: 0, payload: null };
+const SHIPPING_RATES_TTL_MS = 60 * 60 * 1000;
+
+app.get('/api/mobile/shipping-rates', async (req, res) => {
+  try {
+    if (
+      _shippingRatesCache.payload &&
+      Date.now() - _shippingRatesCache.at < SHIPPING_RATES_TTL_MS
+    ) {
+      return res.json(_shippingRatesCache.payload);
+    }
+    const axios = require('axios');
+    const r = await axios.post(
+      config.adminApiUrl,
+      {
+        query: `query getShippingRates {
+          deliveryProfiles(first: 10) {
+            edges { node { id name
+              profileLocationGroups {
+                locationGroupZones(first: 50) {
+                  edges { node {
+                    zone { countries { code { countryCode } } }
+                    methodDefinitions(first: 50) {
+                      edges { node { id name description
+                        rateProvider { ... on DeliveryRateDefinition { id price { amount currencyCode } } }
+                      } }
+                    }
+                  } }
+                }
+              }
+            } }
+          }
+        }`,
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': config.adminToken,
+          'Content-Type': 'application/json',
+        },
+        timeout: 20000,
+      },
+    );
+    if (r.data?.errors) {
+      console.error('❌ [shipping-rates] GraphQL errors:', r.data.errors);
+      return res.status(502).json({ errors: r.data.errors });
+    }
+    _shippingRatesCache = { at: Date.now(), payload: r.data };
+    return res.json(r.data);
+  } catch (e) {
+    console.error('❌ [shipping-rates] error:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // === TEMPORARY (2026-07-10): Universal/App Links one-shot setup =========
 // Registers the mobile app for iOS Universal Links + Android App Links via
 // Shopify's MobilePlatformApplication API, which populates the (currently
