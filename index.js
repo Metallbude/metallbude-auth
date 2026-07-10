@@ -4694,23 +4694,72 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
     }
     if (email) input.email = email;
 
-    const dr = await axios.post(
-      adminUrl,
-      {
-        query:
-          'mutation($input: DraftOrderInput!){ draftOrderCreate(input:$input){ draftOrder{ id invoiceUrl totalPrice } userErrors{ field message } } }',
-        variables: { input },
-      },
-      { headers },
-    );
+    // Optional shipping address for the draft: Shopify pre-fills its
+    // checkout from the DRAFT's address (incl. the phone the shop
+    // requires) instead of guessing from the customer's account address
+    // book, whose default may be stale or phone-less. Sanitized to a
+    // fixed field set; too-incomplete addresses are dropped entirely.
+    const rawAddr = req.body?.shippingAddress;
+    let shippingAddress = null;
+    if (rawAddr && typeof rawAddr === 'object' && !Array.isArray(rawAddr)) {
+      const pick = (k, max = 100) =>
+        typeof rawAddr[k] === 'string' && rawAddr[k].trim()
+          ? rawAddr[k].trim().slice(0, max)
+          : undefined;
+      shippingAddress = {
+        firstName: pick('firstName'),
+        lastName: pick('lastName'),
+        company: pick('company'),
+        address1: pick('address1', 200),
+        address2: pick('address2', 200),
+        city: pick('city'),
+        zip: pick('zip', 20),
+        provinceCode: pick('provinceCode', 10),
+        countryCode: pick('countryCode', 2),
+        phone: pick('phone', 30),
+      };
+      Object.keys(shippingAddress).forEach(
+        (k) => shippingAddress[k] === undefined && delete shippingAddress[k],
+      );
+      if (!shippingAddress.address1 || !shippingAddress.city) {
+        shippingAddress = null;
+      }
+    }
+    if (shippingAddress) input.shippingAddress = shippingAddress;
 
-    const gqlErrors = (dr.data?.errors || []).map((e) => e.message);
-    const draft = dr.data?.data?.draftOrderCreate;
-    const userErrors = (draft?.userErrors || []).map((e) =>
-      [e.field?.join('.'), e.message].filter(Boolean).join(': '),
-    );
-    const errors = [...gqlErrors, ...userErrors].filter(Boolean);
-    const draftOrder = draft?.draftOrder;
+    const draftMutation =
+      'mutation($input: DraftOrderInput!){ draftOrderCreate(input:$input){ draftOrder{ id invoiceUrl totalPrice shippingAddress { address1 city zip phone } } userErrors{ field message } } }';
+
+    const runDraftCreate = async (draftInput) => {
+      const dr = await axios.post(
+        adminUrl,
+        { query: draftMutation, variables: { input: draftInput } },
+        { headers },
+      );
+      const gqlErrors = (dr.data?.errors || []).map((e) => e.message);
+      const draft = dr.data?.data?.draftOrderCreate;
+      const userErrors = (draft?.userErrors || []).map((e) =>
+        [e.field?.join('.'), e.message].filter(Boolean).join(': '),
+      );
+      return {
+        errors: [...gqlErrors, ...userErrors].filter(Boolean),
+        draftOrder: draft?.draftOrder,
+      };
+    };
+
+    let { errors, draftOrder } = await runDraftCreate(input);
+
+    // A bad address must never break the checkout: if Shopify rejects the
+    // draft WITH an address, retry once without it (falls back to the
+    // pre-address behavior where the customer types the address).
+    if ((errors.length > 0 || !draftOrder?.invoiceUrl) && input.shippingAddress) {
+      console.warn(
+        '⚠️ [app-checkout] draft failed with shippingAddress, retrying without:',
+        errors,
+      );
+      const { shippingAddress: _dropped, ...inputNoAddr } = input;
+      ({ errors, draftOrder } = await runDraftCreate(inputNoAddr));
+    }
 
     if (errors.length > 0 || !draftOrder?.invoiceUrl) {
       console.error('❌ [app-checkout] draftOrderCreate failed:', errors, debug);
@@ -4726,6 +4775,7 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       checkoutUrl: draftOrder.invoiceUrl,
       draftOrderId: draftOrder.id,
       totalPrice: draftOrder.totalPrice,
+      shippingAddressAttached: Boolean(draftOrder.shippingAddress?.address1),
       appliedCodes,
       codeDiscountTotal,
       lines: debug,
