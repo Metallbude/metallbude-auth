@@ -14246,21 +14246,25 @@ app.post('/customer/address/:addressId', authenticateAppToken, async (req, res) 
     );
     
     
-    if (response.status === 200 && response.data.address) {
-      res.json({ 
+    // Shopify's REST address PUT returns the key `customer_address`
+    // (same as the create above) — reading `address` here made every
+    // successful update fall through to the 400 branch.
+    const updated = response.data.customer_address || response.data.address;
+    if (response.status === 200 && updated) {
+      res.json({
         address: {
-          id: `gid://shopify/MailingAddress/${response.data.address.id}`,
-          firstName: response.data.address.first_name,
-          lastName: response.data.address.last_name,
-          company: response.data.address.company,
-          address1: response.data.address.address1,
-          address2: response.data.address.address2,
-          city: response.data.address.city,
-          province: response.data.address.province,
-          country: response.data.address.country,
-          zip: response.data.address.zip,
-          phone: response.data.address.phone,
-          isDefault: response.data.address.default
+          id: `gid://shopify/MailingAddress/${updated.id}`,
+          firstName: updated.first_name,
+          lastName: updated.last_name,
+          company: updated.company,
+          address1: updated.address1,
+          address2: updated.address2,
+          city: updated.city,
+          province: updated.province,
+          country: updated.country,
+          zip: updated.zip,
+          phone: updated.phone,
+          isDefault: updated.default
         }
       });
     } else {
