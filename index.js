@@ -351,6 +351,13 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
   }
 });
 
+// Shopify API version — single pin for Storefront, Admin and Customer
+// Account APIs. Update quarterly; after bumping, re-run the app-checkout
+// verification matrix (money path).
+const SHOPIFY_API_VERSION = '2026-07';
+const _forceApiVersion = (url) =>
+  url.replace(/\/api\/20[0-9]{2}-[0-9]{2}\//, `/api/${SHOPIFY_API_VERSION}/`);
+
 // Configuration
 const config = {
   issuer: process.env.SERVER_URL || 'https://metallbude-auth.onrender.com',
@@ -358,9 +365,18 @@ const config = {
   storefrontToken: process.env.SHOPIFY_STOREFRONT_TOKEN,
   adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
   // Shopify API version — update quarterly (https://shopify.dev/docs/api/usage/versioning)
-  apiVersion: '2026-01',
-  apiUrl: process.env.SHOPIFY_API_URL || 'https://metallbude-de.myshopify.com/api/2026-01/graphql.json',
-  adminApiUrl: process.env.SHOPIFY_ADMIN_API_URL || 'https://metallbude-de.myshopify.com/admin/api/2026-01/graphql.json',
+  apiVersion: SHOPIFY_API_VERSION,
+  // The version segment is normalized to SHOPIFY_API_VERSION even when the
+  // URL comes from env — the version pin lives in git, not in a forgotten
+  // Render variable. Env still controls the shop domain if set.
+  apiUrl: _forceApiVersion(
+    process.env.SHOPIFY_API_URL ||
+      `https://metallbude-de.myshopify.com/api/${SHOPIFY_API_VERSION}/graphql.json`,
+  ),
+  adminApiUrl: _forceApiVersion(
+    process.env.SHOPIFY_ADMIN_API_URL ||
+      `https://metallbude-de.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+  ),
   cleverpushChannelId: process.env.CLEVERPUSH_CHANNEL_ID,
   cleverpushApiKey: process.env.CLEVERPUSH_API_KEY,
   mailerSendApiKey: process.env.MAILERSEND_API_KEY,
@@ -1520,7 +1536,6 @@ app.post('/debug/store-credit/adjust', express.json(), async (req, res) => {
 // Shopify Customer Account API token management
 
 // ===== Store Credit helpers (Admin GraphQL) =====
-const ADMIN_VERSION = '2024-10';
 
 async function adminGraphQL(query, variables) {
   const res = await axios.post(

@@ -5,7 +5,9 @@ const router = express.Router();
 
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE || process.env.SHOPIFY_SHOP_DOMAIN;
 const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-const ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION || '2024-10';
+// Pinned in git deliberately (no env override) — keep in sync with
+// SHOPIFY_API_VERSION in index.js when bumping quarterly.
+const ADMIN_API_VERSION = '2026-07';
 
 // 5-minute per-handle cache
 const SCRAPE_TTL_MS = 5 * 60 * 1000;
