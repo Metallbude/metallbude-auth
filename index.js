@@ -6789,6 +6789,380 @@ const authenticateAppToken = async (req, res, next) => {
 // once `authenticateAppToken` is defined.
 app.use(require('./routes/scrapeProductLink')(authenticateAppToken));
 
+// ========= Mobile Admin-API proxy (orders, tracking, discounts) ==========
+// Same story as /api/mobile/shipping-rates: the app used to run these
+// queries on-device with an EMBEDDED Admin token. That token was removed
+// for security, which silently 401'd order tracking, push-notification
+// deep-links to orders, the exchange-details section and the real-
+// discount-code lookups. The backend owns the Admin token, runs the exact
+// same GraphQL, and returns the RAW response so the app-side parsers stay
+// byte-identical. Order payloads contain PII (address, email), so unlike
+// shipping-rates these require an app session token. Mounted here because
+// `authenticateAppToken` must already be defined.
+
+const runAdminQueryRaw = async (query, variables) => {
+  const r = await axios.post(
+    config.adminApiUrl,
+    { query, variables },
+    {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json',
+      },
+      timeout: 20000,
+    },
+  );
+  return r.data;
+};
+
+const sendRawAdminResponse = (res, data) => {
+  if (data?.errors) return res.status(502).json({ errors: data.errors });
+  return res.json(data);
+};
+
+// Accept both full Order GIDs and bare numeric ids (the app sends both).
+// Restricting to Order GIDs also keeps node(id:) from resolving anything
+// but orders.
+const asOrderGid = (raw) => {
+  const s = (raw || '').toString().trim();
+  if (/^gid:\/\/shopify\/Order\/\d+$/.test(s)) return s;
+  if (/^\d+$/.test(s)) return `gid://shopify/Order/${s}`;
+  return null;
+};
+
+// Find an order id by a Shopify search string (the app sends
+// "name:1234" / "name:#1234"). Only id + name leave the shop.
+app.get('/api/mobile/order-search', authenticateAppToken, async (req, res) => {
+  try {
+    const q = (req.query.query || '').toString().trim();
+    if (!q || q.length > 64) {
+      return res.status(400).json({ error: 'Invalid query' });
+    }
+    const data = await runAdminQueryRaw(
+      `query findOrder($query: String!) {
+        orders(first: 1, query: $query) {
+          edges { node { id name } }
+        }
+      }`,
+      { query: q },
+    );
+    return sendRawAdminResponse(res, data);
+  } catch (e) {
+    console.error('❌ [order-search] error:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Full order incl. discount applications — the app's
+// getOrderWithRealDiscountCodes query, verbatim.
+app.get('/api/mobile/order-details', authenticateAppToken, async (req, res) => {
+  try {
+    const orderGid = asOrderGid(req.query.id);
+    if (!orderGid) {
+      return res.status(400).json({ error: 'Invalid order id' });
+    }
+    const data = await runAdminQueryRaw(
+      `query getOrder($id: ID!) {
+        node(id: $id) {
+          ... on Order {
+            id
+            name
+            orderNumber: name
+            processedAt
+            createdAt
+            displayFulfillmentStatus
+            displayFinancialStatus
+            totalPriceSet { shopMoney { amount currencyCode } }
+            subtotalPriceSet { shopMoney { amount currencyCode } }
+            totalTaxSet { shopMoney { amount currencyCode } }
+            totalShippingPriceSet { shopMoney { amount currencyCode } }
+            discountApplications(first: 10) {
+              edges {
+                node {
+                  ... on DiscountCodeApplication {
+                    code
+                    value {
+                      ... on MoneyV2 { amount currencyCode }
+                      ... on PricingPercentageValue { percentage }
+                    }
+                    targetSelection
+                    targetType
+                    allocationMethod
+                  }
+                  ... on AutomaticDiscountApplication {
+                    title
+                    value {
+                      ... on MoneyV2 { amount currencyCode }
+                      ... on PricingPercentageValue { percentage }
+                    }
+                    targetSelection
+                    targetType
+                    allocationMethod
+                  }
+                  ... on ScriptDiscountApplication {
+                    description
+                    title
+                    value {
+                      ... on MoneyV2 { amount currencyCode }
+                      ... on PricingPercentageValue { percentage }
+                    }
+                    targetSelection
+                    targetType
+                    allocationMethod
+                  }
+                  ... on ManualDiscountApplication {
+                    title
+                    description
+                    value {
+                      ... on MoneyV2 { amount currencyCode }
+                      ... on PricingPercentageValue { percentage }
+                    }
+                    targetSelection
+                    targetType
+                    allocationMethod
+                  }
+                }
+              }
+            }
+            shippingAddress {
+              firstName
+              lastName
+              company
+              address1
+              address2
+              city
+              zip
+              country
+              phone
+            }
+            lineItems(first: 50) {
+              edges {
+                node {
+                  id
+                  name
+                  quantity
+                  originalTotalSet { shopMoney { amount currencyCode } }
+                  discountedTotalSet { shopMoney { amount currencyCode } }
+                  originalUnitPriceSet { shopMoney { amount currencyCode } }
+                  discountedUnitPriceSet { shopMoney { amount currencyCode } }
+                  discountAllocations {
+                    allocatedAmountSet { shopMoney { amount currencyCode } }
+                    discountApplication {
+                      targetSelection
+                      targetType
+                      ... on DiscountCodeApplication { code }
+                      ... on AutomaticDiscountApplication { title }
+                      ... on ScriptDiscountApplication { description title }
+                      ... on ManualDiscountApplication { title description }
+                    }
+                  }
+                  taxLines {
+                    rate
+                    title
+                    priceSet { shopMoney { amount currencyCode } }
+                  }
+                  variant {
+                    id
+                    title
+                    sku
+                    image { url }
+                    price
+                    compareAtPrice
+                    selectedOptions { name value }
+                    product {
+                      id
+                      handle
+                      title
+                      featuredImage { url }
+                    }
+                  }
+                }
+              }
+            }
+            note
+            tags
+            phone
+            email
+          }
+        }
+      }`,
+      { id: orderGid },
+    );
+    return sendRawAdminResponse(res, data);
+  } catch (e) {
+    console.error('❌ [order-details] error:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Fulfillment tracking numbers/URLs for the order cards + details screen.
+app.get('/api/mobile/order-tracking', authenticateAppToken, async (req, res) => {
+  try {
+    const orderGid = asOrderGid(req.query.id);
+    if (!orderGid) {
+      return res.status(400).json({ error: 'Invalid order id' });
+    }
+    const data = await runAdminQueryRaw(
+      `query GetOrderTracking($orderId: ID!) {
+        node(id: $orderId) {
+          ... on Order {
+            id
+            name
+            fulfillments {
+              id
+              createdAt
+              status
+              trackingInfo { company number url }
+            }
+          }
+        }
+      }`,
+      { orderId: orderGid },
+    );
+    return sendRawAdminResponse(res, data);
+  } catch (e) {
+    console.error('❌ [order-tracking] error:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Exchange/return UI data (mb_return metafield + returns + line items) for
+// the Umtausch details section.
+app.get('/api/mobile/return-ui-data', authenticateAppToken, async (req, res) => {
+  try {
+    const orderGid = asOrderGid(req.query.id);
+    if (!orderGid) {
+      return res.status(400).json({ error: 'Invalid order id' });
+    }
+    const data = await runAdminQueryRaw(
+      `query GetReturnUI($orderId: ID!) {
+        node(id: $orderId) {
+          ... on Order {
+            id
+            name
+            metafield(namespace: "mb_return", key: "ui_exchange_data") {
+              value
+            }
+            returns(first: 5) {
+              nodes { id status }
+            }
+            lineItems(first: 25) {
+              nodes {
+                id
+                name
+                quantity
+                originalUnitPriceSet { shopMoney { amount } }
+                discountedTotalSet   { shopMoney { amount } }
+                customAttributes { key value }
+                variant {
+                  id
+                  title
+                  image { url }
+                  product { id title }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      { orderId: orderGid },
+    );
+    return sendRawAdminResponse(res, data);
+  } catch (e) {
+    console.error('❌ [return-ui-data] error:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Discount-code lookup for the discount manager's Admin fallback. No auth,
+// matching the existing unauthenticated /api/mobile/validate-code — it
+// exposes discount config, not customer data.
+app.get('/api/mobile/discount-lookup', async (req, res) => {
+  try {
+    const code = (req.query.code || '').toString().trim();
+    if (!code || code.length > 64) {
+      return res.status(400).json({ error: 'Invalid code' });
+    }
+    const data = await runAdminQueryRaw(
+      `query getDiscountCodeByCode($query: String!) {
+        codeDiscountNodes(first: 5, query: $query) {
+          edges {
+            node {
+              id
+              codeDiscount {
+                ... on DiscountCodeBasic {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                  usageLimit
+                  asyncUsageCount
+                  codes(first: 10) { edges { node { code } } }
+                  customerGets {
+                    value {
+                      ... on DiscountPercentage { percentage }
+                      ... on DiscountAmount { amount { amount currencyCode } }
+                    }
+                  }
+                  minimumRequirement {
+                    ... on DiscountMinimumSubtotal {
+                      greaterThanOrEqualToSubtotal { amount currencyCode }
+                    }
+                  }
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
+                }
+                ... on DiscountCodeFreeShipping {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                  usageLimit
+                  asyncUsageCount
+                  codes(first: 10) { edges { node { code } } }
+                  minimumRequirement {
+                    ... on DiscountMinimumSubtotal {
+                      greaterThanOrEqualToSubtotal { amount currencyCode }
+                    }
+                  }
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
+                }
+                ... on DiscountCodeBxgy {
+                  title
+                  status
+                  startsAt
+                  endsAt
+                  usageLimit
+                  asyncUsageCount
+                  codes(first: 10) { edges { node { code } } }
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      { query: code },
+    );
+    return sendRawAdminResponse(res, data);
+  } catch (e) {
+    console.error('❌ [discount-lookup] error:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+// ======================= end mobile Admin-API proxy =======================
+
 // GET /auth/validate - Validate app token
 app.get('/auth/validate', authenticateAppToken, (req, res) => {
   const session = req.session;
