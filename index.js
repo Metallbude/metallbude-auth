@@ -149,34 +149,43 @@ app.use(bundleOffersRoutes);
 let _shippingRatesCache = { at: 0, payload: null };
 const SHIPPING_RATES_TTL_MS = 60 * 60 * 1000;
 
-app.get('/api/mobile/shipping-rates', async (req, res) => {
+// Automatic free-shipping discounts exist only inside Shopify's own
+// checkout: the app's checkout preview computes shipping from raw
+// delivery-profile rates, and draft orders (the app-exclusive-price
+// path) don't apply AUTOMATIC discounts at all. During a free-shipping
+// campaign the app would therefore DISPLAY and CHARGE shipping while
+// the web checkout is free. This helper detects an active automatic
+// free-shipping discount; /api/mobile/shipping-rates then reports 0 and
+// app-checkout drafts get a 0-cost shipping line. Only unconditional
+// (no minimum, all countries) discounts qualify — a conditional one
+// depends on the cart, which the cart-less rates endpoint can't judge.
+// 5-min cache so a scheduled campaign switches on/off within minutes.
+let _autoFreeShippingCache = { at: 0, value: null };
+let _autoFreeShippingLastSeen = [];
+const AUTO_FREE_SHIPPING_TTL_MS = 5 * 60 * 1000;
+
+async function getActiveAutoFreeShipping() {
+  if (Date.now() - _autoFreeShippingCache.at < AUTO_FREE_SHIPPING_TTL_MS) {
+    return _autoFreeShippingCache.value;
+  }
   try {
-    if (
-      _shippingRatesCache.payload &&
-      Date.now() - _shippingRatesCache.at < SHIPPING_RATES_TTL_MS
-    ) {
-      return res.json(_shippingRatesCache.payload);
-    }
     const axios = require('axios');
     const r = await axios.post(
       config.adminApiUrl,
       {
-        query: `query getShippingRates {
-          deliveryProfiles(first: 10) {
-            edges { node { id name
-              profileLocationGroups {
-                locationGroupZones(first: 50) {
-                  edges { node {
-                    zone { countries { code { countryCode } } }
-                    methodDefinitions(first: 50) {
-                      edges { node { id name description
-                        rateProvider { ... on DeliveryRateDefinition { id price { amount currencyCode } } }
-                      } }
-                    }
-                  } }
+        query: `query autoFreeShipping {
+          automaticDiscountNodes(first: 50) {
+            edges { node { automaticDiscount {
+              __typename
+              ... on DiscountAutomaticFreeShipping {
+                title status startsAt endsAt
+                destinationSelection { __typename }
+                minimumRequirement { __typename
+                  ... on DiscountMinimumSubtotal { greaterThanOrEqualToSubtotal { amount } }
+                  ... on DiscountMinimumQuantity { greaterThanOrEqualToQuantity }
                 }
               }
-            } }
+            } } }
           }
         }`,
       },
@@ -185,15 +194,140 @@ app.get('/api/mobile/shipping-rates', async (req, res) => {
           'X-Shopify-Access-Token': config.adminToken,
           'Content-Type': 'application/json',
         },
-        timeout: 20000,
+        timeout: 15000,
       },
     );
-    if (r.data?.errors) {
-      console.error('❌ [shipping-rates] GraphQL errors:', r.data.errors);
-      return res.status(502).json({ errors: r.data.errors });
+    const edges = r.data?.data?.automaticDiscountNodes?.edges || [];
+    _autoFreeShippingLastSeen = edges
+      .map((e) => e?.node?.automaticDiscount)
+      .filter((d) => d && d.__typename === 'DiscountAutomaticFreeShipping');
+    const now = Date.now();
+    let active = null;
+    for (const e of edges) {
+      const d = e?.node?.automaticDiscount;
+      if (!d || d.__typename !== 'DiscountAutomaticFreeShipping') continue;
+      const starts = d.startsAt ? Date.parse(d.startsAt) : null;
+      const ends = d.endsAt ? Date.parse(d.endsAt) : null;
+      const inWindow =
+        starts !== null && starts <= now && (ends === null || now < ends);
+      if (!inWindow) continue;
+      let minOk = true;
+      const mr = d.minimumRequirement;
+      if (mr && mr.__typename === 'DiscountMinimumSubtotal') {
+        minOk = !(
+          parseFloat(mr.greaterThanOrEqualToSubtotal?.amount || '0') > 0
+        );
+      } else if (mr && mr.__typename === 'DiscountMinimumQuantity') {
+        minOk = !(parseInt(mr.greaterThanOrEqualToQuantity || '0', 10) > 1);
+      }
+      const allCountries =
+        !d.destinationSelection ||
+        d.destinationSelection.__typename === 'DiscountCountryAll';
+      if (minOk && allCountries) {
+        active = { title: d.title || 'Kostenloser Versand' };
+        break;
+      }
+      console.log(
+        'ℹ️ [free-shipping] active but conditional — NOT applied to app rates:',
+        d.title,
+      );
     }
-    _shippingRatesCache = { at: Date.now(), payload: r.data };
-    return res.json(r.data);
+    _autoFreeShippingCache = { at: Date.now(), value: active };
+    return active;
+  } catch (e) {
+    console.error('❌ [free-shipping] lookup failed:', e.message);
+    // Keep the last known value; retry after the normal TTL.
+    _autoFreeShippingCache = {
+      at: Date.now(),
+      value: _autoFreeShippingCache.value,
+    };
+    return _autoFreeShippingCache.value;
+  }
+}
+
+// TEMP diagnostic: verify what the free-shipping detector sees (the
+// campaign is scheduled, so the live zeroing can't be observed before
+// its start). Remove after the August campaign.
+app.get('/internal/free-shipping-state', async (req, res) => {
+  if (req.query.key !== 'fs-c1a7e9d2b4') return res.status(404).end();
+  _autoFreeShippingCache = { at: 0, value: null }; // force fresh lookup
+  const active = await getActiveAutoFreeShipping();
+  return res.json({
+    active,
+    seen: _autoFreeShippingLastSeen,
+    checkedAt: new Date().toISOString(),
+  });
+});
+
+app.get('/api/mobile/shipping-rates', async (req, res) => {
+  try {
+    let payload = null;
+    if (
+      _shippingRatesCache.payload &&
+      Date.now() - _shippingRatesCache.at < SHIPPING_RATES_TTL_MS
+    ) {
+      payload = _shippingRatesCache.payload;
+    }
+    const axios = require('axios');
+    if (!payload) {
+      const r = await axios.post(
+        config.adminApiUrl,
+        {
+          query: `query getShippingRates {
+            deliveryProfiles(first: 10) {
+              edges { node { id name
+                profileLocationGroups {
+                  locationGroupZones(first: 50) {
+                    edges { node {
+                      zone { countries { code { countryCode } } }
+                      methodDefinitions(first: 50) {
+                        edges { node { id name description
+                          rateProvider { ... on DeliveryRateDefinition { id price { amount currencyCode } } }
+                        } }
+                      }
+                    } }
+                  }
+                }
+              } }
+            }
+          }`,
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': config.adminToken,
+            'Content-Type': 'application/json',
+          },
+          timeout: 20000,
+        },
+      );
+      if (r.data?.errors) {
+        console.error('❌ [shipping-rates] GraphQL errors:', r.data.errors);
+        return res.status(502).json({ errors: r.data.errors });
+      }
+      _shippingRatesCache = { at: Date.now(), payload: r.data };
+      payload = r.data;
+    }
+
+    // During an active unconditional automatic free-shipping campaign,
+    // report every rate as 0 so the app's checkout preview matches what
+    // Shopify's checkout actually charges. The cache keeps the real
+    // rates; zeroing is applied per request so the campaign can end
+    // without a stale zeroed cache lingering.
+    const freeShipping = await getActiveAutoFreeShipping();
+    if (freeShipping) {
+      payload = JSON.parse(JSON.stringify(payload));
+      for (const pe of payload?.data?.deliveryProfiles?.edges || []) {
+        for (const lg of pe?.node?.profileLocationGroups || []) {
+          for (const ze of lg?.locationGroupZones?.edges || []) {
+            for (const me of ze?.node?.methodDefinitions?.edges || []) {
+              const price = me?.node?.rateProvider?.price;
+              if (price && price.amount !== undefined) price.amount = '0.0';
+            }
+          }
+        }
+      }
+    }
+    return res.json(payload);
   } catch (e) {
     console.error('❌ [shipping-rates] error:', e.message);
     return res.status(500).json({ error: e.message });
@@ -4726,6 +4860,21 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       }
     }
     if (shippingAddress) input.shippingAddress = shippingAddress;
+
+    // Draft-order checkouts don't apply Shopify's AUTOMATIC discounts,
+    // so during an automatic free-shipping campaign the app-price path
+    // would charge shipping while the web checkout is free. Preset a
+    // 0-cost shipping line on the draft — its invoice then checks out
+    // with free shipping, matching the storefront.
+    try {
+      const freeShipping = await getActiveAutoFreeShipping();
+      if (freeShipping) {
+        input.shippingLine = {
+          title: freeShipping.title || 'Kostenloser Versand',
+          price: '0.00',
+        };
+      }
+    } catch (_) {}
 
     const draftMutation =
       'mutation($input: DraftOrderInput!){ draftOrderCreate(input:$input){ draftOrder{ id invoiceUrl totalPrice shippingAddress { address1 city zip phone } } userErrors{ field message } } }';
