@@ -334,6 +334,339 @@ app.get('/api/mobile/shipping-rates', async (req, res) => {
   }
 });
 
+// === Shipping quote for the app's checkout preview ======================
+// The Storefront Cart API merges every shipping profile of a cart into ONE
+// delivery group with ONE summed option ("Shipping: 84.95"), while the
+// checkout splits the order into one shipment per profile and the
+// ship-offset Function (delivery_highest app) then makes every shipment
+// except the most expensive one free. A single Storefront quote therefore
+// shows the sum where the checkout charges only the highest group. This
+// endpoint reproduces the checkout: group the lines by delivery profile
+// (Admin API), quote each group on its own via the Storefront API and
+// apply the same "highest group only" rule.
+//
+// Profile membership is resolved per PRODUCT (profileItems.product). A
+// product whose variants are split across profiles would be attributed
+// to the first profile listing it - not the case in this shop.
+let _profileMapCache = { at: 0, byProduct: null, defaultProfile: null };
+let _profileMapRefresh = null;
+const PROFILE_MAP_TTL_MS = 15 * 60 * 1000;
+
+async function _shippingQuoteAdmin(query, variables) {
+  const r = await axios.post(
+    config.adminApiUrl,
+    { query, variables },
+    {
+      headers: {
+        'X-Shopify-Access-Token': config.adminToken,
+        'Content-Type': 'application/json',
+      },
+      timeout: 20000,
+    },
+  );
+  if (r.data?.errors) {
+    throw new Error(`Admin GraphQL: ${JSON.stringify(r.data.errors)}`);
+  }
+  return r.data.data;
+}
+
+async function _shippingQuoteStorefront(query, variables) {
+  const r = await axios.post(
+    config.apiUrl,
+    { query, variables },
+    {
+      headers: {
+        'X-Shopify-Storefront-Access-Token': config.storefrontToken,
+        'Content-Type': 'application/json',
+      },
+      timeout: 15000,
+    },
+  );
+  if (r.data?.errors) {
+    throw new Error(`Storefront GraphQL: ${JSON.stringify(r.data.errors)}`);
+  }
+  return r.data.data;
+}
+
+// product GID -> { id, name } of the NON-default profile it belongs to.
+// Everything else is in the default ("General") profile.
+async function _loadDeliveryProfileMap() {
+  const list = await _shippingQuoteAdmin(
+    `query { deliveryProfiles(first: 10) { edges { node { id name default } } } }`,
+  );
+  const profiles = (list?.deliveryProfiles?.edges || []).map((e) => e.node);
+  const defaultProfile = profiles.find((p) => p.default) || null;
+  const byProduct = new Map();
+  for (const p of profiles) {
+    if (p.default) continue;
+    let after = null;
+    for (let page = 0; page < 40; page++) {
+      const d = await _shippingQuoteAdmin(
+        `query($id: ID!, $after: String) {
+          deliveryProfile(id: $id) {
+            profileItems(first: 100, after: $after) {
+              edges { node { product { id } } }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }`,
+        { id: p.id, after },
+      );
+      const conn = d?.deliveryProfile?.profileItems;
+      for (const e of conn?.edges || []) {
+        const pid = e?.node?.product?.id;
+        if (pid && !byProduct.has(pid)) byProduct.set(pid, { id: p.id, name: p.name });
+      }
+      if (!conn?.pageInfo?.hasNextPage) break;
+      after = conn.pageInfo.endCursor;
+    }
+  }
+  return { byProduct, defaultProfile };
+}
+
+// Cached; refreshes in the background once stale so requests never wait
+// on the Admin API except on a cold start.
+async function _getDeliveryProfileMap() {
+  const age = Date.now() - _profileMapCache.at;
+  if (_profileMapCache.byProduct && age < PROFILE_MAP_TTL_MS) {
+    return _profileMapCache;
+  }
+  if (!_profileMapRefresh) {
+    _profileMapRefresh = _loadDeliveryProfileMap()
+      .then((m) => {
+        _profileMapCache = { at: Date.now(), ...m };
+      })
+      .catch((e) => {
+        console.error('❌ [shipping-quote] profile map refresh failed:', e.message);
+      })
+      .finally(() => {
+        _profileMapRefresh = null;
+      });
+  }
+  if (!_profileMapCache.byProduct) await _profileMapRefresh; // cold start
+  return _profileMapCache;
+}
+
+const _SHIPPING_QUOTE_GROUPS = `
+  deliveryGroups(first: 10) {
+    edges { node {
+      deliveryOptions { handle title estimatedCost { amount currencyCode } }
+      selectedDeliveryOption { handle title estimatedCost { amount currencyCode } }
+      discountAllocations { discountedAmount { amount currencyCode } }
+    } }
+  }`;
+
+// One profile group = one Storefront cart. Returns the option the checkout
+// preselects (cheapest) plus any shipping discount Shopify already applied.
+async function _quoteProfileGroup(lines, destination, buyerCountry) {
+  const variables = {
+    input: {
+      lines: lines.map((l) => ({ merchandiseId: l.variantId, quantity: l.quantity })),
+      buyerIdentity: { countryCode: buyerCountry },
+      delivery: {
+        addresses: [
+          {
+            address: { deliveryAddress: { countryCode: destination } },
+            selected: true,
+            oneTimeUse: true,
+            validationStrategy: 'COUNTRY_CODE_ONLY',
+          },
+        ],
+      },
+    },
+  };
+  const d = await _shippingQuoteStorefront(
+    `mutation($input: CartInput!) {
+      cartCreate(input: $input) {
+        cart { id ${_SHIPPING_QUOTE_GROUPS} }
+        userErrors { field message }
+      }
+    }`,
+    variables,
+  );
+  const payload = d?.cartCreate;
+  if (payload?.userErrors?.length) {
+    throw new Error(`cartCreate: ${JSON.stringify(payload.userErrors)}`);
+  }
+  let groups = payload?.cart?.deliveryGroups?.edges || [];
+  if (groups.length === 0 && payload?.cart?.id) {
+    await new Promise((r) => setTimeout(r, 700));
+    const again = await _shippingQuoteStorefront(
+      `query($id: ID!) { cart(id: $id) { id ${_SHIPPING_QUOTE_GROUPS} } }`,
+      { id: payload.cart.id },
+    );
+    groups = again?.cart?.deliveryGroups?.edges || [];
+  }
+  const options = [];
+  let discount = 0;
+  let selected = null;
+  for (const e of groups) {
+    const g = e?.node || {};
+    const opts = (g.deliveryOptions || [])
+      .map((o) => ({
+        handle: o.handle,
+        title: o.title || o.handle,
+        amount: parseFloat(o.estimatedCost?.amount || '0') || 0,
+        currencyCode: o.estimatedCost?.currencyCode || 'EUR',
+      }))
+      .sort((a, b) => a.amount - b.amount);
+    options.push(...opts);
+    if (opts.length === 0) continue;
+    const sel = g.selectedDeliveryOption
+      ? {
+          handle: g.selectedDeliveryOption.handle,
+          title: g.selectedDeliveryOption.title || g.selectedDeliveryOption.handle,
+          amount: parseFloat(g.selectedDeliveryOption.estimatedCost?.amount || '0') || 0,
+          currencyCode: g.selectedDeliveryOption.estimatedCost?.currencyCode || 'EUR',
+        }
+      : opts[0];
+    // Carts have one group unless they mix one-time and subscription lines.
+    if (!selected) selected = sel;
+    else selected = { ...selected, amount: selected.amount + sel.amount };
+    for (const a of g.discountAllocations || []) {
+      discount += parseFloat(a?.discountedAmount?.amount || '0') || 0;
+    }
+  }
+  return { selected, options, discount };
+}
+
+app.post('/api/mobile/shipping-quote', async (req, res) => {
+  try {
+    const rawLines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+    const lines = [];
+    for (const l of rawLines) {
+      let vid = typeof l?.variantId === 'string' ? l.variantId.trim() : '';
+      if (/^\d+$/.test(vid)) vid = `gid://shopify/ProductVariant/${vid}`;
+      if (!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(vid)) continue;
+      const qty = Math.floor(Number(l?.quantity));
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+      lines.push({ variantId: vid, quantity: qty });
+    }
+    if (lines.length === 0)
+      return res.status(400).json({ ok: false, error: 'No valid lines.' });
+    if (lines.length > 50)
+      return res.status(400).json({ ok: false, error: 'Too many lines (max 50).' });
+
+    const destination = String(req.body?.countryCode || '').trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(destination))
+      return res.status(400).json({ ok: false, error: 'countryCode required.' });
+    const buyerRaw = String(req.body?.buyerCountryCode || '').trim().toUpperCase();
+    const buyerCountry = /^[A-Z]{2}$/.test(buyerRaw) ? buyerRaw : destination;
+
+    // variant -> product (Storefront, cheap) and product -> profile (Admin, cached)
+    const [nodes, profileMap] = await Promise.all([
+      _shippingQuoteStorefront(
+        `query($ids: [ID!]!) {
+          nodes(ids: $ids) { ... on ProductVariant { id product { id title } } }
+        }`,
+        { ids: [...new Set(lines.map((l) => l.variantId))] },
+      ),
+      _getDeliveryProfileMap(),
+    ]);
+    const productByVariant = new Map();
+    for (const n of nodes?.nodes || []) {
+      if (n?.id && n?.product?.id) productByVariant.set(n.id, n.product);
+    }
+    const defaultProfile = profileMap.defaultProfile || { id: 'default', name: 'General' };
+    // Without the profile map (Admin API down on a cold start) everything
+    // lands in one group; a merged multi-profile quote is detected below.
+    const profileMapReady = Boolean(profileMap.byProduct);
+
+    const groups = new Map(); // profileId -> { profileId, profileName, lines, items }
+    for (const l of lines) {
+      const product = productByVariant.get(l.variantId);
+      const profile =
+        (profileMapReady && product && profileMap.byProduct.get(product.id)) ||
+        defaultProfile;
+      if (!groups.has(profile.id)) {
+        groups.set(profile.id, {
+          profileId: profile.id,
+          profileName: profile.name,
+          lines: [],
+          items: [],
+        });
+      }
+      const g = groups.get(profile.id);
+      g.lines.push(l);
+      g.items.push({
+        variantId: l.variantId,
+        productId: product?.id || null,
+        title: product?.title || null,
+        quantity: l.quantity,
+      });
+    }
+
+    const quoted = await Promise.all(
+      [...groups.values()].map(async (g) => {
+        const q = await _quoteProfileGroup(g.lines, destination, buyerCountry);
+        return {
+          profileId: g.profileId,
+          profileName: g.profileName,
+          items: g.items,
+          title: q.selected?.title || null,
+          amount: q.selected ? Math.round(q.selected.amount * 100) / 100 : null,
+          discount: Math.round(q.discount * 100) / 100,
+          currencyCode: q.selected?.currencyCode || null,
+          options: q.options,
+        };
+      }),
+    );
+
+    if (quoted.some((g) => g.amount === null)) {
+      // Shopify offers no rate for at least one group at this destination.
+      return res.json({ ok: true, available: false, reason: 'no_rate', groups: quoted });
+    }
+    if (
+      !profileMapReady &&
+      quoted.length === 1 &&
+      /^shipping$/i.test(quoted[0].title || '')
+    ) {
+      // "Shipping" is the generic title Shopify gives a MERGED multi-profile
+      // option - the sum, which the checkout will not charge. Without the
+      // profile map we cannot split it, so report no estimate.
+      return res.json({
+        ok: true,
+        available: false,
+        reason: 'profile_map_unavailable',
+        groups: quoted,
+      });
+    }
+
+    // ship-offset rule: with two or more groups that cost something, only
+    // the most expensive one is charged, the others are discounted 100 %.
+    const paying = quoted.filter((g) => g.amount > 0);
+    let rule = 'single_group';
+    if (paying.length >= 2) {
+      rule = 'highest_group_only';
+      const max = paying.reduce((a, b) => (b.amount > a.amount ? b : a));
+      for (const g of quoted) g.charged = g.profileId === max.profileId;
+    } else {
+      for (const g of quoted) g.charged = g.amount > 0;
+    }
+    let total = 0;
+    for (const g of quoted) {
+      if (g.charged) total += Math.max(0, g.amount - g.discount);
+    }
+    total = Math.round(total * 100) / 100;
+    const currencyCode =
+      quoted.find((g) => g.charged)?.currencyCode || quoted[0]?.currencyCode || 'EUR';
+    const chargedTitle = quoted.find((g) => g.charged)?.title || null;
+
+    return res.json({
+      ok: true,
+      available: true,
+      total,
+      currencyCode,
+      title: chargedTitle,
+      rule,
+      groups: quoted,
+    });
+  } catch (e) {
+    console.error('❌ [shipping-quote] error:', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // === TEMPORARY (2026-07-10): Universal/App Links one-shot setup =========
 // Registers the mobile app for iOS Universal Links + Android App Links via
 // Shopify's MobilePlatformApplication API, which populates the (currently
