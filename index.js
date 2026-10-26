@@ -5550,6 +5550,125 @@ app.get('/api/mobile/analytics', async (req, res) => {
   }
 });
 
+// --- GA4 app behaviour (powers the app command-center dashboard) ---
+// Reads the app's Firebase-linked GA4 property through the Analytics Data
+// API, reusing the service-account credentials already in
+// FIREBASE_SERVICE_ACCOUNT. Requires, one-time on the Google side: the
+// Analytics Data API enabled in the GCP project, and that service account
+// granted Viewer on the GA4 property. Key-gated like /analytics.
+let _ga4Client = null;
+function getGa4Client() {
+  if (_ga4Client) return _ga4Client;
+  const { BetaAnalyticsDataClient } = require('@google-analytics/data');
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (!raw) throw new Error('FIREBASE_SERVICE_ACCOUNT not set');
+  const sa = JSON.parse(raw);
+  _ga4Client = new BetaAnalyticsDataClient({
+    projectId: sa.project_id,
+    credentials: { client_email: sa.client_email, private_key: sa.private_key },
+  });
+  return _ga4Client;
+}
+const GA4_PROPERTY = `properties/${process.env.GA4_PROPERTY_ID || '493233271'}`;
+
+app.get('/api/mobile/app-insights', async (req, res) => {
+  try {
+    const requiredKey = process.env.ANALYTICS_KEY;
+    if (requiredKey) {
+      const provided = req.get('x-analytics-key') || req.query.key;
+      if (provided !== requiredKey) {
+        return res.status(401).json({ ok: false, error: 'Unauthorized.' });
+      }
+    }
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 90);
+    const client = getGa4Client();
+    const num = (v) => Number(v) || 0;
+    const firstMetric = (rep, i = 0) => num(rep?.rows?.[0]?.metricValues?.[i]?.value);
+    const sumMetric = (rep, i = 0) =>
+      (rep?.rows || []).reduce((s, r) => s + num(r.metricValues?.[i]?.value), 0);
+    const fmtDate = (d) =>
+      d && d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : d;
+
+    const metrics4 = [
+      { name: 'activeUsers' }, { name: 'sessions' },
+      { name: 'eventCount' }, { name: 'newUsers' },
+    ];
+    const range = [{ startDate: `${days - 1}daysAgo`, endDate: 'today' }];
+
+    // Realtime dimensions are a limited set — appVersion is NOT one of them,
+    // so the "now" view breaks down by platform only.
+    const [[rt], [period], [today], [byDay], [byVersion], [byPlatform]] =
+      await Promise.all([
+        client.runRealtimeReport({
+          property: GA4_PROPERTY,
+          metrics: [{ name: 'activeUsers' }],
+          dimensions: [{ name: 'platform' }],
+        }),
+        client.runReport({ property: GA4_PROPERTY, dateRanges: range, metrics: metrics4 }),
+        client.runReport({
+          property: GA4_PROPERTY,
+          dateRanges: [{ startDate: 'today', endDate: 'today' }],
+          metrics: metrics4,
+        }),
+        client.runReport({
+          property: GA4_PROPERTY, dateRanges: range,
+          dimensions: [{ name: 'date' }], metrics: [{ name: 'activeUsers' }],
+          orderBys: [{ dimension: { dimensionName: 'date' } }],
+        }),
+        client.runReport({
+          property: GA4_PROPERTY, dateRanges: range,
+          dimensions: [{ name: 'appVersion' }], metrics: [{ name: 'activeUsers' }],
+          orderBys: [{ metric: { metricName: 'activeUsers' }, desc: true }],
+          limit: 20,
+        }),
+        client.runReport({
+          property: GA4_PROPERTY, dateRanges: range,
+          dimensions: [{ name: 'platform' }], metrics: [{ name: 'activeUsers' }],
+          orderBys: [{ metric: { metricName: 'activeUsers' }, desc: true }],
+        }),
+      ]);
+
+    return res.json({
+      ok: true,
+      property: GA4_PROPERTY.replace('properties/', ''),
+      period: { days },
+      updatedAt: new Date().toISOString(),
+      realtime: {
+        activeUsers: sumMetric(rt),
+        minutesWindow: 30,
+        byPlatform: (rt?.rows || []).map((r) => ({
+          platform: r.dimensionValues?.[0]?.value || '(unknown)',
+          activeUsers: num(r.metricValues?.[0]?.value),
+        })),
+      },
+      today: {
+        activeUsers: firstMetric(today, 0), sessions: firstMetric(today, 1),
+        eventCount: firstMetric(today, 2), newUsers: firstMetric(today, 3),
+      },
+      window: {
+        activeUsers: firstMetric(period, 0), sessions: firstMetric(period, 1),
+        eventCount: firstMetric(period, 2), newUsers: firstMetric(period, 3),
+      },
+      activeByDay: (byDay?.rows || []).map((r) => ({
+        date: fmtDate(r.dimensionValues?.[0]?.value),
+        activeUsers: num(r.metricValues?.[0]?.value),
+      })),
+      versions: (byVersion?.rows || []).map((r) => ({
+        appVersion: r.dimensionValues?.[0]?.value || '(not set)',
+        activeUsers: num(r.metricValues?.[0]?.value),
+      })),
+      platforms: (byPlatform?.rows || []).map((r) => ({
+        platform: r.dimensionValues?.[0]?.value || '(unknown)',
+        activeUsers: num(r.metricValues?.[0]?.value),
+      })),
+    });
+  } catch (error) {
+    const detail = error?.details || error?.message || 'server error';
+    console.error('❌ [app-insights] error:', detail);
+    return res.status(500).json({ ok: false, error: detail });
+  }
+});
+
 // Push subscriber lookup for Campaign Studio: CleverPush's dashboard can't
 // show email/name columns in its subscription list, but our own
 // push_subscriptions store (written by /cleverpush/store-subscription on
@@ -7572,6 +7691,7 @@ app.get('/api/mobile/discount-lookup', async (req, res) => {
             node {
               id
               codeDiscount {
+                __typename
                 ... on DiscountCodeBasic {
                   title
                   status
