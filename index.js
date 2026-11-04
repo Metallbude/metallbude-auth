@@ -20664,7 +20664,15 @@ app.get('/zendesk/tickets/:ticketId/conversation', async (req, res) => {
     );
     const requesterId = ticketData.ticket?.requester_id;
     const thisTicket = ticketData.ticket;
-    const isMessagingTicket = /^Conversation with /i.test(thisTicket?.subject || '');
+    // Detect messaging-SDK tickets robustly. The subject is locale-dependent
+    // (EN "Conversation with …", DE "Konversation mit …"), so matching only the
+    // English string made German tickets fall through and return no messages.
+    // Prefer the channel, fall back to a multi-locale subject match.
+    const viaChannel = (thisTicket?.via?.channel || '').toLowerCase();
+    const isMessagingTicket =
+      viaChannel === 'native_messaging' ||
+      viaChannel === 'messaging' ||
+      /^(conversation with|konversation mit) /i.test(thisTicket?.subject || '');
 
     // For messaging SDK tickets, fetch messages from Sunshine Conversations API
     if (isMessagingTicket && isSuncoConfigured()) {
