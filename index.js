@@ -21612,6 +21612,172 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SUNSHINE CONVERSATIONS WEBHOOK — agent-reply push (replaces the ticket-trigger
+// path, which does NOT fire for messaging replies). Sunco fires conversation:message
+// on EVERY message; we push to the customer's devices only for AGENT (business)
+// messages. Configure in the Sunshine Conversations / Conversations integration:
+//   Webhook target: https://metallbude-auth.onrender.com/zendesk/webhook/sunco-message
+//   Trigger:        conversation:message
+// NOTE: this handler LOGS the full raw payload (🌞 [SUNCO]) so we can confirm the
+// exact schema from a real event, then tighten the parsing. Parses v1 and v2 shapes.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Shared: send a CleverPush notification to every device registered under an email.
+async function sendCleverPushToEmail(email, title, text, customData = {}) {
+  if (!config.cleverpushApiKey) {
+    console.warn('⚠️ CleverPush not configured');
+    return { sent: false, reason: 'no_api_key' };
+  }
+  const emailKey = String(email).toLowerCase();
+  let subscriptionIds = [];
+  if (firebaseEnabled && wishlistService) {
+    try {
+      const doc = await wishlistService.db.collection('push_subscriptions').doc(emailKey).get();
+      if (doc.exists) {
+        const data = doc.data();
+        if (Array.isArray(data.devices)) {
+          subscriptionIds = data.devices
+            .map(d => d.subscriptionId)
+            .filter(id => typeof id === 'string' && id.trim().length >= 10);
+        }
+        if (subscriptionIds.length === 0 && data.subscriptionId) subscriptionIds = [data.subscriptionId];
+      }
+    } catch (e) { console.error('❌ Firestore lookup failed:', e.message); }
+  }
+  if (subscriptionIds.length === 0) {
+    console.log(`⚠️ No push subscription found for ${emailKey}`);
+    return { sent: false, reason: 'no_subscription' };
+  }
+  if (subscriptionIds.length > 5) subscriptionIds = subscriptionIds.slice(-5); // SAFETY cap
+  let successCount = 0;
+  let lastResponse = null;
+  for (const subId of subscriptionIds) {
+    try {
+      const cp = await axios.post(
+        'https://api.cleverpush.com/notification/send',
+        {
+          channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+          title,
+          text,
+          subscriptionId: subId, // singular → targeted, never broadcast
+          customData,
+        },
+        { headers: { 'Authorization': config.cleverpushApiKey, 'Content-Type': 'application/json' }, timeout: 10000 }
+      );
+      lastResponse = cp.data || {};
+      successCount++;
+    } catch (e) {
+      console.error(`❌ CleverPush send failed for ${subId}:`, e.response?.data || e.message);
+    }
+  }
+  const recipientCount = lastResponse && (lastResponse.recipientCount || lastResponse.subscribers || lastResponse.count);
+  if (recipientCount && recipientCount > 5) {
+    console.error(`🛑 BROADCAST DETECTED! ${recipientCount} recipients. Response: ${JSON.stringify(lastResponse)}`);
+  } else {
+    console.log(`✅ Push sent to ${emailKey} (${successCount}/${subscriptionIds.length} devices)`);
+  }
+  return { sent: successCount > 0, count: successCount };
+}
+
+// Resolve the customer's email for a Sunco conversation (needed for agent messages,
+// where the message author is the business, not the customer). Logs what it finds.
+async function resolveSuncoConversationEmail(conversationId) {
+  if (!conversationId || !isSuncoConfigured()) return null;
+  try {
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/conversations/${encodeURIComponent(conversationId)}`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    const convo = data.conversation || data;
+    console.log('🌞 [SUNCO] conversation:', JSON.stringify(convo).substring(0, 1500));
+    const participants = convo.participants || [];
+    const userId = participants.map(p => p.userId).find(Boolean) || convo.userId || null;
+    if (!userId) { console.log('🌞 [SUNCO] no userId on conversation'); return null; }
+    const { data: userData } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/users/${encodeURIComponent(userId)}`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    const user = userData.user || userData;
+    console.log('🌞 [SUNCO] user:', JSON.stringify(user).substring(0, 1000));
+    const email = user.profile?.email
+      || (user.identities || []).find(i => i.type === 'email' && i.value)?.value
+      || null;
+    return email ? String(email).toLowerCase() : null;
+  } catch (e) {
+    console.error('🌞 [SUNCO] resolveEmail failed:', e.response?.status, e.response?.data || e.message);
+    return null;
+  }
+}
+
+app.post('/zendesk/webhook/sunco-message', async (req, res) => {
+  // Respond 200 fast so Sunco does not retry; process inline (payloads are small).
+  try {
+    console.log('🌞 [SUNCO] headers:', JSON.stringify({
+      'x-api-key': req.headers['x-api-key'] ? '(present)' : undefined,
+      'x-smooch-signature': req.headers['x-smooch-signature'] ? '(present)' : undefined,
+      'content-type': req.headers['content-type'],
+    }));
+    console.log('🌞 [SUNCO] body:', JSON.stringify(req.body).substring(0, 3000));
+
+    // v2: { events: [{ type, payload: { conversation, message } }] }
+    // v1: { trigger, payload: { conversation, message } }
+    const events = (Array.isArray(req.body.events) && req.body.events.length)
+      ? req.body.events
+      : (req.body.trigger ? [{ type: req.body.trigger, payload: req.body.payload || req.body }] : []);
+
+    for (const event of events) {
+      const type = event.type || event.trigger;
+      if (type !== 'conversation:message') continue;
+
+      const payload = event.payload || {};
+      const message = payload.message || {};
+      const conversation = payload.conversation || {};
+
+      const authorType = message.author?.type || message.role || '';
+      const isBusiness = authorType === 'business' || authorType === 'appMaker';
+      if (!isBusiness) {
+        console.log(`⏭️ [SUNCO] non-business message (author: ${authorType || 'unknown'}) — skip`);
+        continue;
+      }
+
+      const text = (message.content?.text || message.text || '').trim();
+      if (!text) { console.log('⏭️ [SUNCO] business message with no text — skip'); continue; }
+      const title = message.author?.displayName || 'Metallbude Support';
+
+      // Dedup 60s (Sunco can deliver duplicates) on conversation + text.
+      const crypto = require('crypto');
+      const dedupKey = crypto.createHash('sha256')
+        .update(`sunco:${conversation.id}:${text}`).digest('hex').substring(0, 16);
+      if (!global._suncoDedup) global._suncoDedup = new Map();
+      if (global._suncoDedup.has(dedupKey)) {
+        console.log(`⏭️ [SUNCO] duplicate for conversation ${conversation.id}`);
+        continue;
+      }
+      global._suncoDedup.set(dedupKey, Date.now());
+      setTimeout(() => global._suncoDedup.delete(dedupKey), 60000);
+
+      const email = await resolveSuncoConversationEmail(conversation.id);
+      if (!email) {
+        console.log(`⚠️ [SUNCO] no customer email for conversation ${conversation.id} — cannot push`);
+        continue;
+      }
+
+      console.log(`🔔 [SUNCO] agent message in conversation ${conversation.id} → ${email}`);
+      await sendCleverPushToEmail(email, title, text, {
+        type: 'zendesk_chat_reply',
+        conversationId: String(conversation.id || ''),
+        fullMessage: text,
+      });
+    }
+
+    return res.status(200).json({ received: true });
+  } catch (e) {
+    console.error('❌ [SUNCO] webhook error:', e.message);
+    return res.status(200).json({ received: true });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PAQATO TRACKING EVENTS — Fetch tracking timeline for app
 // GET /paqato/tracking/:orderNumber
 // Returns the stored PAQATO events for in-app shipment tracking timeline.
