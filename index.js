@@ -21717,7 +21717,31 @@ async function resolveSuncoConversationEmail(conversationId) {
 // restart confirms the existing one and never piles up duplicates.
 // ─────────────────────────────────────────────────────────────────────────────
 const SUNCO_WEBHOOK_TARGET = 'https://metallbude-auth.onrender.com/zendesk/webhook/sunco-message';
+const SUNCO_PUBLIC_BASE = 'https://metallbude-auth.onrender.com';
 const SUNCO_WEBHOOK_MARKER = 'Metallbude App Push (auto)';
+
+// Wait until our OWN public URL serves 200 to a HEAD. On Render the public URL 502s
+// for a few seconds after boot until the new instance is in rotation, and Sunco
+// HEAD-validates the webhook target before creating it — so creating too early (right
+// on app.listen) races that window and fails with "HEAD request ... failed". Gate the
+// create on the public URL actually being reachable from outside first.
+async function waitForPublicUrl(maxAttempts = 36, delayMs = 5000) {
+  for (let i = 1; i <= maxAttempts; i++) {
+    try {
+      const r = await axios.head(SUNCO_PUBLIC_BASE, { timeout: 8000, validateStatus: () => true });
+      if (r.status === 200) {
+        console.log(`🌞 [SUNCO-SETUP] public URL live (200) after ${i} check(s)`);
+        return true;
+      }
+      console.log(`🌞 [SUNCO-SETUP] public URL not ready (status ${r.status}, ${i}/${maxAttempts})`);
+    } catch (e) {
+      console.log(`🌞 [SUNCO-SETUP] public URL unreachable (${e.code || e.message}, ${i}/${maxAttempts})`);
+    }
+    if (i < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
+  }
+  console.warn('⚠️ [SUNCO-SETUP] public URL never returned 200 — trying create anyway');
+  return false;
+}
 
 async function ensureSuncoWebhook() {
   if (!isSuncoConfigured()) {
@@ -21725,6 +21749,9 @@ async function ensureSuncoWebhook() {
     return;
   }
   try {
+    // 0) Don't ask Sunco to validate our target until our public URL is actually live.
+    await waitForPublicUrl();
+
     // 1) Already created on a previous boot? Detect by our displayName marker
     //    (top-level field, always returned in the integration list).
     const listUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/integrations?page[size]=100`;
@@ -21738,7 +21765,8 @@ async function ensureSuncoWebhook() {
       return;
     }
 
-    // 2) Not found — create a custom integration carrying the webhook.
+    // 2) Not found — create a custom integration carrying the webhook. Retry a few
+    //    times in case Sunco's HEAD still races our edge coming into rotation.
     const createUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/integrations`;
     const body = {
       type: 'custom',
@@ -21751,14 +21779,28 @@ async function ensureSuncoWebhook() {
         includeFullUser: true,
       }],
     };
-    const { data: created } = await axios.post(createUrl, body, {
-      headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' },
-    });
-    const integ = created.integration || created;
-    const hook = (integ.webhooks || [])[0] || {};
-    console.log(`✅ [SUNCO-SETUP] Created webhook → ${SUNCO_WEBHOOK_TARGET}`);
-    console.log(`✅ [SUNCO-SETUP] integration=${integ.id} webhook=${hook.id} triggers=${JSON.stringify(hook.triggers)}`);
-    if (hook.secret) console.log(`🔑 [SUNCO-SETUP] webhook secret=${hook.secret}`);
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const { data: created } = await axios.post(createUrl, body, {
+          headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' },
+        });
+        const integ = created.integration || created;
+        const hook = (integ.webhooks || [])[0] || {};
+        console.log(`✅ [SUNCO-SETUP] Created webhook → ${SUNCO_WEBHOOK_TARGET}`);
+        console.log(`✅ [SUNCO-SETUP] integration=${integ.id} webhook=${hook.id} triggers=${JSON.stringify(hook.triggers)}`);
+        if (hook.secret) console.log(`🔑 [SUNCO-SETUP] webhook secret=${hook.secret}`);
+        return;
+      } catch (e) {
+        lastErr = e;
+        const status = e.response?.status;
+        const bodyTxt = JSON.stringify(e.response?.data || e.message).substring(0, 400);
+        console.warn(`⚠️ [SUNCO-SETUP] create attempt ${attempt}/3 failed: ${status} ${bodyTxt}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 10000));
+      }
+    }
+    console.error('❌ [SUNCO-SETUP] ensure failed after retries:', lastErr?.response?.status,
+      JSON.stringify(lastErr?.response?.data || lastErr?.message).substring(0, 800));
   } catch (e) {
     console.error('❌ [SUNCO-SETUP] ensure failed:', e.response?.status,
       JSON.stringify(e.response?.data || e.message).substring(0, 800));
