@@ -21817,6 +21817,38 @@ app.get('/', (req, res) => {
   res.status(200).json({ ok: true, service: 'metallbude-auth' });
 });
 
+// Read-only diagnostic (no secrets): is our Sunco agent-reply webhook registered?
+app.get('/zendesk/webhook/sunco-status', async (req, res) => {
+  if (!isSuncoConfigured()) return res.status(200).json({ configured: false });
+  try {
+    const { data } = await axios.get(
+      `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/integrations?page[size]=100`,
+      { headers: { 'Authorization': getSuncoAuthHeader() } }
+    );
+    const integrations = data.integrations || [];
+    const mine = integrations.find(i => i.displayName === SUNCO_WEBHOOK_MARKER);
+    let targets = (mine?.webhooks || []).map(h => ({ target: h.target, triggers: h.triggers }));
+    if (mine && targets.length === 0) {
+      try {
+        const { data: wh } = await axios.get(
+          `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/integrations/${mine.id}/webhooks`,
+          { headers: { 'Authorization': getSuncoAuthHeader() } }
+        );
+        targets = (wh.webhooks || []).map(h => ({ target: h.target, triggers: h.triggers }));
+      } catch (_) {}
+    }
+    return res.status(200).json({
+      configured: true,
+      webhookPresent: !!mine,
+      integrationId: mine?.id || null,
+      targets,
+      totalIntegrations: integrations.length,
+    });
+  } catch (e) {
+    return res.status(200).json({ configured: true, error: e.response?.status || e.message });
+  }
+});
+
 app.post('/zendesk/webhook/sunco-message', async (req, res) => {
   // Respond 200 fast so Sunco does not retry; process inline (payloads are small).
   try {
