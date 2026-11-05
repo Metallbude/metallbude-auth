@@ -21849,6 +21849,24 @@ app.get('/zendesk/webhook/sunco-status', async (req, res) => {
   }
 });
 
+// Resolve the customer email straight from a Sunco webhook payload. The requester
+// email rides in conversation.metadata on EVERY event (a zen:ticket_field:* value),
+// and user-authored messages also carry author.user.profile.email — so we never need
+// the conversation API (which returns no participants/userId for these tickets).
+function resolveEmailFromSuncoPayload(payload) {
+  const message = payload.message || {};
+  const conversation = payload.conversation || {};
+  const authorUser = message.author?.user;
+  const fromAuthor = authorUser?.profile?.email
+    || (authorUser?.identities || []).find(i => i?.type === 'email' && i?.value)?.value;
+  if (fromAuthor) return String(fromAuthor).toLowerCase();
+  const md = conversation.metadata || {};
+  const mdEmail = Object.values(md)
+    .find(v => typeof v === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v));
+  if (mdEmail) return String(mdEmail).toLowerCase();
+  return null;
+}
+
 app.post('/zendesk/webhook/sunco-message', async (req, res) => {
   // Respond 200 fast so Sunco does not retry; process inline (payloads are small).
   try {
@@ -21880,6 +21898,15 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
         continue;
       }
 
+      // Only push REAL human agent replies — skip the automated answerBot/flow
+      // messages ("Hey! Do you have any questions?", "Thank you! Our team …"),
+      // which arrive with source.type "zd:answerBot".
+      const sourceType = message.source?.type || '';
+      if (sourceType === 'zd:answerBot' || sourceType.startsWith('zd:answerBot')) {
+        console.log(`⏭️ [SUNCO] automated bot message (source: ${sourceType}) — skip`);
+        continue;
+      }
+
       const text = (message.content?.text || message.text || '').trim();
       if (!text) { console.log('⏭️ [SUNCO] business message with no text — skip'); continue; }
       const title = message.author?.displayName || 'Metallbude Support';
@@ -21896,7 +21923,10 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
       global._suncoDedup.set(dedupKey, Date.now());
       setTimeout(() => global._suncoDedup.delete(dedupKey), 60000);
 
-      const email = await resolveSuncoConversationEmail(conversation.id);
+      // Email from the payload first (metadata/author); the API lookup is only a
+      // fallback (it returns no participants/userId for these messaging tickets).
+      let email = resolveEmailFromSuncoPayload(payload);
+      if (!email) email = await resolveSuncoConversationEmail(conversation.id);
       if (!email) {
         console.log(`⚠️ [SUNCO] no customer email for conversation ${conversation.id} — cannot push`);
         continue;
