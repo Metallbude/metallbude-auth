@@ -21765,6 +21765,16 @@ async function ensureSuncoWebhook() {
   }
 }
 
+// Sunco HEAD-validates the target URL before creating a webhook ("verify that the
+// domain exists and a service is running"). Express serves HEAD via this GET route,
+// so the validation gets a 200. Root route covers the host-level check too.
+app.get('/zendesk/webhook/sunco-message', (req, res) => {
+  res.status(200).json({ ok: true, endpoint: 'sunco-message' });
+});
+app.get('/', (req, res) => {
+  res.status(200).json({ ok: true, service: 'metallbude-auth' });
+});
+
 app.post('/zendesk/webhook/sunco-message', async (req, res) => {
   // Respond 200 fast so Sunco does not retry; process inline (payloads are small).
   try {
