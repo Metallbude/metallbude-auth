@@ -21918,7 +21918,7 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
 
       const text = (message.content?.text || message.text || '').trim();
       if (!text) { console.log('⏭️ [SUNCO] business message with no text — skip'); continue; }
-      const title = 'Metallbude'; // customers see the brand, not the internal agent name
+      const title = 'Metallbude Support'; // brand + context; never the internal agent name
 
       // Dedup 60s (Sunco can deliver duplicates) on conversation + text.
       const crypto = require('crypto');
