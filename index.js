@@ -21709,6 +21709,62 @@ async function resolveSuncoConversationEmail(conversationId) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// One-time (idempotent) setup: ensure a Sunshine Conversations webhook exists that
+// POSTs conversation:message events to our handler. Sunco webhooks can ONLY be
+// created via the API (there is no Zendesk Admin-UI button), so the backend ensures
+// it on boot. Idempotent: detects our integration by displayName marker, so a
+// restart confirms the existing one and never piles up duplicates.
+// ─────────────────────────────────────────────────────────────────────────────
+const SUNCO_WEBHOOK_TARGET = 'https://metallbude-auth.onrender.com/zendesk/webhook/sunco-message';
+const SUNCO_WEBHOOK_MARKER = 'Metallbude App Push (auto)';
+
+async function ensureSuncoWebhook() {
+  if (!isSuncoConfigured()) {
+    console.log('🌞 [SUNCO-SETUP] Sunco not configured — skipping webhook ensure');
+    return;
+  }
+  try {
+    // 1) Already created on a previous boot? Detect by our displayName marker
+    //    (top-level field, always returned in the integration list).
+    const listUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/integrations?page[size]=100`;
+    const { data } = await axios.get(listUrl, { headers: { 'Authorization': getSuncoAuthHeader() } });
+    const integrations = data.integrations || [];
+    const existing = integrations.find(i => i.displayName === SUNCO_WEBHOOK_MARKER);
+    if (existing) {
+      const hooks = existing.webhooks || [];
+      const triggers = hooks.map(h => (h.triggers || []).join(',')).join(' | ');
+      console.log(`✅ [SUNCO-SETUP] Webhook already present (integration ${existing.id}; triggers ${triggers || '?'})`);
+      return;
+    }
+
+    // 2) Not found — create a custom integration carrying the webhook.
+    const createUrl = `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/integrations`;
+    const body = {
+      type: 'custom',
+      status: 'active',
+      displayName: SUNCO_WEBHOOK_MARKER,
+      webhooks: [{
+        target: SUNCO_WEBHOOK_TARGET,
+        triggers: ['conversation:message'],
+        includeFullSource: true,
+        includeFullUser: true,
+      }],
+    };
+    const { data: created } = await axios.post(createUrl, body, {
+      headers: { 'Authorization': getSuncoAuthHeader(), 'Content-Type': 'application/json' },
+    });
+    const integ = created.integration || created;
+    const hook = (integ.webhooks || [])[0] || {};
+    console.log(`✅ [SUNCO-SETUP] Created webhook → ${SUNCO_WEBHOOK_TARGET}`);
+    console.log(`✅ [SUNCO-SETUP] integration=${integ.id} webhook=${hook.id} triggers=${JSON.stringify(hook.triggers)}`);
+    if (hook.secret) console.log(`🔑 [SUNCO-SETUP] webhook secret=${hook.secret}`);
+  } catch (e) {
+    console.error('❌ [SUNCO-SETUP] ensure failed:', e.response?.status,
+      JSON.stringify(e.response?.data || e.message).substring(0, 800));
+  }
+}
+
 app.post('/zendesk/webhook/sunco-message', async (req, res) => {
   // Respond 200 fast so Sunco does not retry; process inline (payloads are small).
   try {
@@ -22470,6 +22526,6 @@ app.post('/zendesk/webhook/shipment-update', async (req, res) => {
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-  
-  // 🔥 PRODUCTION: Show new configuration
+  // Ensure the Sunshine Conversations agent-reply webhook exists (idempotent).
+  ensureSuncoWebhook();
 });
