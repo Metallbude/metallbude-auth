@@ -21436,6 +21436,15 @@ app.get('/admin/inspect-subscription', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/zendesk/webhook/chat-reply', async (req, res) => {
+  // RETIRED 2026-11-05: agent-reply pushes now run through the Sunshine
+  // Conversations webhook (/zendesk/webhook/sunco-message) — a clean "Metallbude"
+  // push that skips bot messages. This legacy path produced the noisy
+  // "System / In den App-Chat geschrieben:" notifications (current_user resolves
+  // to "System" for API/dashboard replies). Acknowledge and do nothing. The
+  // Zendesk trigger can stay or be deactivated; remove this return to re-enable.
+  return res.json({ received: true, retired: true });
+
+  // eslint-disable-next-line no-unreachable
   try {
     // Verify webhook authenticity
     if (ZENDESK_WEBHOOK_SECRET) {
@@ -21909,7 +21918,7 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
 
       const text = (message.content?.text || message.text || '').trim();
       if (!text) { console.log('⏭️ [SUNCO] business message with no text — skip'); continue; }
-      const title = message.author?.displayName || 'Metallbude Support';
+      const title = 'Metallbude'; // customers see the brand, not the internal agent name
 
       // Dedup 60s (Sunco can deliver duplicates) on conversation + text.
       const crypto = require('crypto');
