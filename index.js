@@ -5841,6 +5841,72 @@ app.post('/api/mobile/analytics/backfill-channel-tags', async (req, res) => {
   }
 });
 
+// ── App Command Center feed: both dashboard db docs in one call ──
+// Returns { insights, metrics } exactly as the "App Command Center" artifact's
+// db docs expect (insights/latest = raw app-insights; metrics/latest = the
+// 14-day SALES-deck shape). The refresh job just writes these two verbatim —
+// the sales transform (daily/today/split buckets, Europe/Berlin) lives here.
+function buildCommandCenterSalesDoc(a) {
+  const TZ = 'Europe/Berlin';
+  const berlinDate = (iso) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso));
+  const recent = a.recent || [];
+  const byDate = {};
+  for (const o of recent) {
+    const d = berlinDate(o.createdAt);
+    (byDate[d] || (byDate[d] = { revenue: 0, orders: 0 }));
+    byDate[d].revenue += Number(o.total) || 0;
+    byDate[d].orders += 1;
+  }
+  const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
+  const todayMid = new Date(todayStr + 'T12:00:00Z');
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const dd = new Date(todayMid); dd.setUTCDate(dd.getUTCDate() - i);
+    const ds = dd.toISOString().slice(0, 10);
+    days.push({ date: ds, revenue: +(((byDate[ds] || {}).revenue) || 0).toFixed(2), orders: (byDate[ds] || {}).orders || 0 });
+  }
+  return {
+    updatedAt: new Date().toISOString(),
+    periodDays: 14,
+    since: new Date(todayMid.getTime() - 13 * 86400000).toISOString(),
+    currency: a.currency || 'EUR',
+    total: { orders: (a.total || {}).orders || 0, revenue: (a.total || {}).revenue || 0, aov: (a.total || {}).averageOrderValue || 0 },
+    sales: a.sales || {},
+    split: {
+      appOnlyPrice: { orders: (a.appOnlyPrice || {}).orders || 0, revenue: (a.appOnlyPrice || {}).revenue || 0 },
+      appNormal: { orders: (a.appNormalPrice || {}).orders || 0, revenue: (a.appNormalPrice || {}).revenue || 0 },
+    },
+    daily: days,
+    today: days[days.length - 1],
+    yesterday: days[days.length - 2],
+    recent: recent.slice(0, 25).map((o) => ({ name: o.name, total: o.total, createdAt: o.createdAt, type: o.type, adminUrl: o.adminUrl })),
+    scannedOrders: a.scannedOrders, truncated: a.truncated,
+  };
+}
+
+app.get('/api/mobile/command-center', async (req, res) => {
+  try {
+    const requiredKey = process.env.ANALYTICS_KEY;
+    if (requiredKey) {
+      const provided = req.get('x-analytics-key') || req.query.key;
+      if (provided !== requiredKey) return res.status(401).json({ ok: false, error: 'Unauthorized.' });
+    }
+    const base = `http://127.0.0.1:${PORT}`;
+    const keyQS = requiredKey ? `&key=${encodeURIComponent(requiredKey)}` : '';
+    const [insights, analytics] = await Promise.all([
+      axios.get(`${base}/api/mobile/app-insights?days=7${keyQS}`).then((r) => r.data),
+      axios.get(`${base}/api/mobile/analytics?days=14${keyQS}`).then((r) => r.data),
+    ]);
+    const metrics = buildCommandCenterSalesDoc(analytics);
+    return res.json({ ok: true, insights, metrics });
+  } catch (error) {
+    const detail = error?.response?.data?.error || error?.message || 'server error';
+    console.error('❌ [command-center] error:', detail);
+    return res.status(500).json({ ok: false, error: detail });
+  }
+});
+
 // One-off maintenance: tag app-price orders created before the tagging fix.
 // Finds draft orders whose line items carry our 'App-Preis' discount (the
 // marker every app-checkout draft has) and adds the mobile_app tags to their
