@@ -21697,12 +21697,9 @@ app.post('/zendesk/webhook/chat-reply', async (req, res) => {
 // exact schema from a real event, then tighten the parsing. Parses v1 and v2 shapes.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Shared: send a CleverPush notification to every device registered under an email.
-async function sendCleverPushToEmail(email, title, text, customData = {}) {
-  if (!config.cleverpushApiKey) {
-    console.warn('⚠️ CleverPush not configured');
-    return { sent: false, reason: 'no_api_key' };
-  }
+// Shared: every CleverPush subscription registered under an email (Firestore
+// push_subscriptions/<email>, written by the app's /cleverpush/store-subscription).
+async function getPushSubscriptionIdsForEmail(email) {
   const emailKey = String(email).toLowerCase();
   let subscriptionIds = [];
   if (firebaseEnabled && wishlistService) {
@@ -21719,11 +21716,35 @@ async function sendCleverPushToEmail(email, title, text, customData = {}) {
       }
     } catch (e) { console.error('❌ Firestore lookup failed:', e.message); }
   }
+  if (subscriptionIds.length > 5) subscriptionIds = subscriptionIds.slice(-5); // SAFETY cap
+  return subscriptionIds;
+}
+
+// Shared: send a CleverPush notification to every device registered under an email.
+async function sendCleverPushToEmail(email, title, text, customData = {}) {
+  if (!config.cleverpushApiKey) {
+    console.warn('⚠️ CleverPush not configured');
+    return { sent: false, reason: 'no_api_key' };
+  }
+  const emailKey = String(email).toLowerCase();
+  const subscriptionIds = await getPushSubscriptionIdsForEmail(emailKey);
   if (subscriptionIds.length === 0) {
     console.log(`⚠️ No push subscription found for ${emailKey}`);
     return { sent: false, reason: 'no_subscription' };
   }
-  if (subscriptionIds.length > 5) subscriptionIds = subscriptionIds.slice(-5); // SAFETY cap
+  return sendCleverPushToSubscriptionIds(subscriptionIds, title, text, customData, emailKey);
+}
+
+// Shared: send one targeted CleverPush notification per subscription ID (max 5).
+// `label` is only for logging (an email, or "conversation <id>" for guests).
+async function sendCleverPushToSubscriptionIds(subscriptionIdsIn, title, text, customData = {}, label = '') {
+  if (!config.cleverpushApiKey) {
+    console.warn('⚠️ CleverPush not configured');
+    return { sent: false, reason: 'no_api_key' };
+  }
+  const subscriptionIds = [...new Set(subscriptionIdsIn || [])].slice(0, 5); // SAFETY cap
+  if (subscriptionIds.length === 0) return { sent: false, reason: 'no_subscription' };
+  const emailKey = label;
   let successCount = 0;
   let lastResponse = null;
   for (const subId of subscriptionIds) {
@@ -21834,9 +21855,33 @@ async function ensureSuncoWebhook() {
     const integrations = data.integrations || [];
     const existing = integrations.find(i => i.displayName === SUNCO_WEBHOOK_MARKER);
     if (existing) {
-      const hooks = existing.webhooks || [];
+      let hooks = existing.webhooks || [];
       const triggers = hooks.map(h => (h.triggers || []).join(',')).join(' | ');
       console.log(`✅ [SUNCO-SETUP] Webhook already present (integration ${existing.id}; triggers ${triggers || '?'})`);
+      // Learn the webhook secret so the handler can verify X-API-Key.
+      if (!process.env.SUNCO_WEBHOOK_SECRET) {
+        let hook = hooks.find(h => h.target === SUNCO_WEBHOOK_TARGET) || hooks[0];
+        if (!hook?.secret) {
+          try {
+            const { data: wh } = await axios.get(
+              `${ZENDESK_BASE_URL}/sc/v2/apps/${ZENDESK_SUNCO_APP_ID}/integrations/${existing.id}/webhooks`,
+              { headers: { 'Authorization': getSuncoAuthHeader() } }
+            );
+            hooks = wh.webhooks || [];
+            hook = hooks.find(h => h.target === SUNCO_WEBHOOK_TARGET) || hooks[0];
+          } catch (e) {
+            console.warn('⚠️ [SUNCO-SETUP] could not list webhooks:', e.response?.status || e.message);
+          }
+        }
+        if (hook?.secret) {
+          suncoWebhookSecret = hook.secret;
+          console.log('🔐 [SUNCO-SETUP] webhook secret loaded — X-API-Key verification ON');
+        } else {
+          console.warn('⚠️ [SUNCO-SETUP] webhook secret not returned by Sunco — verification OFF (set SUNCO_WEBHOOK_SECRET)');
+        }
+      } else {
+        console.log('🔐 [SUNCO-SETUP] SUNCO_WEBHOOK_SECRET set — X-API-Key verification ON');
+      }
       return;
     }
 
@@ -21864,7 +21909,10 @@ async function ensureSuncoWebhook() {
         const hook = (integ.webhooks || [])[0] || {};
         console.log(`✅ [SUNCO-SETUP] Created webhook → ${SUNCO_WEBHOOK_TARGET}`);
         console.log(`✅ [SUNCO-SETUP] integration=${integ.id} webhook=${hook.id} triggers=${JSON.stringify(hook.triggers)}`);
-        if (hook.secret) console.log(`🔑 [SUNCO-SETUP] webhook secret=${hook.secret}`);
+        if (hook.secret && !process.env.SUNCO_WEBHOOK_SECRET) {
+          suncoWebhookSecret = hook.secret;
+          console.log('🔐 [SUNCO-SETUP] webhook secret captured — X-API-Key verification ON');
+        }
         return;
       } catch (e) {
         lastErr = e;
@@ -21942,9 +21990,50 @@ function resolveEmailFromSuncoPayload(payload) {
   return null;
 }
 
+// Push-by-device: the app tags every chat with `app_push_<hex(CleverPush
+// subscriptionId)>` (hex keeps the case-sensitive ID safe inside a Zendesk tag).
+// The tag rides in conversation.metadata['zen:ticket:tags'] on every event, so an
+// agent reply can reach the phone that started the chat even when there is no
+// verified email — guests, and guests who log in after starting the chat.
+const APP_PUSH_TAG_RE = /^app_push_([0-9a-f]{20,128})$/i;
+function extractPushSubscriptionIdsFromSuncoPayload(payload) {
+  const raw = payload?.conversation?.metadata?.['zen:ticket:tags'];
+  const tags = Array.isArray(raw) ? raw : String(raw || '').split(/[\s,]+/);
+  const ids = [];
+  for (const tag of tags) {
+    const m = APP_PUSH_TAG_RE.exec(String(tag).trim());
+    if (!m || m[1].length % 2 !== 0) continue;
+    const id = Buffer.from(m[1], 'hex').toString('utf8');
+    if (/^[A-Za-z0-9_-]{10,64}$/.test(id) && !ids.includes(id)) ids.push(id);
+  }
+  return ids.slice(0, 3);
+}
+
+// Sunco sends the webhook secret in the X-API-Key header. Learned at boot by
+// ensureSuncoWebhook (or set SUNCO_WEBHOOK_SECRET on Render). Until it is known the
+// handler stays open (and says so in the log) so pushes never silently die.
+let suncoWebhookSecret = process.env.SUNCO_WEBHOOK_SECRET || null;
+let suncoUnverifiedWarned = false;
+function isValidSuncoWebhookRequest(req) {
+  if (!suncoWebhookSecret) {
+    if (!suncoUnverifiedWarned) {
+      console.warn('⚠️ [SUNCO] webhook secret unknown — requests are NOT verified yet');
+      suncoUnverifiedWarned = true;
+    }
+    return true;
+  }
+  const got = Buffer.from(String(req.headers['x-api-key'] || ''));
+  const want = Buffer.from(String(suncoWebhookSecret));
+  return got.length === want.length && require('crypto').timingSafeEqual(got, want);
+}
+
 app.post('/zendesk/webhook/sunco-message', async (req, res) => {
   // Respond 200 fast so Sunco does not retry; process inline (payloads are small).
   try {
+    if (!isValidSuncoWebhookRequest(req)) {
+      console.warn(`🚫 [SUNCO] rejected webhook with wrong/missing X-API-Key from ${req.ip}`);
+      return res.status(401).json({ error: 'unauthorized' });
+    }
     console.log('🌞 [SUNCO] headers:', JSON.stringify({
       'x-api-key': req.headers['x-api-key'] ? '(present)' : undefined,
       'x-smooch-signature': req.headers['x-smooch-signature'] ? '(present)' : undefined,
@@ -21998,21 +22087,32 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
       global._suncoDedup.set(dedupKey, Date.now());
       setTimeout(() => global._suncoDedup.delete(dedupKey), 60000);
 
+      // Two ways to reach the customer, merged and de-duplicated:
+      //  1) the phone that started the chat (app_push_* tag) — works for guests;
+      //  2) every phone registered under the verified email (logged-in chats).
       // Email from the payload first (metadata/author); the API lookup is only a
       // fallback (it returns no participants/userId for these messaging tickets).
+      const deviceSubIds = extractPushSubscriptionIdsFromSuncoPayload(payload);
       let email = resolveEmailFromSuncoPayload(payload);
-      if (!email) email = await resolveSuncoConversationEmail(conversation.id);
-      if (!email) {
-        console.log(`⚠️ [SUNCO] no customer email for conversation ${conversation.id} — cannot push`);
+      if (!email && deviceSubIds.length === 0) email = await resolveSuncoConversationEmail(conversation.id);
+      if (!email && deviceSubIds.length === 0) {
+        console.log(`⚠️ [SUNCO] no customer email and no app_push tag for conversation ${conversation.id} — cannot push`);
+        continue;
+      }
+      const emailSubIds = email ? await getPushSubscriptionIdsForEmail(email) : [];
+      const subIds = [...new Set([...deviceSubIds, ...emailSubIds])];
+      const who = email || `guest conversation ${conversation.id}`;
+      if (subIds.length === 0) {
+        console.log(`⚠️ No push subscription found for ${who}`);
         continue;
       }
 
-      console.log(`🔔 [SUNCO] agent message in conversation ${conversation.id} → ${email}`);
-      await sendCleverPushToEmail(email, title, text, {
+      console.log(`🔔 [SUNCO] agent message in conversation ${conversation.id} → ${who} (${deviceSubIds.length} via chat tag, ${emailSubIds.length} via email)`);
+      await sendCleverPushToSubscriptionIds(subIds, title, text, {
         type: 'zendesk_chat_reply',
         conversationId: String(conversation.id || ''),
         fullMessage: text,
-      });
+      }, who);
     }
 
     return res.status(200).json({ received: true });
