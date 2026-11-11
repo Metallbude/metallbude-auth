@@ -12827,44 +12827,64 @@ app.get('/customer/dashboard', authenticateAppToken, async (req, res) => {
 
 // ===== ACCOUNT DELETION & PRIVACY =====
 
-// POST /customer/delete-account - Request account deletion (GDPR compliance)
-app.post('/customer/delete-account', authenticateAppToken, async (req, res) => {
-  try {
-    const { confirmEmail, reason } = req.body;
+// POST /customer/delete-account — in-app "Konto löschen". Required by Google Play + the App Store for apps with customer accounts.
+// Deletes ONLY the caller's own data: identity comes from the session token,
+// never from the body. The body must carry an explicit confirmation so a
+// stray request can't wipe an account. Logic: services/accountDeletion.js.
+const FIREBASE_STORAGE_BUCKET = 'metallbude-mobile-app.firebasestorage.app';
+const { deleteCustomerAccount, ShopifyUnavailableError } = require('./services/accountDeletion');
 
-    if (confirmEmail !== req.session.email) {
-      return res.status(400).json({ 
-        error: 'Email confirmation does not match' 
-      });
+const shopifyAdminRaw = async (query, variables) => {
+  const r = await axios.post(
+    config.adminApiUrl,
+    { query, variables },
+    {
+      headers: { 'X-Shopify-Access-Token': config.adminToken, 'Content-Type': 'application/json' },
+      timeout: 15000,
     }
+  );
+  return r.data; // { data, errors } — GraphQL errors are inspected by the caller
+};
 
-    // Create deletion request (you'd implement the actual deletion process)
-    const deletionRequest = {
-      customerId: req.session.customerId,
-      email: req.session.email,
-      reason: reason || 'User requested',
-      requestedAt: new Date().toISOString(),
-      status: 'pending',
-      processingDeadline: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() // 30 days
-    };
+app.post('/customer/delete-account', authenticateAppToken, async (req, res) => {
+  const { email, customerId } = req.session;
+  const confirmed =
+    req.body?.confirm === 'DELETE_ACCOUNT' ||
+    (typeof req.body?.confirmEmail === 'string' &&
+      req.body.confirmEmail.trim().toLowerCase() === String(email).trim().toLowerCase());
+  if (!confirmed) {
+    return res.status(400).json({ success: false, error: 'confirmation_required' });
+  }
+  const db = firebaseEnabled && wishlistService ? wishlistService.db : null;
+  let bucket = null;
+  try {
+    if (db) bucket = require('firebase-admin').storage().bucket(FIREBASE_STORAGE_BUCKET);
+  } catch (_) {}
 
-    // In a real implementation, you'd:
-    // 1. Store this request in your database
-    // 2. Send confirmation email
-    // 3. Schedule the actual deletion after the required waiting period
-    // 4. Notify relevant systems
-
-    res.json({
-      success: true,
-      deletionRequest,
-      message: 'Löschungsantrag wurde eingereicht. Sie erhalten eine Bestätigungs-E-Mail mit weiteren Informationen.',
-      processingTime: '30 Tage',
-      cancellationPossible: true
+  try {
+    const report = await deleteCustomerAccount({
+      email,
+      customerId,
+      db,
+      bucket,
+      shopify: config.adminToken ? shopifyAdminRaw : null,
+      sessions,
+      refreshTokens: appRefreshTokens,
+      persistSessions,
+      pushMemoryStore: global._pushSubscriptions,
+      meta: { platform: req.body?.platform, appVersion: req.body?.appVersion },
     });
-
-  } catch (error) {
-    console.error('❌ Account deletion request error:', error);
-    res.status(500).json({ error: 'Failed to process deletion request' });
+    console.log(
+      `🗑️ [DELETE-ACCOUNT] ${customerId} — shopify=${report.shopify.status} steps=${JSON.stringify(report.steps)}`
+    );
+    return res.json({ success: true, shopify: report.shopify.status, steps: report.steps });
+  } catch (e) {
+    if (e instanceof ShopifyUnavailableError) {
+      console.error(`❌ [DELETE-ACCOUNT] Shopify unavailable for ${customerId}: ${e.message}`);
+      return res.status(502).json({ success: false, error: 'shopify_unavailable' });
+    }
+    console.error(`❌ [DELETE-ACCOUNT] ${customerId}: ${e.message}`);
+    return res.status(500).json({ success: false, error: 'deletion_failed' });
   }
 });
 
