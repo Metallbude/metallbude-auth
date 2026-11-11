@@ -22099,8 +22099,11 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
         console.log(`⚠️ [SUNCO] no customer email and no app_push tag for conversation ${conversation.id} — cannot push`);
         continue;
       }
-      const emailSubIds = email ? await getPushSubscriptionIdsForEmail(email) : [];
-      const subIds = [...new Set([...deviceSubIds, ...emailSubIds])];
+      // Email devices are stored oldest → newest; send NEWEST first so the cap
+      // never drops the phone that just (re-)registered. (Bug 2026-11-11: the
+      // chat-tag phone + 5 email phones = 6, the cap of 5 cut the newest one.)
+      const emailSubIds = email ? (await getPushSubscriptionIdsForEmail(email)).slice().reverse() : [];
+      const subIds = [...new Set([...deviceSubIds, ...emailSubIds])].slice(0, 6); // SAFETY cap
       const who = email || `guest conversation ${conversation.id}`;
       if (subIds.length === 0) {
         console.log(`⚠️ No push subscription found for ${who}`);
@@ -22108,11 +22111,24 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
       }
 
       console.log(`🔔 [SUNCO] agent message in conversation ${conversation.id} → ${who} (${deviceSubIds.length} via chat tag, ${emailSubIds.length} via email)`);
-      await sendCleverPushToSubscriptionIds(subIds, title, text, {
+      const customData = {
         type: 'zendesk_chat_reply',
         conversationId: String(conversation.id || ''),
         fullMessage: text,
-      }, who);
+      };
+      if (email) {
+        // Same sender as shipping pushes: prunes subscriptions CleverPush
+        // reports as gone, so dead phones stop occupying the 5 device slots.
+        const r = await sendCleverPushAndPrune(email, subIds, {
+          channelId: config.cleverpushChannelId || '6Bk5KmNkY7fkQ58v3',
+          title,
+          text,
+          customData,
+        }, '[SUNCO]');
+        console.log(`✅ [SUNCO] chat push → ${email}: ${r.successCount}/${r.attemptedCount} sent, ${r.prunedCount} dead pruned`);
+      } else {
+        await sendCleverPushToSubscriptionIds(subIds, title, text, customData, who);
+      }
     }
 
     return res.status(200).json({ received: true });
