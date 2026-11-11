@@ -22075,10 +22075,14 @@ app.post('/zendesk/webhook/sunco-message', async (req, res) => {
       if (!text) { console.log('⏭️ [SUNCO] business message with no text — skip'); continue; }
       const title = 'Metallbude Support'; // brand + context; never the internal agent name
 
-      // Dedup 60s (Sunco can deliver duplicates) on conversation + text.
+      // Dedup 60s (Sunco can redeliver the SAME event). Key on the message id,
+      // not the text: keyed on text, an agent sending the same words twice
+      // within a minute had the second push swallowed (seen in tests
+      // 2026-11-11: two "123123123123" replies skipped as "duplicate").
       const crypto = require('crypto');
+      const dedupBasis = message.id ? `id:${message.id}` : `text:${text}`;
       const dedupKey = crypto.createHash('sha256')
-        .update(`sunco:${conversation.id}:${text}`).digest('hex').substring(0, 16);
+        .update(`sunco:${conversation.id}:${dedupBasis}`).digest('hex').substring(0, 16);
       if (!global._suncoDedup) global._suncoDedup = new Map();
       if (global._suncoDedup.has(dedupKey)) {
         console.log(`⏭️ [SUNCO] duplicate for conversation ${conversation.id}`);
