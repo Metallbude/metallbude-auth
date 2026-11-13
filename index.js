@@ -4777,7 +4777,19 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
           }
         } catch (_) {}
       }
-      lines.push({ variantId: vid, quantity: qty, shBundle });
+      // The line's details as the cart shows them (sku, option values, the
+      // delivery estimate). A normal app checkout carries them onto the
+      // order lines, so the draft does too; `_sh-bundle` travels as shBundle.
+      const attributes = [];
+      if (Array.isArray(l?.attributes)) {
+        for (const a of l.attributes.slice(0, 15)) {
+          const key = typeof a?.key === 'string' ? a.key.trim().slice(0, 64) : '';
+          const value =
+            typeof a?.value === 'string' ? a.value.trim().slice(0, 255) : '';
+          if (key && value && key !== '_sh-bundle') attributes.push({ key, value });
+        }
+      }
+      lines.push({ variantId: vid, quantity: qty, shBundle, attributes });
     }
     if (lines.length === 0)
       return res.status(400).json({ ok: false, error: 'No valid lines.' });
@@ -4833,16 +4845,43 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       adminUrl,
       {
         query:
-          'query($ids:[ID!]!){ nodes(ids:$ids){ ... on ProductVariant { id price product { handle } } } }',
+          'query($ids:[ID!]!){ nodes(ids:$ids){ ... on ProductVariant { id price sku selectedOptions { name value } product { handle } } } }',
         variables: { ids: variantIds },
       },
       { headers },
     );
+    const skuByVariant = new Map();
+    const optionsByVariant = new Map();
     for (const n of or.data?.data?.nodes || []) {
       const amt = Number(n?.price);
       if (n?.id && Number.isFinite(amt)) onlinePrices.set(n.id, amt);
       if (n?.id && n?.product?.handle) handleByVariant.set(n.id, n.product.handle);
+      if (n?.id && n?.sku) skuByVariant.set(n.id, n.sku);
+      if (n?.id) {
+        optionsByVariant.set(
+          n.id,
+          (n.selectedOptions || [])
+            .filter((o) => o?.name && o?.value && o.value !== 'Default Title')
+            .map((o) => ({ key: o.name, value: o.value })),
+        );
+      }
     }
+
+    // What each draft line carries: the cart's own details when the app
+    // sends them. App builds that don't send them still get the variant's
+    // sku and option values; the delivery estimate only the app knows.
+    const draftLineAttributes = (line) => {
+      const out = line.attributes.length
+        ? [...line.attributes]
+        : [
+            ...(skuByVariant.has(line.variantId)
+              ? [{ key: 'sku', value: skuByVariant.get(line.variantId) }]
+              : []),
+            ...(optionsByVariant.get(line.variantId) || []),
+          ];
+      if (line.shBundle) out.push({ key: '_sh-bundle', value: line.shBundle.raw });
+      return out.length ? out : null;
+    };
 
     // A line whose online price can't be resolved makes display-consistent
     // draft pricing impossible (its line discount and the code subtotal
@@ -4990,10 +5029,9 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
         : null;
       const isApp = online != null && app != null && app < online;
       if (isApp) anyAppDiscount = true;
-      // Stamp order lines like the web widget does, for reporting.
-      const attrs = line.shBundle
-        ? [{ key: '_sh-bundle', value: line.shBundle.raw }]
-        : null;
+      // Stamp order lines like a normal checkout does (and `_sh-bundle` like
+      // the web widget, for reporting).
+      const attrs = draftLineAttributes(line);
       const bundleParts = online != null ? bundleUnitsByLine.get(idx) : null;
       let lineDiscount = 0;
       let chargedTotal = 0;
