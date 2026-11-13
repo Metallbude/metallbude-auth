@@ -140,6 +140,9 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 const bundleOffersRoutes = require('./routes/bundleOffers');
 app.use(bundleOffersRoutes);
 
+// Delivery estimate ("Lieferzeit") for app-price draft lines
+const { fetchDeliveryEstimates } = require('./services/deliveryEstimate');
+
 // Shipping rates for the app's checkout preview. The app used to query
 // deliveryProfiles directly with an EMBEDDED Admin token; that token was
 // (rightly) removed for security, which silently broke the preview —
@@ -4777,19 +4780,7 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
           }
         } catch (_) {}
       }
-      // The line's details as the cart shows them (sku, option values, the
-      // delivery estimate). A normal app checkout carries them onto the
-      // order lines, so the draft does too; `_sh-bundle` travels as shBundle.
-      const attributes = [];
-      if (Array.isArray(l?.attributes)) {
-        for (const a of l.attributes.slice(0, 15)) {
-          const key = typeof a?.key === 'string' ? a.key.trim().slice(0, 64) : '';
-          const value =
-            typeof a?.value === 'string' ? a.value.trim().slice(0, 255) : '';
-          if (key && value && key !== '_sh-bundle') attributes.push({ key, value });
-        }
-      }
-      lines.push({ variantId: vid, quantity: qty, shBundle, attributes });
+      lines.push({ variantId: vid, quantity: qty, shBundle });
     }
     if (lines.length === 0)
       return res.status(400).json({ ok: false, error: 'No valid lines.' });
@@ -4841,6 +4832,22 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
     const onlinePrices = new Map();
     const handleByVariant = new Map();
     const variantIds = [...new Set(lines.map((l) => l.variantId))];
+    // The delivery estimate ("Lieferzeit") Shopify's checkout extension
+    // stamps on every normal order can't be added inside a draft checkout,
+    // so the draft gets it here. Fetched alongside the prices; it never
+    // blocks or breaks the checkout (any failure = no estimate).
+    const shipCountry = String(req.body?.shippingAddress?.countryCode || '')
+      .trim()
+      .toUpperCase();
+    const deliveryEstimates = fetchDeliveryEstimates({
+      adminUrl,
+      headers,
+      variantIds,
+      countryCode: /^[A-Z]{2}$/.test(shipCountry) ? shipCountry : 'DE',
+    }).catch((e) => {
+      console.warn('⚠️ [app-checkout] delivery estimate unavailable:', e?.message);
+      return null;
+    });
     const or = await axios.post(
       adminUrl,
       {
@@ -4867,18 +4874,18 @@ app.post('/api/mobile/app-checkout', async (req, res) => {
       }
     }
 
-    // What each draft line carries: the cart's own details when the app
-    // sends them. App builds that don't send them still get the variant's
-    // sku and option values; the delivery estimate only the app knows.
+    const deliveryByVariant = await deliveryEstimates;
+
+    // What each draft line carries: what a normal app order's lines carry
+    // (sku, option values, the delivery estimate), all read from Shopify,
+    // so every app version gets them.
     const draftLineAttributes = (line) => {
-      const out = line.attributes.length
-        ? [...line.attributes]
-        : [
-            ...(skuByVariant.has(line.variantId)
-              ? [{ key: 'sku', value: skuByVariant.get(line.variantId) }]
-              : []),
-            ...(optionsByVariant.get(line.variantId) || []),
-          ];
+      const out = [];
+      const sku = skuByVariant.get(line.variantId);
+      if (sku) out.push({ key: 'sku', value: sku });
+      out.push(...(optionsByVariant.get(line.variantId) || []));
+      const eta = deliveryByVariant?.get(line.variantId);
+      if (eta) out.push(eta);
       if (line.shBundle) out.push({ key: '_sh-bundle', value: line.shBundle.raw });
       return out.length ? out : null;
     };
